@@ -71,6 +71,7 @@ struct NullBuffer
     bool placed = false;
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
+    bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
 struct NullTexture
@@ -80,6 +81,7 @@ struct NullTexture
     bool placed = false;
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
+    bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
 struct NullHeap
@@ -88,11 +90,13 @@ struct NullHeap
     MemoryLocation location = MemoryLocation::DeviceLocal;
     GpuAllocation allocation;
     std::string name;
+    bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
 struct NullAccelStruct
 {
     bool isTlas = false;
+    bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
     BlasDesc blas;
     TlasDesc tlas;
     BindlessIndex srv = kInvalidBindless;
@@ -298,6 +302,7 @@ public:
 
     void DestroyBuffer(BufferHandle handle) override
     {
+        mBuffers.Modify(handle, [](NullBuffer& r) { r.destroyed = true; });
         DeferDelete(
             [this, handle]
             {
@@ -316,6 +321,7 @@ public:
 
     void DestroyTexture(TextureHandle handle) override
     {
+        mTextures.Modify(handle, [](NullTexture& r) { r.destroyed = true; });
         DeferDelete(
             [this, handle]
             {
@@ -384,6 +390,7 @@ public:
 
     void DestroyHeap(HeapHandle handle) override
     {
+        mHeaps.Modify(handle, [](NullHeap& r) { r.destroyed = true; });
         DeferDelete(
             [this, handle]
             {
@@ -494,6 +501,7 @@ public:
     }
     void DestroyAccelStruct(AccelStructHandle handle) override
     {
+        mAccelStructs.Modify(handle, [](NullAccelStruct& r) { r.destroyed = true; });
         DeferDelete(
             [this, handle]
             {
@@ -641,21 +649,41 @@ public:
     {
         std::vector<ResourceInfo> list;
         mBuffers.ForEach(
-            [&](BufferHandle, const NullBuffer& b) {
+            [&](BufferHandle, const NullBuffer& b)
+            {
+                if (b.destroyed)
+                {
+                    return;
+                }
                 list.push_back(
                     {ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory, b.placed});
             });
         mTextures.ForEach(
             [&](TextureHandle, const NullTexture& tex)
             {
+                if (tex.destroyed)
+                {
+                    return;
+                }
                 list.push_back({ResourceInfo::Kind::Texture, tex.desc.debugName, tex.allocation.size,
                                 MemoryLocation::DeviceLocal, tex.placed});
             });
-        mHeaps.ForEach([&](HeapHandle, const NullHeap& h)
-                       { list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.location, false}); });
+        mHeaps.ForEach(
+            [&](HeapHandle, const NullHeap& h)
+            {
+                if (h.destroyed)
+                {
+                    return;
+                }
+                list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.location, false});
+            });
         mAccelStructs.ForEach(
             [&](AccelStructHandle, const NullAccelStruct& as)
             {
+                if (as.destroyed)
+                {
+                    return;
+                }
                 list.push_back({ResourceInfo::Kind::AccelStruct, as.isTlas ? as.tlas.debugName : as.blas.debugName, 0,
                                 MemoryLocation::DeviceLocal, false});
             });

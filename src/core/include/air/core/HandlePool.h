@@ -69,6 +69,21 @@ public:
         return slot && slot->value.has_value() ? &slot->value.value() : nullptr;
     }
 
+    // Calls fn(value) for a live element while holding the pool lock, so that ForEach sees the
+    // change atomically. Returns false for an invalid or stale handle. fn must not call back into
+    // this pool.
+    template <typename Fn> bool Modify(HandleType handle, Fn&& fn)
+    {
+        std::lock_guard lock(mMutex);
+        Slot* slot = Lookup(handle);
+        if (!slot)
+        {
+            return false;
+        }
+        fn(*slot->value);
+        return true;
+    }
+
     // Calls fn(handle, value) for every live element while holding the pool lock: fn must not
     // call back into this pool.
     template <typename Fn> void ForEach(Fn&& fn) const

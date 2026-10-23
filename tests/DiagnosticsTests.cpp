@@ -68,3 +68,27 @@ TEST(Diagnostics_FormatBytes)
     EXPECT(renderer::FormatBytes(1536) == "1.50 KiB");
     EXPECT(renderer::FormatBytes(3ull << 30) == "3.00 GiB");
 }
+
+// Destroyed resources wait for the GPU before they are released; the resource list must hide them
+// immediately, or its length depends on how far the GPU is behind (the editor list flickers).
+TEST(Device_ResourceListHidesResourcesPendingDeletion)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    auto has = [&](std::string_view name)
+    {
+        const std::vector<rhi::ResourceInfo> list = device->GetResourceList();
+        return std::any_of(list.begin(), list.end(), [&](const rhi::ResourceInfo& r) { return r.name == name; });
+    };
+    const rhi::TextureHandle texture = device->CreateTexture({.format = rhi::Format::RGBA16_FLOAT,
+                                                              .width = 16,
+                                                              .height = 16,
+                                                              .usage = rhi::TextureUsage::ShaderResource,
+                                                              .debugName = "Test.Texture"});
+    const rhi::HeapHandle heap = device->CreateHeap(1 << 16, rhi::MemoryLocation::DeviceLocal, "Test.Heap");
+    EXPECT(has("Test.Texture") && has("Test.Heap"));
+    device->DestroyTexture(texture);
+    device->DestroyHeap(heap);
+    EXPECT(!has("Test.Texture") && !has("Test.Heap"));
+    device->WaitIdle();
+    EXPECT(!has("Test.Texture") && !has("Test.Heap"));
+}

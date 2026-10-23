@@ -161,6 +161,7 @@ AccelStructHandle D3D12Device::CreateTlas(const TlasDesc& desc)
 
 void D3D12Device::DestroyAccelStruct(AccelStructHandle handle)
 {
+    mAccelStructs.Modify(handle, [](D3D12AccelStruct& r) { r.destroyed = true; });
     DeferDelete(
         [this, handle]
         {

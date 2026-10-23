@@ -105,6 +105,7 @@ struct D3D12Buffer
     D3D12_GPU_VIRTUAL_ADDRESS address = 0;
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
+    bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
 struct D3D12Texture
@@ -116,6 +117,7 @@ struct D3D12Texture
     BindlessIndex srv = kInvalidBindless;
     std::vector<BindlessIndex> uavs; // per mip
     u32 rtv = ~0u;                   // index in the RTV heap
+    bool destroyed = false;          // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
 struct D3D12Heap
@@ -123,11 +125,13 @@ struct D3D12Heap
     GpuAllocation allocation;
     u64 size = 0;
     std::string name;
+    bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
 struct D3D12AccelStruct
 {
     bool isTlas = false;
+    bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
     BlasDesc blas;
     TlasDesc tlas;
     ComPtr<ID3D12Resource> resource;

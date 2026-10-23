@@ -711,6 +711,7 @@ TextureHandle D3D12Device::RegisterExternalTexture(ComPtr<ID3D12Resource> resour
 
 void D3D12Device::DestroyBuffer(BufferHandle handle)
 {
+    mBuffers.Modify(handle, [](D3D12Buffer& r) { r.destroyed = true; });
     DeferDelete(
         [this, handle]
         {
@@ -729,6 +730,7 @@ void D3D12Device::DestroyBuffer(BufferHandle handle)
 
 void D3D12Device::DestroyTexture(TextureHandle handle)
 {
+    mTextures.Modify(handle, [](D3D12Texture& r) { r.destroyed = true; });
     DeferDelete(
         [this, handle]
         {
@@ -785,6 +787,7 @@ HeapHandle D3D12Device::CreateHeap(u64 size, MemoryLocation location, std::strin
 
 void D3D12Device::DestroyHeap(HeapHandle handle)
 {
+    mHeaps.Modify(handle, [](D3D12Heap& r) { r.destroyed = true; });
     DeferDelete(
         [this, handle]
         {
@@ -1441,20 +1444,39 @@ std::vector<ResourceInfo> D3D12Device::GetResourceList()
     mBuffers.ForEach(
         [&](BufferHandle, const D3D12Buffer& b)
         {
+            if (b.destroyed)
+            {
+                return;
+            }
             list.push_back(
                 {ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory, !b.ownsAllocation});
         });
     mTextures.ForEach(
         [&](TextureHandle, const D3D12Texture& t)
         {
+            if (t.destroyed)
+            {
+                return;
+            }
             list.push_back({ResourceInfo::Kind::Texture, t.desc.debugName, t.allocation.size,
                             MemoryLocation::DeviceLocal, !t.ownsAllocation && t.allocation.IsValid()});
         });
-    mHeaps.ForEach([&](HeapHandle, const D3D12Heap& h)
-                   { list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.allocation.location, false}); });
+    mHeaps.ForEach(
+        [&](HeapHandle, const D3D12Heap& h)
+        {
+            if (h.destroyed)
+            {
+                return;
+            }
+            list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.allocation.location, false});
+        });
     mAccelStructs.ForEach(
         [&](AccelStructHandle, const D3D12AccelStruct& as)
         {
+            if (as.destroyed)
+            {
+                return;
+            }
             list.push_back({ResourceInfo::Kind::AccelStruct, as.isTlas ? as.tlas.debugName : as.blas.debugName,
                             as.allocation.size, MemoryLocation::DeviceLocal, false});
         });
