@@ -1,0 +1,9 @@
+build*/
+out/
+.vs/
+.vscode/
+.idea/
+*.dot
+*.dxil
+*.spv
+compile_commands.json
