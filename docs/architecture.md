@@ -173,24 +173,48 @@ GpuMemoryAllocator           thread-safe; one pool per memoryTypeKey, one mutex 
 - Statistics: `Device::GetMemoryStats()` reports heaps / reserved bytes / used bytes / allocation
   count / dedicated count per memory type.
 
-### 4.3 Transient memory in the render graph (aliasing)
+### 4.3 Transient memory in the render graph (aliasing and reuse)
 
-Temporary resources created inside the render graph do not use the pools above. Instead:
+Temporary resources created inside the render graph do not use the pools above. Memory is reused
+twice: within a frame, by resources whose lifetimes do not overlap, and across frames, by the
+transient pool.
 
-1. at compile time each resource gets a lifetime `[first pass, last pass]`;
-2. resources are packed first-fit in descending size order: resources whose lifetimes do not
-   overlap may share the same memory;
-3. the frame allocates a single placed heap and calls `CreatePlacedTexture/Buffer` inside it.
+**Within a frame** (`AllocateTransientMemory`, after the barriers so the cross-queue waits are
+known):
 
-`RenderGraph::GetStats()` reports `transientHeapSize` (with aliasing) and
-`transientBytesUnaliased` (without). The first barrier of a resource carries a `discard` flag so
-the backend can issue an aliasing barrier / drop old contents.
+1. each resource records its first and last pass on every queue it is used on;
+2. `Precedes(a, b)` holds when every use of `a` happens before every use of `b` on the GPU: on one
+   queue by pass order, across queues when `b`'s first pass starts after a wait that covers `a`'s
+   last batch (`mReach`: per batch, the latest batch of each queue it is ordered after, through
+   chains of waits too);
+3. resources are packed first-fit in descending size order; two may share memory when one
+   precedes the other. A transient of an async compute pass therefore shares memory with
+   graphics transients its waits order it against (e.g. one consumed before the pass's input was
+   produced), and with nothing that may run beside it.
 
-A transient touched by an async compute pass may be in use while any graphics pass runs, so it
-never shares memory: its lifetime counts as the whole frame.
+The first barrier of a resource carries a `discard` flag: the backend issues an aliasing barrier
+and transitions from the barrier's `before` state.
 
-Next: cache transient heaps across frames instead of
-creating one per frame.
+**Across frames** (`rdg::TransientResourcePool`, owned by FrameRunner; `poolTransients = false`
+or `aircli render --no-transient-pool` turns it off):
+
+- a frame's transients go into a pooled heap whose last frame the GPU has finished (its graphics
+  fence passed); the least recently used fitting heap is taken, so with N frames in flight N heaps
+  alternate, each laid out like the frame before it. Heap sizes are rounded up to 16 MiB.
+- a transient described exactly like one placed at the same offset of that heap before reuses the
+  placed resource and its bindless descriptors. The pool remembers the state the frame left it in
+  and the graph patches the next first barrier's `before` to it. A transient first used on the
+  compute queue that a frame would leave in a graphics-only state ends that frame in common
+  (a final barrier), or the compute queue could never take it back.
+- heaps and resources unused for 120 frames are released; FrameRunner calls `Trim()` sooner when
+  the process uses over 95% of its VRAM budget (checked every 120 frames).
+
+In a steady frame nothing is created: `RenderGraph::Stats` reports `transientHeapsCreated`,
+`transientResourcesCreated` and `transientResourcesReused` next to `transientHeapSize` (with
+aliasing) and `transientBytesUnaliased`; FrameResult (and its JSON) adds the pool's totals
+(`transientPool`). Measured on door at 1080p with DLSS (7 transients, D3D12 debug build): 4.7 ms
+per frame on the CPU instead of 5.7 ms, two 48 MiB heaps instead of a 41 MiB heap per frame
+(three alive at a time while the GPU catches up), and no creation after the second frame.
 
 ### 4.4 Deferred release
 
@@ -288,7 +312,8 @@ The graph schedules it in `Compile()`:
    last compute batch (an epilogue batch is added when needed), so the frame's graphics fence and
    imported resources' final states include the compute work. The next frame's graphics passes
    therefore come after this frame's compute work, and its compute passes after the fork.
-6. **Memory**: transients touched by an async pass are not aliased (§4.3).
+6. **Memory**: a transient touched by an async pass shares memory only with transients the waits
+   order it against (§4.3).
 
 `DumpText()` prints the schedule under `Submissions:`, one line per submission, e.g.
 `(0) Graphics: fork`, `(1) Graphics: [0] [1]`, `(2) Compute: [2], waits for (0)`,

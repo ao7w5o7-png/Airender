@@ -64,6 +64,25 @@ TEST(FrameRunner_MultipleFramesKeepStateConsistent)
     }
 }
 
+// FrameRunner keeps transient memory in a pool: after the first frame, frames like it create no heap
+// and no resource, and the reused resources' states stay consistent (no validation errors).
+TEST(FrameRunner_PoolsTransientsAcrossFrames)
+{
+    Headless h({"pathtracer", "example"});
+    for (int i = 0; i < 4; ++i)
+    {
+        const auto result = h.Frame();
+        EXPECT(result.validationErrors.empty());
+        EXPECT(result.graphStats.transientResourceCount > 0);
+        if (i > 0)
+        {
+            EXPECT(result.graphStats.transientHeapsCreated == 0 && result.graphStats.transientResourcesCreated == 0);
+            EXPECT(result.graphStats.transientResourcesReused == result.graphStats.transientResourceCount);
+        }
+        EXPECT(result.transientPool.heaps == 1);
+    }
+}
+
 TEST(FrameRunner_ReleasesAllMemoryOnShutdown)
 {
     auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});

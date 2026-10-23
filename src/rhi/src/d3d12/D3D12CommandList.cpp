@@ -138,14 +138,15 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers)
             AIR_CHECK(texture, "barrier on invalid texture");
             if (barrier.discard)
             {
-                // First use of a (possibly aliased) transient: activate it in the heap. Fresh
-                // placed resources start in COMMON, which is what Access::None maps to.
+                // First use of a (possibly aliased) transient: activate it in the heap. `before` is
+                // its real state: COMMON (Access::None) for a fresh placed resource, where an earlier
+                // frame left one the render graph's transient pool reuses.
                 D3D12_RESOURCE_BARRIER aliasing = {};
                 aliasing.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
                 aliasing.Aliasing.pResourceAfter = texture->resource.Get();
                 native.push_back(aliasing);
             }
-            transition(texture->resource.Get(), barrier.discard ? Access::None : barrier.before, barrier.after);
+            transition(texture->resource.Get(), barrier.before, barrier.after);
             Capture(std::format("Barrier tex '{}' {} -> {}{}", texture->desc.debugName, ToString(barrier.before),
                                 ToString(barrier.after), barrier.discard ? " discard" : ""));
             break;
@@ -165,7 +166,7 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers)
                 aliasing.Aliasing.pResourceAfter = buffer->resource.Get();
                 native.push_back(aliasing);
             }
-            transition(buffer->resource.Get(), barrier.discard ? Access::None : barrier.before, barrier.after);
+            transition(buffer->resource.Get(), barrier.before, barrier.after);
             Capture(std::format("Barrier buf '{}' {} -> {}", buffer->desc.debugName, ToString(barrier.before),
                                 ToString(barrier.after)));
             break;

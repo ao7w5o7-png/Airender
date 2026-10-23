@@ -5,7 +5,7 @@
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
 //                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
-//                   [--no-async-compute] [--html profile.html]   (profile report of the last frame)
+//                   [--no-async-compute] [--no-transient-pool] [--html profile.html]   (report of the last frame)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
@@ -55,7 +55,7 @@ int Usage()
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
                "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
-               "                [--no-validation] [--no-async-compute] [--html profile.html]\n"
+               "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
                "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee]\n"
@@ -371,6 +371,10 @@ int CommandRender(Args& args)
         {
             htmlPath = args.Next();
             desc.profile = true; // the report shows GPU timings
+        }
+        else if (arg == "--no-transient-pool")
+        {
+            desc.poolTransients = false; // a new transient heap and resources every frame
         }
         else if (arg == "--scene")
         {

@@ -981,6 +981,10 @@ function renderMemoryTiles() {
   if (released.length) box.append(tile('Waiting for the GPU', fmtBytes(sum(released, (x) => x.size)), plural(released.length, 'released heap') + ' of frames in flight'));
   const heap = stats.transientHeapBytes || 0;
   box.append(tile('Transient heap', fmtBytes(heap), plural(stats.transientResources || 0, 'resource') + ', ' + fmtBytes(stats.transientBytesUnaliased || 0) + ' unaliased'));
+  const reused = stats.transientResourcesReused || 0, created = stats.transientResourcesCreated || 0;
+  if (reused + created > 0) {
+    box.append(tile('Transients reused', reused + ' of ' + (reused + created), 'placed resources kept from earlier frames; this frame created ' + plural(created, 'resource') + ' and ' + plural(stats.transientHeapsCreated || 0, 'heap')));
+  }
   if (memory.vramBudgetBytes) box.append(tile('VRAM budget', fmtBytes(memory.vramBudgetBytes), fmtBytes(memory.vramUsageBytes || 0) + ' in use by the process'));
 }
 
@@ -1022,7 +1026,7 @@ function drawAliasing() {
     const rect = s('rect', { x: x0, y: y0, width: w, height: hgt, rx: 3, class: 'alloc k-' + kind + (touched.has(r.index) ? ' sel' : '') });
     hover(rect, () => [h('div', { class: 'tt', text: r.name }), tipRow(fmtBytes(r.size), 'size'), tipRow(hex(r.heapOffset) + ' – ' + hex(r.heapOffset + r.size), 'offset'),
       tipRow('[' + r.firstPass + '] → [' + r.lastPass + ']', 'lifetime: ' + passName(r.firstPass) + ' → ' + passName(r.lastPass)),
-      r.async ? h('div', { class: 'x', text: 'Used by an async compute pass: never shares memory.' }) : null]);
+      r.async ? h('div', { class: 'x', text: 'Used by an async compute pass: shares memory only with transients the cross-queue waits order it against.' }) : null]);
     svgEl.append(rect);
     if (w > 60 && hgt >= 14) {
       const chars = Math.floor((w - 8) / 6.4);
@@ -1035,8 +1039,8 @@ function drawAliasing() {
 function renderAliasExtras() {
   clear('alias-legend', 'alias-table');
   const legend = $('alias-legend');
-  if (transients.some((r) => !r.async)) legend.append(h('span', {}, h('span', { class: 'swatch bg-rt' }), 'Graphics queue only (may alias)'));
-  if (transients.some((r) => r.async)) legend.append(h('span', {}, h('span', { class: 'swatch bg-compute' }), 'Used by async compute (never aliased)'));
+  if (transients.some((r) => !r.async)) legend.append(h('span', {}, h('span', { class: 'swatch bg-rt' }), 'Graphics queue only'));
+  if (transients.some((r) => r.async)) legend.append(h('span', {}, h('span', { class: 'swatch bg-compute' }), 'Used by async compute (aliases only across waits)'));
   const rows = [...transients].sort((a, b) => a.heapOffset - b.heapOffset || a.firstPass - b.firstPass);
   $('alias-table').append(h('table', {},
     h('thead', {}, h('tr', {}, h('th', { text: 'Resource' }), h('th', { class: 'num', text: 'Offset' }), h('th', { class: 'num', text: 'Size' }), h('th', { text: 'Lifetime' }), h('th', { text: 'Async' }))),

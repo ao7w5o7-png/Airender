@@ -39,6 +39,15 @@ json::Value FrameResult::ToJson() const
     out["transientResources"] = graphStats.transientResourceCount;
     out["transientHeapBytes"] = graphStats.transientHeapSize;
     out["transientBytesUnaliased"] = graphStats.transientBytesUnaliased;
+    out["transientHeapsCreated"] = graphStats.transientHeapsCreated;
+    out["transientResourcesCreated"] = graphStats.transientResourcesCreated;
+    out["transientResourcesReused"] = graphStats.transientResourcesReused;
+    json::Value& pool = out["transientPool"];
+    pool["heaps"] = transientPool.heaps;
+    pool["heapBytes"] = transientPool.heapBytes;
+    pool["resources"] = transientPool.resources;
+    pool["heapsReleased"] = transientPool.heapsReleased;
+    pool["resourcesReleased"] = transientPool.resourcesReleased;
     json::Value errors = json::Value::MakeArray();
     for (const std::string& e : validationErrors)
     {
@@ -63,9 +72,18 @@ json::Value FrameResult::ToJson() const
     return out;
 }
 
+namespace
+{
+constexpr u64 kBudgetCheckFrames = 120; // frames between VRAM budget checks (QueryVideoMemoryInfo)
+}
+
 FrameRunner::FrameRunner(rhi::Device& device, TaskSystem& tasks, FrameRunnerDesc desc)
     : mDevice(device), mTasks(tasks), mDesc(std::move(desc))
 {
+    if (mDesc.poolTransients)
+    {
+        mTransientPool = std::make_unique<rdg::TransientResourcePool>(mDevice);
+    }
     mOutput = mDevice.CreateTexture(
         {.format = mDesc.outputFormat,
          .width = mDesc.width,
@@ -182,7 +200,7 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
 
     mDevice.BeginFrame();
     {
-        rdg::RenderGraph graph(mDevice, &mTasks, mDesc.graphConfig);
+        rdg::RenderGraph graph(mDevice, &mTasks, mDesc.graphConfig, mTransientPool.get());
         const rhi::Access finalAccess = rhi::Access::SRVCompute;
         rdg::TextureRef output = graph.ImportTexture(mOutput, mOutputAccess, finalAccess);
         mOutputAccess = finalAccess;
@@ -229,6 +247,10 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
         graph.Execute();
 
         result.graphStats = graph.GetStats();
+        if (mTransientPool)
+        {
+            result.transientPool = mTransientPool->GetStats();
+        }
         if (mDesc.profile)
         {
             result.passCpu = graph.GetPassTimings();
@@ -267,6 +289,16 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
     }
     mDevice.EndFrame();
     ++mFrameIndex;
+    // Near the VRAM budget, idle transient memory goes now rather than after the pool's retire delay.
+    if (mTransientPool && mFrameIndex % kBudgetCheckFrames == 0)
+    {
+        const rhi::MemoryBudget vram = mDevice.GetMemoryStats().local;
+        if (vram.budgetBytes > 0 && vram.usageBytes > vram.budgetBytes / 100 * 95)
+        {
+            mTransientPool->Trim(mDevice.GetFramesInFlight() + 1);
+            result.transientPool = mTransientPool->GetStats();
+        }
+    }
     if (mDesc.profile)
     {
         result.gpu = mDevice.GetGpuTimings();

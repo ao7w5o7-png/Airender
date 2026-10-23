@@ -1,5 +1,7 @@
 #include "air/rdg/RenderGraph.h"
 
+#include "air/rdg/TransientResourcePool.h"
+
 #include "air/core/Assert.h"
 #include "air/core/Log.h"
 #include "air/core/Profiler.h"
@@ -96,8 +98,8 @@ rhi::BufferHandle PassContext::Get(BufferRef buffer) const
 // RenderGraph: building
 // ===========================================================================
 
-RenderGraph::RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config)
-    : mDevice(device), mTasks(tasks), mConfig(config), mOwnerThread(std::this_thread::get_id())
+RenderGraph::RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config, TransientResourcePool* pool)
+    : mDevice(device), mTasks(tasks), mConfig(config), mOwnerThread(std::this_thread::get_id()), mPool(pool)
 {
     mConfig.passesPerCommandList = std::max(1u, mConfig.passesPerCommandList);
 }
@@ -292,8 +294,9 @@ void RenderGraph::Compile()
     CullPasses();
     BuildBatches();
     ComputeLifetimes();
+    BuildBarriers(); // the cross-queue waits order uses, which decides what may share memory
+    ComputeReach();
     AllocateTransientMemory();
-    BuildBarriers();
 }
 
 void RenderGraph::CullPasses()
@@ -363,24 +366,92 @@ void RenderGraph::ComputeLifetimes()
 {
     for (u32 p : mLivePasses)
     {
+        const size_t queue = size_t(mPasses[p].queue);
         for (const ResourceAccess& a : mPasses[p].accesses)
         {
             Resource& r = mResources[a.resource];
             r.used = true;
             r.firstPass = std::min(r.firstPass, p);
             r.lastPass = std::max(r.lastPass, p);
+            r.firstUse[queue] = std::min(r.firstUse[queue], p);
+            r.lastUse[queue] = r.lastUse[queue] == ~0u ? p : std::max(r.lastUse[queue], p);
             r.asyncUse = r.asyncUse || mPasses[p].queue != rhi::QueueType::Graphics;
         }
     }
+}
+
+void RenderGraph::ComputeReach()
+{
+    constexpr u32 kNone = ~0u;
+    auto merge = [](std::array<u32, size_t(rhi::QueueType::Count)>& into,
+                    const std::array<u32, size_t(rhi::QueueType::Count)>& from)
+    {
+        for (size_t q = 0; q < into.size(); ++q)
+        {
+            if (from[q] != kNone && (into[q] == kNone || from[q] > into[q]))
+            {
+                into[q] = from[q];
+            }
+        }
+    };
+    mReach.assign(mBatches.size(), {kNone, kNone, kNone});
+    std::array<u32, size_t(rhi::QueueType::Count)> previous = {kNone, kNone, kNone}; // last batch of each queue
+    for (u32 b = 0; b < mBatches.size(); ++b)
+    {
+        const Batch& batch = mBatches[b];
+        const size_t queue = size_t(batch.queue);
+        if (previous[queue] != kNone)
+        {
+            merge(mReach[b], mReach[previous[queue]]); // a queue runs its batches in order
+        }
+        for (const u32 wait : batch.waitFor)
+        {
+            if (wait != kNone && mBatches[wait].IsSubmitted())
+            {
+                merge(mReach[b], mReach[wait]);
+            }
+        }
+        mReach[b][queue] = b;
+        previous[queue] = b;
+    }
+}
+
+bool RenderGraph::Precedes(u32 a, u32 b) const
+{
+    const Resource& x = mResources[a];
+    const Resource& y = mResources[b];
+    for (size_t qx = 0; qx < size_t(rhi::QueueType::Count); ++qx)
+    {
+        if (x.lastUse[qx] == ~0u)
+        {
+            continue;
+        }
+        const u32 lastBatch = mPasses[x.lastUse[qx]].batch;
+        for (size_t qy = 0; qy < size_t(rhi::QueueType::Count); ++qy)
+        {
+            if (y.firstUse[qy] == ~0u)
+            {
+                continue;
+            }
+            // One queue runs its passes in order; across queues, y's first pass must start after a
+            // wait that covers x's last batch on that queue.
+            const u32 reached = mReach[mPasses[y.firstUse[qy]].batch][qx];
+            const bool ordered = qx == qy ? x.lastUse[qx] < y.firstUse[qy] : reached != ~0u && reached >= lastBatch;
+            if (!ordered)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 void RenderGraph::AllocateTransientMemory()
 {
     struct Placed
     {
-        u32 first, last;
+        u32 resource;
         u64 begin, end;
-        bool async;
     };
     std::vector<u32> order;
     for (u32 i = 0; i < mResources.size(); ++i)
@@ -415,9 +486,9 @@ void RenderGraph::AllocateTransientMemory()
                 moved = false;
                 for (const Placed& p : placed)
                 {
-                    // Declaration order says nothing about when a compute-queue pass runs relative to
-                    // graphics passes, so anything touched by one overlaps everything.
-                    const bool timeOverlap = r.asyncUse || p.async || (p.first <= r.lastPass && r.firstPass <= p.last);
+                    // Sharing memory needs every use of one to end before any use of the other
+                    // starts: pass order on one queue, the cross-queue waits between queues.
+                    const bool timeOverlap = !Precedes(p.resource, index) && !Precedes(index, p.resource);
                     const bool memOverlap = p.begin < offset + r.allocation.size && offset < p.end;
                     if (timeOverlap && memOverlap)
                     {
@@ -432,7 +503,7 @@ void RenderGraph::AllocateTransientMemory()
             offset = AlignUp(heapSize, r.allocation.alignment);
         }
         r.heapOffset = offset;
-        placed.push_back({r.firstPass, r.lastPass, offset, offset + r.allocation.size, r.asyncUse});
+        placed.push_back({index, offset, offset + r.allocation.size});
         heapSize = std::max(heapSize, offset + r.allocation.size);
     }
     mStats.transientHeapSize = heapSize;
@@ -521,6 +592,10 @@ void RenderGraph::BuildBarriers()
         }
         mStats.barrierCount += u32(pass.barriersBefore.size());
     }
+    for (u32 i = 0; i < mResources.size(); ++i)
+    {
+        mResources[i].lastAccess = state[i]; // the state a pooled transient's resource is left in
+    }
 
     // The compute queue starts the frame at the graphics prologue (the fork). Without it, a compute
     // batch with no graphics input runs as soon as it is submitted, while the graphics queue may still
@@ -563,6 +638,21 @@ void RenderGraph::BuildBarriers()
         if (exported && state[i] != r.finalAccess)
         {
             add(mFinalBarriers, mFinalBarrierResources, MakeBarrier(r, state[i], r.finalAccess, false), i);
+        }
+    }
+    // A pooled transient comes back next frame, first used on the same queue. When that queue cannot
+    // leave the state this frame ends in (compute after a pixel-shader read), end in common instead,
+    // or the pool could never hand the resource back.
+    if (mPool)
+    {
+        for (u32 i = 0; i < mResources.size(); ++i)
+        {
+            Resource& r = mResources[i];
+            if (r.used && r.IsTransient() && !IsAccessLegalOnQueue(state[i], mPasses[r.firstPass].queue))
+            {
+                add(mFinalBarriers, mFinalBarrierResources, MakeBarrier(r, state[i], Access::None, false), i);
+                r.lastAccess = Access::None;
+            }
         }
     }
     mStats.barrierCount += u32(mFinalBarriers.size());
@@ -611,12 +701,24 @@ u64 RenderGraph::Execute()
     Compile();
     mExecuted = true;
 
-    // 1. Memory: one placed heap for all transient resources, committed memory for extracted ones.
+    // 1. Memory: one placed heap for all transient resources (pooled across frames with a
+    //    TransientResourcePool), committed memory for extracted ones.
     if (mStats.transientHeapSize > 0)
     {
-        mTransientHeap =
-            mDevice.CreateHeap(mStats.transientHeapSize, rhi::MemoryLocation::DeviceLocal, "RDG Transient");
-        AIR_CHECK(mTransientHeap.IsValid(), "failed to allocate {} byte transient heap", mStats.transientHeapSize);
+        if (mPool)
+        {
+            bool created = false;
+            mPoolSlot = mPool->AcquireHeap(mStats.transientHeapSize, &created);
+            mTransientHeap = mPool->GetHeap(mPoolSlot);
+            mStats.transientHeapsCreated += created ? 1u : 0u;
+        }
+        else
+        {
+            mTransientHeap =
+                mDevice.CreateHeap(mStats.transientHeapSize, rhi::MemoryLocation::DeviceLocal, "RDG Transient");
+            AIR_CHECK(mTransientHeap.IsValid(), "failed to allocate {} byte transient heap", mStats.transientHeapSize);
+            ++mStats.transientHeapsCreated;
+        }
     }
     for (Resource& r : mResources)
     {
@@ -624,27 +726,60 @@ u64 RenderGraph::Execute()
         {
             continue;
         }
-        if (r.kind == ResourceKind::Texture)
+        if (r.extracted)
         {
-            r.texture = r.extracted ? mDevice.CreateTexture(r.textureDesc)
-                                    : mDevice.CreatePlacedTexture(r.textureDesc, mTransientHeap, r.heapOffset);
-            AIR_CHECK(r.texture.IsValid(), "failed to create texture '{}'", r.name);
+            if (r.kind == ResourceKind::Texture)
+            {
+                r.texture = mDevice.CreateTexture(r.textureDesc);
+            }
+            else
+            {
+                r.buffer = mDevice.CreateBuffer(r.bufferDesc);
+            }
+        }
+        else if (mPool)
+        {
+            const rhi::QueueType firstQueue = mPasses[r.firstPass].queue;
+            const TransientResourcePool::Placement placement =
+                r.kind == ResourceKind::Texture
+                    ? mPool->AcquireTexture(mPoolSlot, r.heapOffset, r.textureDesc, firstQueue)
+                    : mPool->AcquireBuffer(mPoolSlot, r.heapOffset, r.bufferDesc, firstQueue);
+            r.texture = placement.texture;
+            r.buffer = placement.buffer;
+            r.currentAccess = placement.state;
+            r.poolEntry = placement.entry;
+            ++(placement.reused ? mStats.transientResourcesReused : mStats.transientResourcesCreated);
         }
         else
         {
-            r.buffer = r.extracted ? mDevice.CreateBuffer(r.bufferDesc)
-                                   : mDevice.CreatePlacedBuffer(r.bufferDesc, mTransientHeap, r.heapOffset);
-            AIR_CHECK(r.buffer.IsValid(), "failed to create buffer '{}'", r.name);
+            if (r.kind == ResourceKind::Texture)
+            {
+                r.texture = mDevice.CreatePlacedTexture(r.textureDesc, mTransientHeap, r.heapOffset);
+            }
+            else
+            {
+                r.buffer = mDevice.CreatePlacedBuffer(r.bufferDesc, mTransientHeap, r.heapOffset);
+            }
+            ++mStats.transientResourcesCreated;
         }
+        AIR_CHECK(r.kind == ResourceKind::Texture ? r.texture.IsValid() : r.buffer.IsValid(),
+                  "failed to create resource '{}'", r.name);
     }
 
-    // 2. Resolve barrier resource ids to RHI handles.
+    // 2. Resolve barrier resource ids to RHI handles. A transient's first barrier (discard) starts
+    //    from the state its resource is really in: none for a new one, where an earlier frame left
+    //    a pooled one.
     auto resolve = [&](std::vector<Barrier>& barriers, const std::vector<u32>& resources)
     {
         for (size_t i = 0; i < barriers.size(); ++i)
         {
-            barriers[i].texture = mResources[resources[i]].texture;
-            barriers[i].buffer = mResources[resources[i]].buffer;
+            const Resource& r = mResources[resources[i]];
+            barriers[i].texture = r.texture;
+            barriers[i].buffer = r.buffer;
+            if (barriers[i].discard)
+            {
+                barriers[i].before = r.currentAccess;
+            }
         }
     };
     for (u32 p : mLivePasses)
@@ -773,7 +908,11 @@ u64 RenderGraph::Execute()
         {
             continue;
         }
-        if (r.kind == ResourceKind::Texture)
+        if (mPool)
+        {
+            mPool->SetFinalState(mPoolSlot, r.poolEntry, r.lastAccess); // the pool keeps it
+        }
+        else if (r.kind == ResourceKind::Texture)
         {
             mDevice.DestroyTexture(r.texture);
         }
@@ -782,7 +921,11 @@ u64 RenderGraph::Execute()
             mDevice.DestroyBuffer(r.buffer);
         }
     }
-    if (mTransientHeap.IsValid())
+    if (mPool)
+    {
+        mPool->EndFrame(mPoolSlot, fence); // the frame's GPU work ends with its last graphics submission
+    }
+    else if (mTransientHeap.IsValid())
     {
         mDevice.DestroyHeap(mTransientHeap);
     }
@@ -900,6 +1043,9 @@ json::Value RenderGraph::DumpJson() const
     stats["asyncComputePasses"] = mStats.asyncComputePassCount;
     stats["submissions"] = mStats.submissionCount;
     stats["queueWaits"] = mStats.queueWaitCount;
+    stats["transientHeapsCreated"] = mStats.transientHeapsCreated;
+    stats["transientResourcesCreated"] = mStats.transientResourcesCreated;
+    stats["transientResourcesReused"] = mStats.transientResourcesReused;
 
     json::Value passes = json::Value::MakeArray();
     for (u32 p = 0; p < mPasses.size(); ++p)

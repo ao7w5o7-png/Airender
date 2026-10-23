@@ -1091,6 +1091,15 @@ void EditorApp::BuildDebugPanel()
         ImGui::SameLine();
         ImGui::TextDisabled("%u async passes, %u submissions, %u queue waits", stats.asyncComputePassCount,
                             stats.submissionCount, stats.queueWaitCount);
+        const auto& pool = mLastResult.transientPool;
+        ImGui::Text("Transients: %u in %s (%s unaliased); pool %u heaps, %s, %u resources",
+                    stats.transientResourceCount, renderer::FormatBytes(stats.transientHeapSize).c_str(),
+                    renderer::FormatBytes(stats.transientBytesUnaliased).c_str(), pool.heaps,
+                    renderer::FormatBytes(pool.heapBytes).c_str(), pool.resources);
+        ImGui::SetItemTooltip("Transient memory comes from a pool kept across frames: this frame created %u heaps and "
+                              "%u resources and reused %u resources of earlier frames.",
+                              stats.transientHeapsCreated, stats.transientResourcesCreated,
+                              stats.transientResourcesReused);
     }
     ImGui::Text("Validation errors this frame: %zu", mLastResult.validationErrors.size());
     ImGui::End();
