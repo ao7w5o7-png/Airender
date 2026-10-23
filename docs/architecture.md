@@ -327,8 +327,22 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   is instance i's first entry or `kInvalidIndex`; the integrator looks up a hit emitter's entry
   (for its MIS light pdf) as `instanceLights[instance] + primitive`. Making a material emissive in
   the editor rebuilds both in the next ring slot.
-- Built-in scenes (`MakeBuiltinScene`): `cornell_box` and `furnace` (spheres of roughness 0..1 in a
-  uniform environment, used to verify energy conservation).
+- Built-in scenes (`MakeBuiltinScene`, `--scene NAME`, the editor's scene list), all procedural and
+  deterministic (fixed-seed PCG, no assets):
+
+  | Scene | Content | What it tests |
+  |---|---|---|
+  | `cornell_box` | the 2 m box, 3000 nit panel, tall box, gold sphere | default; GPU vs CPU reference |
+  | `furnace` | spheres of roughness 0..1 in a uniform environment | energy conservation (`furnace=1`) |
+  | `veach_mis` | 4 glossy plates, 4 spherical lights of equal power, r = 3 cm..90 cm | MIS: NEE and BSDF sampling each fail somewhere |
+  | `material_grid` | white / red / gold spheres, roughness 0..1, one area light | BSDF appearance |
+  | `sphere_field` | ~2400 instances of 2 meshes, 32 materials, sun (1.6e9 nits) + sky | TLAS scale, dynamic range, light imbalance |
+  | `many_lights` | hall with 66 panels + 300 LEDs, radiance over 2 orders of magnitude | light selection (baseline for many-light sampling) |
+  | `door` | light reaches the camera's room only through a door left ajar | indirect-dominated transport |
+  | `terrain` | 2.1M triangle height field, lake, sun + sky | dense geometry, BLAS build and memory |
+
+  The sun is a disc 10 km away with the real angular radius (0.2665 degrees) and luminance, so
+  daylight scenes use daylight exposure (EV100 14..15).
 
 ### 8.2 Integrator
 

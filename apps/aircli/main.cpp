@@ -5,8 +5,9 @@
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
 //                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]
-//                   [--scene cornell_box|furnace] [--output image.pfm|image.ppm]
+//                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //   aircli features                         list available features and their parameters (JSON)
+//   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee]
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
@@ -52,10 +53,10 @@ int Usage()
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
                "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
-               "                [--scene cornell_box|furnace] [--output image.pfm|image.ppm]\n"
+               "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee]\n"
-               "  aircli features\n"
+               "  aircli features | scenes\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
                stderr);
     return kExitUsage;
@@ -112,6 +113,36 @@ int CommandFeatures()
         item["name"] = info.name;
         item["description"] = info.description;
         item["parameters"] = info.create()->Parameters().ToJson();
+        out.Push(std::move(item));
+    }
+    std::puts(out.Dump().c_str());
+    return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
+// scenes
+// ---------------------------------------------------------------------------
+int CommandScenes()
+{
+    json::Value out = json::Value::MakeArray();
+    for (const std::string& name : renderer::BuiltinSceneNames())
+    {
+        const renderer::SceneDesc desc = *renderer::MakeBuiltinScene(name);
+        u64 triangles = 0;
+        u32 emissive = 0;
+        for (const renderer::Instance& instance : desc.instances)
+        {
+            triangles += desc.meshes[instance.mesh].indices.size() / 3;
+            emissive += desc.materials[instance.material].emissionNits > 0.0f ? 1u : 0u;
+        }
+        json::Value item = json::Value::MakeObject();
+        item["name"] = name;
+        item["instances"] = u64(desc.instances.size());
+        item["meshes"] = u64(desc.meshes.size());
+        item["materials"] = u64(desc.materials.size());
+        item["triangles"] = triangles;
+        item["emissiveInstances"] = emissive;
+        item["ev100"] = desc.camera.ev100;
         out.Push(std::move(item));
     }
     std::puts(out.Dump().c_str());
@@ -528,6 +559,10 @@ int main(int argc, char** argv)
     if (command == "features")
     {
         return CommandFeatures();
+    }
+    if (command == "scenes")
+    {
+        return CommandScenes();
     }
     if (command == "reference")
     {

@@ -143,3 +143,39 @@ TEST(Integrator_WhiteFurnaceSpheresMatchEnvironment)
     const Image image = pt::RenderReference(scene, scene.camera, settings);
     EXPECT(Near(MeanLuminance(image), 0.18, 0.01, "furnace mean"));
 }
+
+// Veach's MIS scene: lights from 3 cm to 90 cm reflected by smooth to rough plates. NEE with MIS
+// and pure BSDF sampling are both unbiased, so they must agree on the plates, where each alone
+// fails somewhere; this checks the MIS weights on glossy metal and spherical lights. Only the
+// plate rows are averaged: the lights themselves are directly visible and identical in both.
+// BSDF-only is heavy-tailed here (rarely hits the 3 cm light), so at 128 spp the two differ by about
+// 2%; the tolerance catches weight errors, which bias by far more. At 32768 spp on the GPU they
+// agree to 0.1%.
+TEST(Integrator_VeachMisNeeAndBsdfSamplingAgree)
+{
+    TaskSystem tasks(4);
+    const renderer::SceneDesc scene = *renderer::MakeBuiltinScene("veach_mis");
+    pt::ReferenceSettings settings = Settings(tasks, 128, 4);
+    settings.width = 48;
+    settings.height = 27;
+    auto plates = [](const Image& image)
+    {
+        double sum = 0.0;
+        u32 count = 0;
+        for (u32 y = image.height * 2 / 5; y < image.height * 9 / 10; ++y)
+        {
+            for (u32 x = 0; x < image.width; ++x)
+            {
+                const float* p = image.At(x, y);
+                sum += 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+                ++count;
+            }
+        }
+        return sum / count;
+    };
+    const double withNee = plates(pt::RenderReference(scene, scene.camera, settings));
+    settings.nextEventEstimation = false;
+    const double bsdfOnly = plates(pt::RenderReference(scene, scene.camera, settings));
+    EXPECT(withNee > 0.0);
+    EXPECT(Near(withNee, bsdfOnly, 0.08, "veach_mis plates, NEE vs BSDF-only"));
+}

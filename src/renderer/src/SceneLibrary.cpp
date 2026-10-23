@@ -2,6 +2,9 @@
 
 #include "air/renderer/Scene.h"
 
+#include "SceneBuilders.h"
+
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <numbers>
@@ -140,7 +143,7 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians, floa
     std::copy(&rows[0][0], &rows[0][0] + 12, &instance.transform[0][0]);
 }
 
-namespace
+namespace detail
 {
 
 u32 AddMaterial(SceneDesc& scene, Material material)
@@ -165,7 +168,67 @@ Instance& AddInstance(SceneDesc& scene, std::string name, u32 mesh, u32 material
     return scene.instances.back();
 }
 
-} // namespace
+void SetBasis(Instance& instance, float3 x, float3 y, float3 z, float3 translation)
+{
+    const float rows[3][4] = {
+        {x.x, y.x, z.x, translation.x},
+        {x.y, y.y, z.y, translation.y},
+        {x.z, y.z, z.z, translation.z},
+    };
+    std::copy(&rows[0][0], &rows[0][0] + 12, &instance.transform[0][0]);
+}
+
+void LookAt(Camera& camera, float3 eye, float3 target)
+{
+    const float3 d = normalize(target - eye);
+    camera.position = eye;
+    camera.yaw = std::atan2(-d.x, -d.z);
+    camera.pitch = std::asin(std::clamp(d.y, -1.0f, 1.0f));
+}
+
+Mesh MakeDisc(std::string name, float3 center, float3 normal, float radius, u32 segments)
+{
+    Mesh mesh;
+    mesh.name = std::move(name);
+    const float3 n = normalize(normal);
+    // Any tangent frame; the fan is wound so that cross(e1, e2) points along `normal`.
+    const float3 helper = std::abs(n.y) < 0.9f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    const float3 t = normalize(cross(helper, n));
+    const float3 b = cross(n, t);
+    mesh.vertices.push_back({center, 0.5f, n, 0.5f});
+    for (u32 i = 0; i < segments; ++i)
+    {
+        const float a = 2.0f * std::numbers::pi_v<float> * float(i) / float(segments);
+        const float3 p = center + (t * std::cos(a) + b * std::sin(a)) * radius;
+        mesh.vertices.push_back({p, 0.5f + 0.5f * std::cos(a), n, 0.5f + 0.5f * std::sin(a)});
+    }
+    for (u32 i = 0; i < segments; ++i)
+    {
+        const u32 a = 1 + i;
+        const u32 c = 1 + (i + 1) % segments;
+        if (dot(cross(mesh.vertices[a].position - center, mesh.vertices[c].position - center), n) >= 0.0f)
+        {
+            mesh.indices.insert(mesh.indices.end(), {0u, a, c});
+        }
+        else
+        {
+            mesh.indices.insert(mesh.indices.end(), {0u, c, a});
+        }
+    }
+    return mesh;
+}
+
+float3 Hue(float h)
+{
+    const float r = std::clamp(std::abs(h * 6.0f - 3.0f) - 1.0f, 0.0f, 1.0f);
+    const float g = std::clamp(2.0f - std::abs(h * 6.0f - 2.0f), 0.0f, 1.0f);
+    const float b = std::clamp(2.0f - std::abs(h * 6.0f - 4.0f), 0.0f, 1.0f);
+    return {r, g, b};
+}
+
+} // namespace detail
+
+using namespace detail;
 
 // A 2 m Cornell box (x, z in [-1, 1], y in [0, 2], open towards +z) lit by a 3000 nit ceiling
 // panel, with a diffuse tall box and a rough gold sphere. Reflectances are those of the
@@ -241,20 +304,46 @@ SceneDesc MakeFurnaceScene()
     return scene;
 }
 
+namespace
+{
+
+struct BuiltinScene
+{
+    const char* name;
+    SceneDesc (*make)();
+};
+
+constexpr BuiltinScene kBuiltinScenes[] = {
+    {"cornell_box", MakeCornellBox},
+    {"furnace", MakeFurnaceScene},
+    {"veach_mis", detail::MakeVeachMis},
+    {"material_grid", detail::MakeMaterialGrid},
+    {"sphere_field", detail::MakeSphereField},
+    {"many_lights", detail::MakeManyLights},
+    {"door", detail::MakeDoor},
+    {"terrain", detail::MakeTerrain},
+};
+
+} // namespace
+
 std::vector<std::string> BuiltinSceneNames()
 {
-    return {"cornell_box", "furnace"};
+    std::vector<std::string> names;
+    for (const BuiltinScene& scene : kBuiltinScenes)
+    {
+        names.emplace_back(scene.name);
+    }
+    return names;
 }
 
 std::optional<SceneDesc> MakeBuiltinScene(std::string_view name)
 {
-    if (name == "cornell_box")
+    for (const BuiltinScene& scene : kBuiltinScenes)
     {
-        return MakeCornellBox();
-    }
-    if (name == "furnace")
-    {
-        return MakeFurnaceScene();
+        if (name == scene.name)
+        {
+            return scene.make();
+        }
     }
     return std::nullopt;
 }

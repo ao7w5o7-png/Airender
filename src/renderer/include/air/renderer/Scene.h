@@ -86,8 +86,19 @@ Mesh MakeBox(std::string name, float3 halfExtent); // centred at the origin, out
 Mesh MakeSphere(std::string name, float radius, u32 segments);
 void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0f, float scale = 1.0f);
 
-// Built-in scenes: "cornell_box" (default) and "furnace" (spheres of increasing roughness in a
-// uniform white environment: with energy-conserving white materials they become invisible).
+// Built-in scenes (all procedural and deterministic, so their images match across platforms):
+//   cornell_box    the default: a 2 m box with a ceiling light, a tall box and a gold sphere
+//   furnace        spheres of increasing roughness in a uniform environment: with
+//                  energy-conserving white materials they become invisible
+//   veach_mis      4 glossy plates reflecting 4 spherical lights of equal power and very different
+//                  sizes (Veach's MIS test): NEE and BSDF sampling each fail somewhere
+//   material_grid  roughness x material grid of spheres under one area light
+//   sphere_field   ~2400 instanced spheres and boxes, 32 materials, sun (1.6e9 nits) + sky,
+//                  emissive spheres: TLAS scale, material variety, extreme dynamic range
+//   many_lights    a hall lit by ~370 lights spanning two orders of magnitude: light selection
+//   door           light reaches the camera's room only through a door left ajar: indirect-
+//                  dominated transport, hard for unidirectional path tracing
+//   terrain        a 2.1M triangle height field with a lake, sun and sky: dense geometry
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 std::vector<std::string> BuiltinSceneNames();
