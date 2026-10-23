@@ -6,6 +6,7 @@
 
 #include "air/renderer/Scene.h"
 #include "air/renderer/Sky.h"
+#include "air/renderer/TextureSampling.h"
 #include "air/renderer/shader/SkyShared.h"
 
 #include <chrono>
@@ -29,6 +30,16 @@ struct SkyReader
     {
         return float3(table.radiance[size_t(texel) * 3], table.radiance[size_t(texel) * 3 + 1],
                       table.radiance[size_t(texel) * 3 + 2]);
+    }
+    float4 AerialInscatterSample(SkyData s, float3 uvw) const
+    {
+        return renderer::SampleTexture3DClamped(table.aerialInscatter.data(), table.aerialWidth, table.aerialHeight,
+                                                s.aerialSlices, uvw.x, uvw.y, uvw.z);
+    }
+    float4 AerialTransmittanceSample(SkyData s, float3 uvw) const
+    {
+        return renderer::SampleTexture3DClamped(table.aerialTransmittance.data(), table.aerialWidth, table.aerialHeight,
+                                                s.aerialSlices, uvw.x, uvw.y, uvw.z);
     }
 
 // NOLINTBEGIN(readability-identifier-naming)
@@ -207,4 +218,47 @@ TEST(Sky_SunSamplesStayInTheDisc)
         }
     }
     EXPECT(dot(normalize(mean), table.data.sunDirection) > 0.99999f);
+}
+
+// Aerial perspective: nothing at the viewer; looking straight up, the air's light over the whole
+// atmosphere is the sky's; along the ground the air dims light as its extinction says, blue more
+// than red, and adds more light the farther the view reaches.
+TEST(Sky_AerialPerspectiveMatchesTheSkyAndTheAir)
+{
+    const renderer::SkyTable table =
+        renderer::BuildSkyTable({.physical = true, .sunElevation = 35.0f, .sunAzimuth = 20.0f}, float3(0.0f));
+    SkyReader reader{table};
+    EXPECT(table.data.aerialDistance > 0.0f && table.aerialInscatter.size() == size_t(table.aerialWidth) *
+                                                                                   table.aerialHeight *
+                                                                                   table.data.aerialSlices * 4);
+    const float3 horizontal = Direction(0.5, 110.0);
+    const auto start = reader.AerialPerspective(table.data, horizontal, 0.0f);
+    EXPECT(Luminance(start.inscatter) == 0.0f && start.transmittance.y == 1.0f);
+
+    // Looking up through the whole atmosphere, the air's light is the sky's: within 1% away from the
+    // sun and the zenith (there the coarser table's texels are wide: 2% and 3%).
+    for (double elevation : {75.0, 60.0, 45.0, 30.0})
+    {
+        for (double azimuth : {80.0, 140.0, 200.0})
+        {
+            const float3 d = Direction(elevation, azimuth);
+            const float sky = Luminance(reader.SkyRadiance(table.data, d));
+            const float air = Luminance(reader.AerialPerspective(table.data, d, 100000.0f).inscatter);
+            EXPECT(InRange(air, 0.99 * sky, 1.01 * sky, "air light over the whole atmosphere"));
+        }
+    }
+
+    // Rayleigh scattering around 550 nm plus the aerosols (optical depth 0.05 over 1.2 km).
+    const double extinction = 1.24062e-6 / std::pow(0.55, 4.0) + 0.05 / 1200.0;
+    const auto far = reader.AerialPerspective(table.data, horizontal, 10000.0f);
+    EXPECT(InRange(far.transmittance.y, std::exp(-extinction * 10000.0) - 0.03, std::exp(-extinction * 10000.0) + 0.03,
+                   "green transmittance over 10 km along the ground"));
+    EXPECT(far.transmittance.x > far.transmittance.y && far.transmittance.y > far.transmittance.z);
+    float previous = 0.0f;
+    for (float distance : {100.0f, 1000.0f, 5000.0f, 20000.0f, 80000.0f})
+    {
+        const float light = Luminance(reader.AerialPerspective(table.data, horizontal, distance).inscatter);
+        EXPECT(light > previous);
+        previous = light;
+    }
 }

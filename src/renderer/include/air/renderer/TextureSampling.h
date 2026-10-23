@@ -1,0 +1,21 @@
+#pragma once
+
+// The GPU's trilinear texture filtering, emulated for the CPU renderers (the reference renderer,
+// tests) that read the same tables as the GPU: texel centres at (i + 0.5) / size, interpolation
+// weights with 8 fractional bits (the filtering precision D3D requires and GPUs implement).
+
+#include "air/core/Types.h"
+#include "air/renderer/shader/HlslCompat.h"
+
+namespace air::renderer
+{
+
+// An 8-bit (R8_UNORM) 3D texture, x fastest, with wrapping addressing, at texture coordinates
+// (u, v, w).
+float SampleTexture3D(const u8* texels, u32 width, u32 height, u32 depth, float u, float v, float w);
+
+// A half-float RGBA (RGBA16_FLOAT) 3D texture, 4 halves per texel, x fastest, with clamping
+// addressing.
+hlsl::float4 SampleTexture3DClamped(const u16* texels, u32 width, u32 height, u32 depth, float u, float v, float w);
+
+} // namespace air::renderer

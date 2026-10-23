@@ -57,6 +57,15 @@ IntegratorParams MakeParams(FrameData f)
     return params;
 }
 
+// What the air between the camera and a first surface lets through: the paths' own light there gets
+// the same (AddAerialPerspective, which also adds the air's light).
+float3 CameraAirTransmittance(FrameData f, float3 position)
+{
+    float3 toPoint = position - f.camera.position.xyz;
+    float distance = length(toPoint);
+    return AerialPerspective(f.sky, toPoint / max(distance, 1e-6f), distance).transmittance;
+}
+
 // Independent random streams per pixel, frame and use.
 uint StreamSeed(uint2 pixel, uint frameIndex, uint stream)
 {

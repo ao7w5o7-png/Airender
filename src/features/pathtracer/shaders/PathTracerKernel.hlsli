@@ -151,6 +151,7 @@ void RayGen()
         float3 direction = CameraRayDirection(f.camera, pixelPos, size);
         params.flags = i == 0u ? f.flags | kFlagRecordGi : f.flags; // ReSTIR GI takes the first sample's
         PathSample s = TracePath(f.camera.position.xyz, direction, params, seed);
+        AddAerialPerspective(params, direction, s);
         float intersections = 0.0f;
         if (f.debugView == kDebugIntersections)
         {

@@ -243,6 +243,7 @@ Scene::~Scene()
         mDevice.DestroyBuffer(buffer);
     }
     DestroyClouds();
+    DestroyAerial();
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
 }
@@ -454,6 +455,23 @@ void Scene::WriteDynamicData()
         mSkyTable = BuildSkyTable(mDesc.sky, mDesc.environment);
         mSkyTableFor = mDesc.sky;
         mSkyTableBuilt = true;
+        DestroyAerial();
+        if (!mSkyTable.aerialInscatter.empty())
+        {
+            auto upload = [&](const std::vector<u16>& texels, const char* what)
+            {
+                return CreateTextureWithData(mDevice,
+                                             {.dimension = rhi::TextureDimension::Tex3D,
+                                              .format = rhi::Format::RGBA16_FLOAT,
+                                              .width = mSkyTable.aerialWidth,
+                                              .height = mSkyTable.aerialHeight,
+                                              .depthOrArraySize = mSkyTable.data.aerialSlices,
+                                              .debugName = std::format("{}.{}", mDesc.name, what)},
+                                             texels.data());
+            };
+            mGpu.aerialInscatter = upload(mSkyTable.aerialInscatter, "AerialInscatter");
+            mGpu.aerialTransmittance = upload(mSkyTable.aerialTransmittance, "AerialTransmittance");
+        }
     }
     mSkyTable.data.uniformRadiance = mDesc.environment;
     const std::vector<float> placeholder(3, 0.0f);
@@ -499,6 +517,17 @@ void Scene::WriteDynamicData()
         mCloudsFor = mDesc.clouds;
         mCloudsBuilt = true;
     }
+}
+
+void Scene::DestroyAerial()
+{
+    if (mGpu.aerialInscatter.IsValid())
+    {
+        mDevice.DestroyTexture(mGpu.aerialInscatter);
+        mDevice.DestroyTexture(mGpu.aerialTransmittance);
+    }
+    mGpu.aerialInscatter = {};
+    mGpu.aerialTransmittance = {};
 }
 
 void Scene::DestroyClouds()

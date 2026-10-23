@@ -4,7 +4,9 @@
 // (Rayleigh and Mie scattering, ozone absorption), computed spectrally on the CPU with the
 // transmittance and multiple-scattering tables of Hillaire 2020 and kept as one table of sky
 // radiance over all directions as seen from the scene (shader/SkyShared.h), plus the sun's radiance
-// after the atmosphere. The GPU path tracer and the CPU reference read the same table.
+// after the atmosphere, plus the aerial perspective: what the air between the scene and anything
+// up to 100 km away adds and takes away. The GPU path tracer and the CPU reference read the same
+// tables.
 
 #include "air/core/Types.h"
 #include "air/renderer/shader/SkyShared.h"
@@ -35,6 +37,12 @@ struct SkyTable
 {
     gpu::SkyData data;
     std::vector<float> radiance; // data.width * data.height texels, 3 floats each (linear sRGB, nits)
+    // Aerial perspective (SkyShared.h): aerialWidth * aerialHeight * data.aerialSlices RGBA16F texels
+    // each, x fastest; empty without a physical sky.
+    u32 aerialWidth = 0;
+    u32 aerialHeight = 0;
+    std::vector<u16> aerialInscatter;
+    std::vector<u16> aerialTransmittance;
 };
 
 // The table and sun of a physical sky (about 0.1 s of CPU in release builds); for any other sky a

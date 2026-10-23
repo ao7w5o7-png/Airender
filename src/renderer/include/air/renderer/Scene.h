@@ -144,6 +144,10 @@ struct GpuScene
     float lightPower = 0.0f;    // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
     gpu::SkyData sky;           // the sun and how to read skyTable (uniform radiance when width == 0)
     rhi::BufferHandle skyTable; // StructuredBuffer<float>: 3 per texel, at least 3
+    // The aerial perspective tables (RGBA16F Texture3D, SkyShared.h; none without a physical sky).
+    // Their bindless indices in `sky` are left to the features.
+    rhi::TextureHandle aerialInscatter;
+    rhi::TextureHandle aerialTransmittance;
     // The cloud layer (enabled == 0: none, and no resources). Its bindless indices are left to the
     // features: they read the base and detail textures (R8_UNORM Texture3D) and the majorants
     // (StructuredBuffer<float>) laid out as CloudShared.h describes.
@@ -205,8 +209,10 @@ private:
     SkyTable mSkyTable; // of mSkyTableFor
     Sky mSkyTableFor;
     bool mSkyTableBuilt = false;
-    // The cloud resources never change once written: new clouds get new ones.
+    // The cloud and aerial perspective resources never change once written: new clouds or a new sky
+    // get new ones.
     void DestroyClouds();
+    void DestroyAerial();
     Clouds mCloudsFor;
     bool mCloudsBuilt = false;
     u32 mRingSlot = 0;

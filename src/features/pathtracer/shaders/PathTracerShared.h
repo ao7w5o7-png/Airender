@@ -116,7 +116,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 336);
+static_assert(sizeof(FrameData) == 352);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

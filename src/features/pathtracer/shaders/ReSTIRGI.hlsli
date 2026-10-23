@@ -420,7 +420,7 @@ void GiSpatialPass(uint2 pixel)
     if ((g.flags & kReSTIRShade) != 0u && any(indirect > 0.0f) && all(isfinite(indirect)))
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
-        accumulation[pixel] += float4(indirect * float(f.samplesPerPixel), 0.0f);
+        accumulation[pixel] += float4(indirect * CameraAirTransmittance(f, r.position) * float(f.samplesPerPixel), 0.0f);
     }
     history[index] = PackGi(result);
 }

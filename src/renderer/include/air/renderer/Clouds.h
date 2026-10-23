@@ -9,6 +9,7 @@
 // delta and ratio tracking.
 
 #include "air/core/Types.h"
+#include "air/renderer/TextureSampling.h"
 #include "air/renderer/shader/CloudShared.h"
 
 #include <vector>
@@ -63,10 +64,5 @@ struct CloudVolume
 
 // Bakes the density (about 0.2 s of CPU in release builds, all threads).
 CloudVolume BuildCloudVolume(const Clouds& clouds);
-
-// The GPU's trilinear filtering of an 8-bit 3D texture with wrapping addressing at (u, v, w) in
-// texture coordinates, emulated for the CPU renderers: texel centres at (i + 0.5) / size, weights
-// with 8 fractional bits (the filtering precision D3D requires and GPUs implement).
-float SampleTexture3D(const u8* texels, u32 width, u32 height, u32 depth, float u, float v, float w);
 
 } // namespace air::renderer

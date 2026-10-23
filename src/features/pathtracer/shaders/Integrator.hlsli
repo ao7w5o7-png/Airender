@@ -14,6 +14,8 @@
 //   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
 //   float3        SkyTableLoad(uint texel)            the sky radiance table (SkyLookup.hlsli)
+//   float4        AerialInscatterSample(SkyData sky, float3 uvw), AerialTransmittanceSample(...)
+//                                                     the aerial perspective tables (SkyLookup.hlsli)
 //   float         CloudBaseSample(CloudData c, float3 uvw), CloudDetailSample(...),
 //   float         CloudMajorantLoad(CloudData c, uint cell)   the clouds (CloudLookup.hlsli)
 // HitInfo, CameraData and the kFlag* constants come from PathTracerShared.h.
@@ -31,6 +33,10 @@
 // walk through them gathers the light they scatter (EscapeRadiance), and the sun's light reaching a
 // surface is dimmed by their transmittance. The clouds lie above all geometry, so the only other
 // segment that can meet them is a camera ray from above their base.
+// The air (aerial perspective, SkyLookup.hlsli) dims and adds to what a camera ray sees on its
+// surface (AddAerialPerspective, applied by the caller) and what any ray sees on the clouds; the sky
+// table includes it already. Segments between surfaces of the scene, metres to hundreds of metres
+// long, are taken as clear.
 // With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
 // entirely: ReSTIR DI (ReSTIRDI.hlsli) estimates it.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
@@ -395,8 +401,9 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
 // by the power heuristic against phase sampling, which continues the walk. A walk that leaves the
 // layer downwards sees the ground of the sky table: light the scene's own geometry would reflect
 // back up into the clouds is not traced. `sun` is the disc seen straight through (the caller weighs
-// it against its sun NEE); `rest` is everything else. `surface`: the ray reached its surface at
-// tMax without meeting the clouds, and nothing else was gathered.
+// it against its sun NEE); `rest` is everything else, the air in front of the clouds included.
+// `surface`: the ray reached its surface at tMax without meeting the clouds, and nothing else was
+// gathered.
 struct Escape
 {
     float3 sun;
@@ -418,6 +425,9 @@ Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, 
     float phasePdf = 0.0f; // of the phase sample that produced `d`
     float3 p = origin;
     float3 d = direction;
+    Aerial air; // between the origin and the first collision
+    air.inscatter = float3(0.0f, 0.0f, 0.0f);
+    air.transmittance = float3(1.0f, 1.0f, 1.0f);
     for (uint event = 0u; event <= params.cloudEvents; ++event)
     {
         float t = 0.0f;
@@ -449,6 +459,10 @@ Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, 
         {
             break; // the walk is too long: its light is lost (rare, see docs/architecture.md §8.10)
         }
+        if (event == 0u)
+        {
+            air = AerialPerspective(params.sky, direction, t);
+        }
         p = p + d * t;
         throughput *= albedo;
         if (sunNee)
@@ -472,7 +486,20 @@ Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, 
             throughput = 0.25f;
         }
     }
+    escape.rest = air.inscatter + air.transmittance * escape.rest;
     return escape;
+}
+
+// The air between the camera and the surface its ray hit: what it adds and what it lets through of
+// the path's light. ReSTIR's light at that surface goes through the same air (ReSTIRCommon.hlsli).
+void AddAerialPerspective(IntegratorParams params, float3 direction, AIR_INOUT(PathSample) s)
+{
+    if (s.hit)
+    {
+        Aerial air = AerialPerspective(params.sky, direction, s.hitDistance);
+        s.radiance = air.inscatter + air.transmittance * s.radiance;
+        s.directRadiance = air.inscatter + air.transmittance * s.directRadiance;
+    }
 }
 
 // --- Path ----------------------------------------------------------------------------------------

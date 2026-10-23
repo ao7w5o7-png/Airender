@@ -24,5 +24,6 @@ rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc
 rhi::TextureHandle CreateTextureWithData(rhi::Device& device, rhi::TextureDesc desc, const void* texels);
 
 float HalfToFloat(u16 half);
+u16 FloatToHalf(float value); // round to nearest even; overflow gives infinity
 
 } // namespace air::renderer

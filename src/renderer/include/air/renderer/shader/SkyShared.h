@@ -5,6 +5,10 @@
 // Table layout: u = sqrt(phi / pi) for the azimuth phi between the direction and the sun (the sky
 // is mirror-symmetric about the sun's vertical plane), v = 0.5 + 0.5 sign(e) sqrt(|e| / (pi / 2)) for
 // the elevation e. Both square roots spend the texels near the sun's azimuth and near the horizon.
+//
+// Aerial perspective: two RGBA16F 3D textures over the same (u, v), at a lower resolution, and the
+// distance: slice k holds aerialDistance * (k / (aerialSlices - 1))^2. One holds the radiance the air
+// scatters towards the viewer over that distance (nits), the other its transmittance.
 #ifndef AIR_RENDERER_SKY_SHARED_H
 #define AIR_RENDERER_SKY_SHARED_H
 
@@ -24,10 +28,14 @@ struct SkyData
     uint width;          // of the radiance table; 0: a uniform sky of radiance `uniformRadiance`
     float3 uniformRadiance;
     uint height;
+    float aerialDistance;     // metres the aerial perspective reaches; 0: no air in front of anything
+    uint aerialSlices;        // distance slices of its tables
+    uint aerialInscatter;     // bindless Texture3D<float4> (GPU only)
+    uint aerialTransmittance; // bindless Texture3D<float4> (GPU only)
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(SkyData) == 48);
+static_assert(sizeof(SkyData) == 64);
 #endif
 
 AIR_CONST float kSkyPi = 3.14159265358979f;

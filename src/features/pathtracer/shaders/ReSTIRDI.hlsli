@@ -411,7 +411,7 @@ void SpatialPass(uint2 pixel)
     if ((g.flags & kReSTIRShade) != 0u && any(direct > 0.0f) && all(isfinite(direct)))
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
-        accumulation[pixel] += float4(direct * float(f.samplesPerPixel), 0.0f);
+        accumulation[pixel] += float4(direct * CameraAirTransmittance(f, r.position) * float(f.samplesPerPixel), 0.0f);
     }
     history[index] = Pack(result);
 }

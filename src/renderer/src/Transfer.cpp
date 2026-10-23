@@ -46,6 +46,42 @@ float HalfToFloat(u16 half)
     return std::bit_cast<float>(bits);
 }
 
+u16 FloatToHalf(float value)
+{
+    const u32 bits = std::bit_cast<u32>(value);
+    const u32 sign = (bits >> 16) & 0x8000u;
+    const u32 exponent = (bits >> 23) & 0xFFu;
+    u32 mantissa = bits & 0x7FFFFFu;
+    if (exponent == 0xFF)
+    {
+        return u16(sign | 0x7C00u | (mantissa != 0 ? 0x200u : 0u)); // inf / nan
+    }
+    const int e = int(exponent) - 127 + 15;
+    if (e >= 31)
+    {
+        return u16(sign | 0x7C00u);
+    }
+    if (e <= 0)
+    {
+        // Subnormal (or zero): the implicit bit joins the mantissa, shifted into place.
+        if (e < -10)
+        {
+            return u16(sign);
+        }
+        mantissa |= 0x800000u;
+        const u32 shift = u32(14 - e);
+        u32 half = mantissa >> shift;
+        const u32 rest = mantissa & ((1u << shift) - 1u);
+        const u32 halfway = 1u << (shift - 1u);
+        half += (rest > halfway || (rest == halfway && (half & 1u) != 0)) ? 1u : 0u;
+        return u16(sign | half);
+    }
+    u32 half = (u32(e) << 10) | (mantissa >> 13);
+    const u32 rest = mantissa & 0x1FFFu;
+    half += (rest > 0x1000u || (rest == 0x1000u && (half & 1u) != 0)) ? 1u : 0u; // a carry rounds up the exponent
+    return u16(sign | half);
+}
+
 rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc, const void* data, u64 size)
 {
     desc.memory = rhi::MemoryLocation::DeviceLocal;

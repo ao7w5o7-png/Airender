@@ -197,7 +197,7 @@ struct SceneTables
     std::vector<LightTriangle> lights;
     std::vector<LightTreeNode> lightTree;
     std::span<const float> lut;
-    std::vector<float> skyTable; // renderer::SkyTable::radiance
+    renderer::SkyTable sky;
     renderer::CloudVolume clouds;
     const Bvh* bvh = nullptr;
 };
@@ -217,7 +217,18 @@ struct Kernel
     LightTreeNode LoadLightNode(uint node) const { return tables.lightTree[node]; }
     float3 SkyTableLoad(uint texel) const
     {
-        return float3(tables.skyTable[texel * 3], tables.skyTable[texel * 3 + 1], tables.skyTable[texel * 3 + 2]);
+        const std::vector<float>& t = tables.sky.radiance;
+        return float3(t[texel * 3], t[texel * 3 + 1], t[texel * 3 + 2]);
+    }
+    float4 AerialInscatterSample(SkyData s, float3 uvw) const
+    {
+        return renderer::SampleTexture3DClamped(tables.sky.aerialInscatter.data(), tables.sky.aerialWidth,
+                                                tables.sky.aerialHeight, s.aerialSlices, uvw.x, uvw.y, uvw.z);
+    }
+    float4 AerialTransmittanceSample(SkyData s, float3 uvw) const
+    {
+        return renderer::SampleTexture3DClamped(tables.sky.aerialTransmittance.data(), tables.sky.aerialWidth,
+                                                tables.sky.aerialHeight, s.aerialSlices, uvw.x, uvw.y, uvw.z);
     }
     float CloudBaseSample(CloudData c, float3 uvw) const
     {
@@ -297,8 +308,8 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
         tables.lights.emplace_back(); // like the GPU list: NEE reads entry 0 when no light is chosen
     }
     tables.lut = GetBsdfLut();
-    renderer::SkyTable sky = renderer::BuildSkyTable(scene.sky, scene.environment);
-    tables.skyTable = std::move(sky.radiance);
+    tables.sky = renderer::BuildSkyTable(scene.sky, scene.environment);
+    const renderer::SkyTable& sky = tables.sky;
     tables.clouds = renderer::BuildCloudVolume(scene.clouds);
     const Bvh bvh(std::move(triangles));
     tables.bvh = &bvh;
@@ -321,6 +332,7 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
         params.sky.height = 0;
         params.sky.uniformRadiance = environment > 0.0f ? uniform : float3(1.0f);
         params.sky.sunRadiance = float3(0.0f);
+        params.sky.aerialDistance = 0.0f;
         exposure = settings.applyExposure ? 0.18f / (environment > 0.0f ? environment : 1.0f) : 1.0f;
     }
 
@@ -341,7 +353,8 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
                 const float jy = kernel.Rand(seed);
                 const float3 direction =
                     kernel.CameraRayDirection(cameraData, float2(float(x) + jx, float(y) + jy), size);
-                const Kernel::PathSample sample = kernel.TracePath(camera.position, direction, params, seed);
+                Kernel::PathSample sample = kernel.TracePath(camera.position, direction, params, seed);
+                kernel.AddAerialPerspective(params, direction, sample);
                 sum[0] += sample.radiance.x;
                 sum[1] += sample.radiance.y;
                 sum[2] += sample.radiance.z;

@@ -222,6 +222,15 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.previousCamera = ToGpu(previousCamera, aspect);
     float exposure = renderer::ExposureScale(camera.ev100);
     frame.sky = scene.sky;
+    if (scene.aerialInscatter.IsValid())
+    {
+        frame.sky.aerialInscatter = mDevice.GetBindlessSRV(scene.aerialInscatter);
+        frame.sky.aerialTransmittance = mDevice.GetBindlessSRV(scene.aerialTransmittance);
+    }
+    else
+    {
+        frame.sky.aerialDistance = 0.0f;
+    }
     if (mSettings.furnace)
     {
         // A uniform sky (white for a physical one) mapped to middle grey and no sun: a correct
@@ -232,6 +241,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         frame.sky.height = 0;
         frame.sky.uniformRadiance = luminance > 0.0f ? uniform : hlsl::float3(1.0f);
         frame.sky.sunRadiance = hlsl::float3(0.0f);
+        frame.sky.aerialDistance = 0.0f;
         exposure = luminance > 0.0f ? 0.18f / luminance : 0.18f;
     }
     frame.exposure = exposure;

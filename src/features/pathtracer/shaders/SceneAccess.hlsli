@@ -2,11 +2,13 @@
 // rays: shared by the trace kernel and the ReSTIR passes. The including shader declares `g`, its push
 // constants, with the fields tlas, instances, materials, lights, instanceLights, lightTree, bsdfLut and
 // skyTable, and supplies TraceClosest itself (closest-hit shaders or an inline query). The clouds'
-// resources come with their CloudData.
+// and the aerial perspective's resources come with their CloudData and SkyData.
 #ifndef AIR_PT_SCENE_ACCESS_HLSLI
 #define AIR_PT_SCENE_ACCESS_HLSLI
 
-SamplerState gLinearWrap : register(s2); // a static sampler of the bindless root signature
+// Static samplers of the bindless root signature.
+SamplerState gLinearClamp : register(s0);
+SamplerState gLinearWrap : register(s2);
 
 float BsdfLutLoad(uint index)
 {
@@ -54,6 +56,18 @@ float3 SkyTableLoad(uint texel)
 {
     StructuredBuffer<float> table = ResourceDescriptorHeap[g.skyTable];
     return float3(table[texel * 3u], table[texel * 3u + 1u], table[texel * 3u + 2u]);
+}
+
+float4 AerialInscatterSample(SkyData sky, float3 uvw)
+{
+    Texture3D<float4> table = ResourceDescriptorHeap[sky.aerialInscatter];
+    return table.SampleLevel(gLinearClamp, uvw, 0.0f);
+}
+
+float4 AerialTransmittanceSample(SkyData sky, float3 uvw)
+{
+    Texture3D<float4> table = ResourceDescriptorHeap[sky.aerialTransmittance];
+    return table.SampleLevel(gLinearClamp, uvw, 0.0f);
 }
 
 float CloudBaseSample(CloudData c, float3 uvw)

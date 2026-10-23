@@ -804,6 +804,15 @@ and the editor's Scene panel edits it.
   more NEE candidate (streamed with the triangle's), and a continuation that escapes into the disc
   keeps the sun as its MIS-weighted emission. The furnace replaces the sky with a uniform white one
   and switches the sun off.
+- **Aerial perspective**: the same ray march, stopped at 32 distances (quadratically spaced up to
+  100 km, the first at 104 m), fills two 32 x 64 x 32 RGBA16F tables over the sky table's
+  directions: the light the air scatters towards the viewer over that distance and its
+  transmittance (spectral, turned into RGB as the factor by which it changes sunlight's colour).
+  What a camera ray sees on its surface becomes `inscatter + transmittance * radiance`
+  (`AddAerialPerspective`; ReSTIR's light at that surface gets the same transmittance), and so does
+  everything a ray sees on the clouds (§8.10); the sky table includes the air already. Segments
+  between surfaces of the scene are taken as clear. The GPU samples the tables with hardware
+  filtering (linear clamp), the CPU reference emulates it (half-float texels, 8-bit weights).
 
 Validation:
 
@@ -817,8 +826,15 @@ Validation:
   agree (0.5% apart at 256 spp).
 - GPU against the CPU reference on `sunset` (96x54): the means differ by 0.06%, by 0.13% with
   ReSTIR DI and GI accumulated.
-- Not modelled yet: the air between surfaces in the scene and between the camera and the clouds
-  (aerial perspective, visible from a few hundred metres on); the sun's limb darkening.
+- `Sky_AerialPerspectiveMatchesTheSkyAndTheAir`: no air at the viewer; looking up through the whole
+  atmosphere the air's light is the sky's within 1% (2% near the sun and 3% at the zenith, where the
+  table's texels are wide); 10 km along the ground let through exp(-optical depth) in green (within
+  0.03), red more than blue; the air's light grows with distance.
+- GPU against the CPU reference on `terrain` (160x90): the means differ by 0.023%, by 0.024% with
+  ReSTIR DI and GI accumulated.
+- Not modelled yet: the air's light in cloud shadows (crepuscular rays: the tables assume clear
+  sunlight); a viewer far above the scene's altitude (the tables are computed for that altitude);
+  the sun's limb darkening.
 
 ### 8.10 Volumetric clouds
 
@@ -895,8 +911,11 @@ Validation:
   scattering in thick media is the most expensive transport here, and noisy: a cloud pixel's
   samples have a relative standard deviation of about 0.8, so clouds need hundreds of samples (or
   a denoiser).
+- The air between a ray's origin and its first collision with the clouds dims and adds to their
+  light (§8.9's aerial perspective), so distant clouds fade into the haze.
 - Not modelled: the planet's curvature (the layer is flat and ends 100 km along a ray), wind, the
-  scene's own geometry lighting the clouds, aerial perspective between the camera and the clouds.
+  scene's own geometry lighting the clouds, the clouds' shadows in the air between them and the
+  viewer.
 ---
 
 ## 9. Editor

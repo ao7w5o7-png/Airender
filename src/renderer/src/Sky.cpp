@@ -11,13 +11,15 @@
 // approximation (all orders as a geometric series of the second), and a ray march per sky
 // direction. Everything is computed for 16 wavelength bins of 25 nm (380-780 nm) and converted to
 // linear sRGB through the CIE 1931 colour matching functions (the analytic fit of Wyman, Sloan and
-// Shirley 2013), so the colours come from spectra rather than from three RGB "wavelengths".
+// Shirley 2013), so the colours come from spectra rather than from three RGB "wavelengths". The same
+// ray march, stopped at a series of distances, gives the aerial perspective tables.
 
 #include "air/renderer/Sky.h"
 
 #include "ParallelFor.h"
 
 #include "air/core/Assert.h"
+#include "air/renderer/Transfer.h"
 
 #include <algorithm>
 #include <array>
@@ -373,6 +375,60 @@ double CornetteShanksPhase(double nu, double g)
            ((2.0 + g2) * std::pow(std::max(1.0 + g2 - 2.0 * g * nu, 1e-9), 1.5));
 }
 
+// A ray from the viewer and what it has gathered so far, per unit solar irradiance: the light the air
+// scattered towards the viewer and the transmittance back to it.
+struct ViewRay
+{
+    double dx = 0.0, dy = 0.0, dz = 0.0;       // direction
+    double sunX = 0.0, sunY = 0.0, sunZ = 0.0; // towards the sun
+    double phaseR = 0.0;                       // Rayleigh and Mie phase functions between the two
+    double phaseM = 0.0;
+    std::array<double, kBins> throughput{};
+    std::array<double, kBins> l{};
+};
+
+ViewRay MakeViewRay(double dx, double dy, double dz, double sunX, double sunY, double sunZ)
+{
+    ViewRay ray{dx, dy, dz, sunX, sunY, sunZ};
+    const double nu = dx * sunX + dy * sunY + dz * sunZ;
+    ray.phaseR = RayleighPhase(nu);
+    ray.phaseM = CornetteShanksPhase(nu, kMieG);
+    ray.throughput.fill(1.0);
+    return ray;
+}
+
+// One step of the ray march, the segment of length dt around distance t: single scattering of the
+// sun and the multiple-scattering term of the point, then the segment's extinction.
+void MarchStep(const Tables& tables, ViewRay& ray, double t, double dt)
+{
+    const Atmosphere& a = *tables.atmosphere;
+    const double px = ray.dx * t;
+    const double py = a.viewRadius + ray.dy * t;
+    const double pz = ray.dz * t;
+    const double rp = std::sqrt(px * px + py * py + pz * pz);
+    const double muSunP = (px * ray.sunX + py * ray.sunY + pz * ray.sunZ) / rp;
+    const Densities d = DensitiesAt(rp - a.bottom);
+    const Spectrum sun = TransmittanceToSun(tables, rp, muSunP);
+    const Spectrum multiple = MultipleScattering(tables, rp, muSunP);
+    for (int b = 0; b < kBins; ++b)
+    {
+        const double rayleigh = a.rayleigh[b] * d.rayleigh;
+        const double mie = a.mieScattering[b] * d.mie;
+        const double extinction = rayleigh + a.mieExtinction[b] * d.mie + a.ozone[b] * d.ozone;
+        const double source = (rayleigh * ray.phaseR + mie * ray.phaseM) * sun[b] + (rayleigh + mie) * multiple[b];
+        const double step = std::exp(-extinction * dt);
+        ray.l[b] += ray.throughput[b] * source * (extinction > 0.0 ? (1.0 - step) / extinction : dt);
+        ray.throughput[b] *= step;
+    }
+}
+
+// Where a ray from the viewer leaves the air: the ground or the top of the atmosphere.
+double RayEnd(const Atmosphere& a, double dy, bool& ground)
+{
+    ground = IntersectsGround(a, a.viewRadius, dy);
+    return ground ? DistanceToBottom(a, a.viewRadius, dy) : DistanceToTop(a, a.viewRadius, dy);
+}
+
 // Spectral radiance of the sky (no sun disc) along a direction from the viewer, per unit solar
 // irradiance: single scattering of the sun, the multiple-scattering term of each point, and the
 // planet's ground lit by the sun below the horizon.
@@ -380,45 +436,22 @@ Spectrum SkySpectrum(const Tables& tables, double dx, double dy, double dz, doub
 {
     const Atmosphere& a = *tables.atmosphere;
     constexpr int kSteps = 96;
-    const double r = a.viewRadius;
-    const bool ground = IntersectsGround(a, r, dy);
-    const double tMax = ground ? DistanceToBottom(a, r, dy) : DistanceToTop(a, r, dy);
-    const double nu = dx * sunX + dy * sunY + dz * sunZ;
-    const double phaseR = RayleighPhase(nu);
-    const double phaseM = CornetteShanksPhase(nu, kMieG);
-    std::array<double, kBins> throughput;
-    throughput.fill(1.0);
-    std::array<double, kBins> l{};
+    bool ground = false;
+    const double tMax = RayEnd(a, dy, ground);
+    ViewRay ray = MakeViewRay(dx, dy, dz, sunX, sunY, sunZ);
     for (int s = 0; s < kSteps; ++s)
     {
         // Quadratic spacing: short steps near the viewer, where the air is densest.
         const double t0 = tMax * (double(s) / kSteps) * (double(s) / kSteps);
         const double t1 = tMax * (double(s + 1) / kSteps) * (double(s + 1) / kSteps);
-        const double t = 0.5 * (t0 + t1);
-        const double dt = t1 - t0;
-        const double px = dx * t;
-        const double py = r + dy * t;
-        const double pz = dz * t;
-        const double rp = std::sqrt(px * px + py * py + pz * pz);
-        const double muSunP = (px * sunX + py * sunY + pz * sunZ) / rp;
-        const Densities d = DensitiesAt(rp - a.bottom);
-        const Spectrum sun = TransmittanceToSun(tables, rp, muSunP);
-        const Spectrum multiple = MultipleScattering(tables, rp, muSunP);
-        for (int b = 0; b < kBins; ++b)
-        {
-            const double rayleigh = a.rayleigh[b] * d.rayleigh;
-            const double mie = a.mieScattering[b] * d.mie;
-            const double extinction = rayleigh + a.mieExtinction[b] * d.mie + a.ozone[b] * d.ozone;
-            const double source = (rayleigh * phaseR + mie * phaseM) * sun[b] + (rayleigh + mie) * multiple[b];
-            const double step = std::exp(-extinction * dt);
-            l[b] += throughput[b] * source * (extinction > 0.0 ? (1.0 - step) / extinction : dt);
-            throughput[b] *= step;
-        }
+        MarchStep(tables, ray, 0.5 * (t0 + t1), t1 - t0);
     }
+    const std::array<double, kBins>& throughput = ray.throughput;
+    std::array<double, kBins>& l = ray.l;
     if (ground)
     {
         const double gx = dx * tMax;
-        const double gy = r + dy * tMax;
+        const double gy = a.viewRadius + dy * tMax;
         const double gz = dz * tMax;
         const double rg = std::sqrt(gx * gx + gy * gy + gz * gz);
         const double muSunG = (gx * sunX + gy * sunY + gz * sunZ) / rg;
@@ -491,6 +524,42 @@ void BuildTables(Tables& tables)
 constexpr u32 kSkyWidth = 256;
 constexpr u32 kSkyHeight = 256;
 
+// Aerial perspective tables: directions as the sky table at a lower resolution, distances in
+// quadratically spaced slices up to kAerialDistance (the first beyond the viewer at 104 m).
+constexpr u32 kAerialWidth = 32;
+constexpr u32 kAerialHeight = 64;
+constexpr u32 kAerialSlices = 32;
+constexpr double kAerialDistance = 100000.0;
+
+// The light the air scatters towards the viewer along a direction (per unit solar irradiance) and
+// its transmittance, from the viewer to each slice's distance; constant beyond the ground or the
+// top of the atmosphere.
+void AerialSpectra(const Tables& tables, double dx, double dy, double dz, double sunX, double sunY, double sunZ,
+                   std::array<std::array<double, kBins>, kAerialSlices>& inscatter,
+                   std::array<std::array<double, kBins>, kAerialSlices>& transmittance)
+{
+    constexpr int kSubsteps = 8;
+    bool ground = false;
+    const double end = RayEnd(*tables.atmosphere, dy, ground);
+    ViewRay ray = MakeViewRay(dx, dy, dz, sunX, sunY, sunZ);
+    inscatter[0] = ray.l;
+    transmittance[0] = ray.throughput;
+    for (u32 k = 1; k < kAerialSlices; ++k)
+    {
+        const double a = double(k - 1) / double(kAerialSlices - 1);
+        const double b = double(k) / double(kAerialSlices - 1);
+        const double t0 = std::min(kAerialDistance * a * a, end);
+        const double t1 = std::min(kAerialDistance * b * b, end);
+        const double dt = (t1 - t0) / kSubsteps;
+        for (int s = 0; dt > 0.0 && s < kSubsteps; ++s)
+        {
+            MarchStep(tables, ray, t0 + (double(s) + 0.5) * dt, dt);
+        }
+        inscatter[k] = ray.l;
+        transmittance[k] = ray.throughput;
+    }
+}
+
 } // namespace
 
 float3 SunDirection(const Sky& sky)
@@ -552,6 +621,55 @@ SkyTable BuildSkyTable(const Sky& sky, float3 uniform)
                 });
     table.data.width = kSkyWidth;
     table.data.height = kSkyHeight;
+
+    // Aerial perspective. Its transmittance turns into RGB as the factor by which it changes the
+    // colour of sunlight, channel by channel.
+    const float3 white = ToRgb(atmosphere, atmosphere.solar);
+    table.aerialWidth = kAerialWidth;
+    table.aerialHeight = kAerialHeight;
+    table.aerialInscatter.assign(size_t(kAerialWidth) * kAerialHeight * kAerialSlices * 4, 0);
+    table.aerialTransmittance.assign(table.aerialInscatter.size(), 0);
+    ParallelFor(int(kAerialHeight),
+                [&](int y)
+                {
+                    const double v = (y + 0.5) / kAerialHeight;
+                    const double w = 2.0 * v - 1.0;
+                    const double elevation = (w < 0.0 ? -1.0 : 1.0) * 0.5 * kPi * w * w;
+                    std::array<std::array<double, kBins>, kAerialSlices> inscatter;
+                    std::array<std::array<double, kBins>, kAerialSlices> transmittance;
+                    for (u32 x = 0; x < kAerialWidth; ++x)
+                    {
+                        const double u = (x + 0.5) / kAerialWidth;
+                        const double phi = kPi * u * u;
+                        AerialSpectra(tables, std::cos(elevation) * std::sin(phi), std::sin(elevation),
+                                      std::cos(elevation) * std::cos(phi), 0.0, sunY, sunZ, inscatter, transmittance);
+                        for (u32 k = 0; k < kAerialSlices; ++k)
+                        {
+                            Spectrum light{};
+                            Spectrum through{};
+                            for (int b = 0; b < kBins; ++b)
+                            {
+                                light[b] = float(inscatter[k][b] * atmosphere.solar[b]);
+                                through[b] = float(transmittance[k][b] * atmosphere.solar[b]);
+                            }
+                            const float3 rgb = ToRgb(atmosphere, light);
+                            const float3 t = ToRgb(atmosphere, through) / white;
+                            u16* in = &table.aerialInscatter[((size_t(k) * kAerialHeight + y) * kAerialWidth + x) * 4];
+                            u16* tr =
+                                &table.aerialTransmittance[((size_t(k) * kAerialHeight + y) * kAerialWidth + x) * 4];
+                            in[0] = FloatToHalf(rgb.x);
+                            in[1] = FloatToHalf(rgb.y);
+                            in[2] = FloatToHalf(rgb.z);
+                            in[3] = FloatToHalf(0.0f);
+                            tr[0] = FloatToHalf(std::clamp(t.x, 0.0f, 1.0f));
+                            tr[1] = FloatToHalf(std::clamp(t.y, 0.0f, 1.0f));
+                            tr[2] = FloatToHalf(std::clamp(t.z, 0.0f, 1.0f));
+                            tr[3] = FloatToHalf(1.0f);
+                        }
+                    }
+                });
+    table.data.aerialDistance = float(kAerialDistance);
+    table.data.aerialSlices = kAerialSlices;
 
     // The sun's disc: its radiance outside the atmosphere times the transmittance towards it.
     const double radius = double(sky.sunAngularRadius) * kPi / 180.0;

@@ -1,6 +1,8 @@
-// Sky radiance and the sun's disc from SkyData and its table (SkyShared.h). Shared by C++ and HLSL;
-// the including code defines, before including this file:
+// Sky radiance, the sun's disc and the air in front of things from SkyData and its tables
+// (SkyShared.h). Shared by C++ and HLSL; the including code defines, before including this file:
 //   float3 SkyTableLoad(uint texel)   linear sRGB radiance of texel y * width + x, nits
+//   float4 AerialInscatterSample(SkyData sky, float3 uvw)      the aerial perspective tables at
+//   float4 AerialTransmittanceSample(SkyData sky, float3 uvw)  texture coordinates (trilinear, clamping)
 #ifndef AIR_RENDERER_SKY_LOOKUP_HLSLI
 #define AIR_RENDERER_SKY_LOOKUP_HLSLI
 
@@ -25,6 +27,34 @@ float3 SkyRadiance(SkyData sky, float3 direction)
     float3 bottom = lerp(SkyTableLoad(row0 + x0), SkyTableLoad(row0 + x0 + 1u), fx);
     float3 top = lerp(SkyTableLoad(row1 + x0), SkyTableLoad(row1 + x0 + 1u), fx);
     return lerp(bottom, top, fy);
+}
+
+// The air between a viewer in the scene and what it sees at `distance` along `direction`: the light
+// it scatters towards the viewer (nits) and the fraction of the light from behind that gets
+// through. None without a physical sky.
+struct Aerial
+{
+    float3 inscatter;
+    float3 transmittance;
+};
+
+Aerial AerialPerspective(SkyData sky, float3 direction, float distance)
+{
+    Aerial air;
+    air.inscatter = float3(0.0f, 0.0f, 0.0f);
+    air.transmittance = float3(1.0f, 1.0f, 1.0f);
+    if (sky.aerialDistance <= 0.0f)
+    {
+        return air;
+    }
+    float2 uv = SkyTableUv(direction, sky.sunDirection);
+    float slices = float(sky.aerialSlices);
+    float w = (sqrt(saturate(distance / sky.aerialDistance)) * (slices - 1.0f) + 0.5f) / slices;
+    float4 inscatter = AerialInscatterSample(sky, float3(uv.x, uv.y, w));
+    float4 transmittance = AerialTransmittanceSample(sky, float3(uv.x, uv.y, w));
+    air.inscatter = float3(inscatter.x, inscatter.y, inscatter.z);
+    air.transmittance = float3(transmittance.x, transmittance.y, transmittance.z);
+    return air;
 }
 
 bool HasSun(SkyData sky)

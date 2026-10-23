@@ -186,28 +186,6 @@ u8 Texel(float value)
 
 } // namespace
 
-float SampleTexture3D(const u8* texels, u32 width, u32 height, u32 depth, float u, float v, float w)
-{
-    // Texel coordinates in fixed point with 8 fractional bits, as the filtering hardware rounds them.
-    int i[3][2];
-    float t[3];
-    const float coords[3] = {u, v, w};
-    const u32 sizes[3] = {width, height, depth};
-    for (int a = 0; a < 3; ++a)
-    {
-        const float fixed = std::round((coords[a] * float(sizes[a]) - 0.5f) * 256.0f);
-        const float whole = std::floor(fixed / 256.0f);
-        t[a] = (fixed - whole * 256.0f) / 256.0f;
-        i[a][0] = Wrap(int(whole), int(sizes[a]));
-        i[a][1] = Wrap(int(whole) + 1, int(sizes[a]));
-    }
-    auto at = [&](int x, int y, int z)
-    { return float(texels[(size_t(i[2][z]) * height + size_t(i[1][y])) * width + size_t(i[0][x])]) / 255.0f; };
-    auto row = [&](int y, int z) { return at(0, y, z) + (at(1, y, z) - at(0, y, z)) * t[0]; };
-    auto slice = [&](int z) { return row(0, z) + (row(1, z) - row(0, z)) * t[1]; };
-    return slice(0) + (slice(1) - slice(0)) * t[2];
-}
-
 CloudPhaseParams FitCloudPhase(float diameter)
 {
     const double d = std::clamp(double(diameter), 5.0, 50.0);
