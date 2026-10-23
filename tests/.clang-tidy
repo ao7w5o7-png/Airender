@@ -1,0 +1,3 @@
+# Tests check optionals through EXPECT() and use getenv for golden updates.
+InheritParentConfig: true
+Checks: '-bugprone-unchecked-optional-access,-concurrency-mt-unsafe,-performance-inefficient-vector-operation'

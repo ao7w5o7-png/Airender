@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang-format-18 clang-tidy-18
+      - run: sudo ln -sf /usr/bin/clang-format-18 /usr/local/bin/clang-format && sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy && sudo ln -sf /usr/bin/run-clang-tidy-18 /usr/local/bin/run-clang-tidy
+      - run: python3 tools/air.py format --check
+      - run: python3 tools/air.py layers
+      - run: CXX=clang++ python3 tools/air.py tidy
+
+  linux:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: CXX=${{ matrix.compiler }} python3 tools/air.py test
+      - name: Headless render smoke test
+        run: python3 tools/air.py run -- render --features pathtracer,example --frames 3 --report out/report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.compiler }}
+          path: out/report.json
+
+  linux-tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: python3 tools/air.py test --preset tsan
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Agility SDK, DXC, ImGui and the DLSS SDK are downloaded by CMake into .deps/.
+      - uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ hashFiles('cmake/AirThirdParty.cmake') }}
+      # Builds the D3D12 backend, the editor, the DLSS feature and compiles every HLSL shader with DXC
+      # (-WX), so shader errors fail CI even though the runner has no GPU.
+      - run: cmake -S . -B build -DAIR_RHI_D3D12=ON
+      - run: cmake --build build --config Debug --parallel
+      - run: ctest --test-dir build -C Debug --output-on-failure
+      - name: List compiled shaders
+        shell: bash
+        run: ls -la build/shaders/*

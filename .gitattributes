@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.pfm binary
+*.ppm binary
+*.dxil binary
+*.spv binary
