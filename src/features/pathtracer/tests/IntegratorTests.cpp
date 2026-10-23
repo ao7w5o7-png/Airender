@@ -4,6 +4,7 @@
 
 #include "air/features/pathtracer/ReferenceRenderer.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -197,4 +198,57 @@ TEST(Integrator_SunNeeAndBsdfSamplingAgree)
     const double bsdfOnly = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
     EXPECT(withNee > 0.0);
     EXPECT(Near(withNee, bsdfOnly, 0.05, "sunset, NEE vs BSDF-only"));
+}
+
+// Clouds scatter without absorbing (albedo 1 in the furnace), so in a uniform environment every
+// path through them returns exactly the environment: they vanish, pixel by pixel.
+TEST(Integrator_CloudsVanishInAWhiteFurnace)
+{
+    TaskSystem tasks(4);
+    renderer::SceneDesc scene = *renderer::MakeBuiltinScene("cumulus");
+    scene.camera.pitch = 0.75f; // only sky and clouds in view
+    pt::ReferenceSettings settings = Settings(tasks, 16, 4);
+    settings.furnace = true;
+    settings.applyExposure = true; // the environment maps to 0.18
+    const Image image = pt::RenderReference(scene, scene.camera, settings);
+    double lowest = 1e30;
+    double highest = 0.0;
+    for (u32 y = 0; y < image.height; ++y)
+    {
+        for (u32 x = 0; x < image.width; ++x)
+        {
+            const float* p = image.At(x, y);
+            const double l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+            lowest = std::min(lowest, l);
+            highest = std::max(highest, l);
+        }
+    }
+    EXPECT(Near(lowest, 0.18, 1e-3, "darkest pixel"));
+    EXPECT(Near(highest, 0.18, 1e-3, "brightest pixel"));
+}
+
+// Inside the clouds the sun is reached two ways, by next event estimation (its transmittance by
+// ratio tracking) and by phase sampling (delta tracking decides whether it gets through), weighed
+// by MIS: both together must give what phase sampling alone gives. The sun is 12 degrees wide so
+// that phase sampling finds it often enough.
+TEST(Integrator_CloudSunNeeAndPhaseSamplingAgree)
+{
+    TaskSystem tasks(4);
+    renderer::SceneDesc scene = *renderer::MakeBuiltinScene("cumulus");
+    scene.camera.pitch = 0.6f;
+    scene.sky.sunElevation = 50.0f;
+    scene.sky.sunAngularRadius = 12.0f;
+    for (bool exact : {false, true})
+    {
+        scene.clouds.exactPhase = exact;
+        pt::ReferenceSettings settings = Settings(tasks, 512, 2);
+        settings.width = 16;
+        settings.height = 16;
+        const double withNee = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+        settings.nextEventEstimation = false;
+        const double phaseOnly = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+        EXPECT(withNee > 0.0);
+        EXPECT(Near(withNee, phaseOnly, 0.05,
+                    exact ? "clouds (exact phase), NEE vs phase sampling" : "clouds, NEE vs phase sampling"));
+    }
 }

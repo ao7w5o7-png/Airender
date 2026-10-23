@@ -21,6 +21,7 @@ struct ReferenceSettings
     u32 maxBounces = 8;
     bool nextEventEstimation = true;
     u32 lightTreeBounces = 0; // as pathtracer.lightTreeBounces
+    u32 cloudEvents = 256;    // as pathtracer.cloudEvents
     bool furnace = false;
     // true: radiance * camera exposure, comparable with the pathtracer feature's output.
     // false: radiance in nits.

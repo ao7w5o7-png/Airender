@@ -198,6 +198,7 @@ struct SceneTables
     std::vector<LightTreeNode> lightTree;
     std::span<const float> lut;
     std::vector<float> skyTable; // renderer::SkyTable::radiance
+    renderer::CloudVolume clouds;
     const Bvh* bvh = nullptr;
 };
 
@@ -218,6 +219,16 @@ struct Kernel
     {
         return float3(tables.skyTable[texel * 3], tables.skyTable[texel * 3 + 1], tables.skyTable[texel * 3 + 2]);
     }
+    float CloudBaseSample(CloudData c, float3 uvw) const
+    {
+        return renderer::SampleTexture3D(tables.clouds.base.data(), c.gridX, c.gridZ, c.gridY + 2, uvw.x, uvw.y, uvw.z);
+    }
+    float CloudDetailSample(CloudData /*c*/, float3 uvw) const
+    {
+        const u32 n = tables.clouds.detailSize;
+        return renderer::SampleTexture3D(tables.clouds.detail.data(), n, n, n, uvw.x, uvw.y, uvw.z);
+    }
+    float CloudMajorantLoad(CloudData /*c*/, uint cell) const { return tables.clouds.majorants[cell]; }
     HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/) const
     {
         HitInfo hit{};
@@ -288,11 +299,14 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     tables.lut = GetBsdfLut();
     renderer::SkyTable sky = renderer::BuildSkyTable(scene.sky, scene.environment);
     tables.skyTable = std::move(sky.radiance);
+    tables.clouds = renderer::BuildCloudVolume(scene.clouds);
     const Bvh bvh(std::move(triangles));
     tables.bvh = &bvh;
 
     Kernel::IntegratorParams params;
     params.sky = sky.data;
+    params.clouds = tables.clouds.data;
+    params.cloudEvents = settings.cloudEvents;
     params.lightCount = lightPower > 0.0 ? u32(tables.lights.size()) : 0u;
     params.maxBounces = settings.maxBounces;
     params.flags = (settings.furnace ? kFlagFurnace : 0u) | (settings.nextEventEstimation ? 0u : kFlagNoNee);

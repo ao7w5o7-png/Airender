@@ -37,7 +37,9 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   stresses the change, e.g. `veach_mis` for MIS / light sampling, `many_lights` for light
   selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`
   for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory,
-  `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9).
+  `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9),
+  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10).
+  `--camera EX,EY,EZ,TX,TY,TZ[,FOV]` and `--ev EV100` move a scene's camera.
   Validate GPU against `aircli reference` on the same scene.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post

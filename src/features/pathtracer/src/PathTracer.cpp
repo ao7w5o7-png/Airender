@@ -27,7 +27,8 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 {
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
-           a.restir == b.restir && a.furnace == b.furnace && a.debugView == b.debugView && a.debugScale == b.debugScale;
+           a.cloudEvents == b.cloudEvents && a.restir == b.restir && a.furnace == b.furnace &&
+           a.debugView == b.debugView && a.debugScale == b.debugScale;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -234,6 +235,14 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         exposure = luminance > 0.0f ? 0.18f / luminance : 0.18f;
     }
     frame.exposure = exposure;
+    frame.clouds = scene.clouds;
+    if (scene.clouds.enabled != 0)
+    {
+        frame.clouds.baseTexture = mDevice.GetBindlessSRV(scene.cloudBase);
+        frame.clouds.detailTexture = mDevice.GetBindlessSRV(scene.cloudDetail);
+        frame.clouds.majorants = mDevice.GetBindlessSRV(scene.cloudMajorants);
+    }
+    frame.cloudEvents = mSettings.cloudEvents;
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;

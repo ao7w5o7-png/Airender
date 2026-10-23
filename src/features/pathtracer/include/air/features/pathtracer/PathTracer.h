@@ -67,6 +67,9 @@ struct PathTracerSettings
     // time (a walk of ~log2(lights) dependent loads per sample): off by default, worth it for
     // offline references of many-light scenes (docs/architecture.md §8.6).
     u32 lightTreeBounces = 0;
+    // Scattering events a path's walk through the clouds may take before it is given up (its light
+    // lost). Thick clouds scatter light hundreds of times before it leaves them.
+    u32 cloudEvents = 256;
     ReSTIRSettings restir;
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*

@@ -1,5 +1,6 @@
 // Built-in scenes: every one is valid and renders on the Null backend; the test scenes contain what
-// they exist to test; the light list holds emitters only and follows material edits.
+// they exist to test; the light list holds emitters only and follows material edits; clouds stay
+// above the geometry and their resources follow edits.
 
 #include "TestHelpers.h"
 
@@ -72,11 +73,12 @@ TEST(Scene_TestScenesContainWhatTheyTest)
     EXPECT(EmissiveInstances(*renderer::MakeBuiltinScene("many_lights")) >= 360);
     EXPECT(Triangles(*renderer::MakeBuiltinScene("terrain")) > 2'000'000);
     EXPECT(EmissiveInstances(*renderer::MakeBuiltinScene("door")) == 1);
-    for (const char* name : {"sphere_field", "terrain", "sunset"})
+    for (const char* name : {"sphere_field", "terrain", "sunset", "cumulus"})
     {
         const renderer::Sky sky = renderer::MakeBuiltinScene(name)->sky;
         EXPECT(sky.physical && sky.sunElevation > 0.0f); // daylight from the physical sky
     }
+    EXPECT(renderer::MakeBuiltinScene("cumulus")->clouds.enabled);
     // Generated with a fixed seed: building twice gives the same scene.
     const renderer::SceneDesc again = *renderer::MakeBuiltinScene("sphere_field");
     EXPECT(again.instances.size() == field.instances.size());
@@ -138,4 +140,42 @@ TEST(Scene_LightAliasTableReproducesProbabilities)
     }
     EXPECT(std::abs(total - 1.0) < 1e-4);
     EXPECT(worst < 1e-5); // relative to the mean probability 1/N
+}
+
+// Only camera rays look for clouds in front of a surface, so Validate keeps the cloud base above
+// every instance.
+TEST(Scene_CloudsStayAboveTheGeometry)
+{
+    renderer::SceneDesc desc = *renderer::MakeBuiltinScene("cumulus");
+    EXPECT(renderer::Validate(desc).empty());
+    desc.clouds.bottom = 5.0f; // below the roofs
+    EXPECT(renderer::Validate(desc).find("above every instance") != std::string::npos);
+    desc.clouds.bottom = 1500.0f;
+    desc.clouds.top = 1550.0f; // too thin
+    EXPECT(!renderer::Validate(desc).empty());
+}
+
+// Clouds are baked and uploaded when they change and released when they go.
+TEST(Scene_CloudResourcesFollowEdits)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    {
+        renderer::Scene scene(*device, *renderer::MakeBuiltinScene("sunset"));
+        EXPECT(scene.Get().clouds.enabled == 0 && !scene.Get().cloudBase.IsValid());
+        renderer::Clouds clouds{.enabled = true};
+        scene.SetClouds(clouds);
+        scene.Update();
+        EXPECT(scene.Get().clouds.enabled == 1 && scene.Get().cloudBase.IsValid() &&
+               scene.Get().cloudDetail.IsValid() && scene.Get().cloudMajorants.IsValid());
+        const u64 version = scene.Get().version;
+        scene.SetClouds(clouds); // unchanged
+        scene.Update();
+        EXPECT(scene.Get().version == version);
+        clouds.enabled = false;
+        scene.SetClouds(clouds);
+        scene.Update();
+        EXPECT(scene.Get().clouds.enabled == 0 && !scene.Get().cloudBase.IsValid());
+    }
+    device->WaitIdle();
+    EXPECT(device->GetMemoryStats().liveBuffers == 0 && device->GetMemoryStats().liveTextures == 0);
 }

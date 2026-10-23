@@ -15,19 +15,21 @@
 
 #include "air/renderer/Sky.h"
 
+#include "ParallelFor.h"
+
 #include "air/core/Assert.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <numbers>
-#include <thread>
 
 namespace air::renderer
 {
 namespace
 {
 
+using detail::ParallelFor;
 using hlsl::float3;
 
 constexpr double kPi = std::numbers::pi;
@@ -450,29 +452,6 @@ float3 ToRgb(const Atmosphere& a, const Spectrum& radiance)
     const double green = -0.9692660 * x + 1.8760108 * y + 0.0415560 * z;
     const double blue = 0.0556434 * x - 0.2040259 * y + 1.0572252 * z;
     return float3(float(std::max(red, 0.0)), float(std::max(green, 0.0)), float(std::max(blue, 0.0)));
-}
-
-// Runs body(i) for i in [0, count) on all hardware threads.
-template <typename F> void ParallelFor(int count, F&& body)
-{
-    const int threads = std::max(1, std::min(int(std::thread::hardware_concurrency()), count));
-    std::vector<std::thread> pool;
-    pool.reserve(size_t(threads));
-    for (int t = 0; t < threads; ++t)
-    {
-        pool.emplace_back(
-            [&, t]
-            {
-                for (int i = t; i < count; i += threads)
-                {
-                    body(i);
-                }
-            });
-    }
-    for (std::thread& thread : pool)
-    {
-        thread.join();
-    }
 }
 
 void BuildTables(Tables& tables)

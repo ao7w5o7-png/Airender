@@ -555,4 +555,43 @@ SceneDesc MakeSunset()
     return scene;
 }
 
+// A meadow under fair-weather cumulus (Clouds.h) in the afternoon: the clouds' bright tops and grey
+// bases, the sky between them, their shadows drifting over 4 km of grass, a farmstead for scale.
+SceneDesc MakeCumulus()
+{
+    SceneDesc scene;
+    scene.name = "cumulus";
+    const u32 grass = AddMaterial(scene, {.name = "Grass", .baseColor = {0.14f, 0.19f, 0.07f}, .roughness = 0.9f});
+    const u32 wall = AddMaterial(scene, {.name = "Whitewash", .baseColor = {0.75f, 0.73f, 0.68f}, .roughness = 0.7f});
+    const u32 roof = AddMaterial(scene, {.name = "Roof", .baseColor = {0.35f, 0.12f, 0.08f}, .roughness = 0.6f});
+    const u32 bark = AddMaterial(scene, {.name = "Bark", .baseColor = {0.2f, 0.15f, 0.1f}, .roughness = 0.9f});
+    const u32 leaves = AddMaterial(scene, {.name = "Leaves", .baseColor = {0.08f, 0.15f, 0.05f}, .roughness = 0.8f});
+    constexpr float kHalf = 2000.0f;
+    AddInstance(scene, "Meadow",
+                AddMesh(scene, MakeQuad("Meadow", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                grass);
+    AddBox(scene, "House", {-14.0f, 3.0f, -40.0f}, {6.0f, 3.0f, 4.0f}, wall, 0.3f);
+    AddBox(scene, "Roof", {-14.0f, 6.6f, -40.0f}, {6.4f, 0.6f, 4.4f}, roof, 0.3f);
+    AddBox(scene, "Barn", {6.0f, 4.0f, -70.0f}, {8.0f, 4.0f, 5.0f}, roof, -0.2f);
+    const u32 trunk = AddMesh(scene, MakeBox("Trunk", {0.25f, 2.0f, 0.25f}));
+    const u32 crown = AddMesh(scene, MakeSphere("Crown", 2.6f, 32));
+    const float3 trees[] = {{-30.0f, 0.0f, -25.0f},
+                            {-24.0f, 0.0f, -55.0f},
+                            {18.0f, 0.0f, -38.0f},
+                            {30.0f, 0.0f, -95.0f},
+                            {-60.0f, 0.0f, -120.0f}};
+    for (size_t i = 0; i < std::size(trees); ++i)
+    {
+        SetTransform(AddInstance(scene, std::format("Trunk{}", i), trunk, bark), trees[i] + float3(0.0f, 2.0f, 0.0f));
+        SetTransform(AddInstance(scene, std::format("Crown{}", i), crown, leaves), trees[i] + float3(0.0f, 5.6f, 0.0f));
+    }
+    AddSky(scene, 38.0f, 150.0f);
+    scene.clouds = {.enabled = true, .bottom = 1200.0f, .top = 3200.0f, .coverage = 0.4f};
+    LookAt(scene.camera, {0.0f, 1.7f, 0.0f}, {-10.0f, 12.0f, -60.0f});
+    scene.camera.verticalFov = 1.0f;
+    scene.camera.ev100 = 14.5f;
+    return scene;
+}
+
 } // namespace air::renderer::detail

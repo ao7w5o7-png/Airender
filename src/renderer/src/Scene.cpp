@@ -2,6 +2,7 @@
 
 #include "air/core/Assert.h"
 #include "air/core/Profiler.h"
+#include "air/renderer/Transfer.h"
 
 #include <algorithm>
 #include <array>
@@ -241,6 +242,7 @@ Scene::~Scene()
     {
         mDevice.DestroyBuffer(buffer);
     }
+    DestroyClouds();
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
 }
@@ -365,6 +367,15 @@ void Scene::SetSky(const Sky& sky)
     }
 }
 
+void Scene::SetClouds(const Clouds& clouds)
+{
+    if (!(mDesc.clouds == clouds))
+    {
+        mDesc.clouds = clouds;
+        mDirty = true;
+    }
+}
+
 void Scene::SetEnvironment(float3 radiance)
 {
     if (!(mDesc.environment == radiance))
@@ -451,6 +462,56 @@ void Scene::WriteDynamicData()
     WriteBuffer(mDevice, mSkyRing[mRingSlot], skyTable.data(), skyTable.size() * sizeof(float));
     mGpu.skyTable = mSkyRing[mRingSlot];
     mGpu.sky = mSkyTable.data;
+
+    // The clouds are baked and uploaded only when they change (the old resources go once the GPU
+    // is done with them).
+    if (!mCloudsBuilt || !(mCloudsFor == mDesc.clouds))
+    {
+        DestroyClouds();
+        const CloudVolume volume = BuildCloudVolume(mDesc.clouds);
+        mGpu.clouds = volume.data;
+        if (volume.data.enabled != 0)
+        {
+            const gpu::CloudData& c = volume.data;
+            mGpu.cloudBase = CreateTextureWithData(mDevice,
+                                                   {.dimension = rhi::TextureDimension::Tex3D,
+                                                    .format = rhi::Format::R8_UNORM,
+                                                    .width = c.gridX,
+                                                    .height = c.gridZ,
+                                                    .depthOrArraySize = c.gridY + 2,
+                                                    .debugName = std::format("{}.CloudBase", mDesc.name)},
+                                                   volume.base.data());
+            mGpu.cloudDetail = CreateTextureWithData(mDevice,
+                                                     {.dimension = rhi::TextureDimension::Tex3D,
+                                                      .format = rhi::Format::R8_UNORM,
+                                                      .width = volume.detailSize,
+                                                      .height = volume.detailSize,
+                                                      .depthOrArraySize = volume.detailSize,
+                                                      .debugName = std::format("{}.CloudDetail", mDesc.name)},
+                                                     volume.detail.data());
+            mGpu.cloudMajorants =
+                CreateBufferWithData(mDevice,
+                                     {.stride = sizeof(float),
+                                      .usage = BufferUsage::ShaderResource,
+                                      .debugName = std::format("{}.CloudMajorants", mDesc.name)},
+                                     volume.majorants.data(), volume.majorants.size() * sizeof(float));
+        }
+        mCloudsFor = mDesc.clouds;
+        mCloudsBuilt = true;
+    }
+}
+
+void Scene::DestroyClouds()
+{
+    if (mGpu.cloudBase.IsValid())
+    {
+        mDevice.DestroyTexture(mGpu.cloudBase);
+        mDevice.DestroyTexture(mGpu.cloudDetail);
+        mDevice.DestroyBuffer(mGpu.cloudMajorants);
+    }
+    mGpu.cloudBase = {};
+    mGpu.cloudDetail = {};
+    mGpu.cloudMajorants = {};
 }
 
 } // namespace air::renderer

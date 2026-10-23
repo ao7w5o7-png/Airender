@@ -14,6 +14,8 @@
 //   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
 //   float3        SkyTableLoad(uint texel)            the sky radiance table (SkyLookup.hlsli)
+//   float         CloudBaseSample(CloudData c, float3 uvw), CloudDetailSample(...),
+//   float         CloudMajorantLoad(CloudData c, uint cell)   the clouds (CloudLookup.hlsli)
 // HitInfo, CameraData and the kFlag* constants come from PathTracerShared.h.
 //
 // Estimator: emitted radiance is gathered at path vertices 1 .. maxBounces + 1 (vertex 1 is the
@@ -25,6 +27,10 @@
 // uniform) is only reached by BSDF sampling; the sun's disc is a light of its own, sampled at every
 // vertex and weighed against BSDF samples that reach it, like the triangles. Russian roulette
 // starts after the third bounce and is unbiased.
+// Rays that leave the geometry cross the clouds (CloudLookup.hlsli) on their way to the sky: a random
+// walk through them gathers the light they scatter (EscapeRadiance), and the sun's light reaching a
+// surface is dimmed by their transmittance. The clouds lie above all geometry, so the only other
+// segment that can meet them is a camera ray from above their base.
 // With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
 // entirely: ReSTIR DI (ReSTIRDI.hlsli) estimates it.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
@@ -32,6 +38,7 @@
 
 #include "Bsdf.hlsli"
 #include "Sampling.hlsli"
+#include "air/renderer/shader/CloudLookup.hlsli"
 #include "air/renderer/shader/SkyLookup.hlsli"
 
 // ReSTIR GI's candidate recording (kFlagReSTIRGI) is compiled only where it is used (PathTracerGi.hlsl):
@@ -42,11 +49,13 @@
 
 struct IntegratorParams
 {
-    SkyData sky; // the sky's radiance (a table or uniform) and the sun's disc
+    SkyData sky;      // the sky's radiance (a table or uniform) and the sun's disc
+    CloudData clouds; // enabled == 0: none
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
     uint lightTreeBounces; // vertices 0 .. lightTreeBounces - 1 choose lights with the light tree
+    uint cloudEvents;      // scattering events a walk through the clouds may take
 };
 
 struct Surface
@@ -378,6 +387,94 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
     return s;
 }
 
+// --- Clouds --------------------------------------------------------------------------------------
+
+// Radiance arriving at `origin` along `direction` from the clouds and the sky beyond them, for a ray
+// that meets no surface before tMax (1e30: none at all). A random walk by delta tracking: at every
+// scattering event, next event estimation of the sun (its transmittance by ratio tracking) weighed
+// by the power heuristic against phase sampling, which continues the walk. A walk that leaves the
+// layer downwards sees the ground of the sky table: light the scene's own geometry would reflect
+// back up into the clouds is not traced. `sun` is the disc seen straight through (the caller weighs
+// it against its sun NEE); `rest` is everything else. `surface`: the ray reached its surface at
+// tMax without meeting the clouds, and nothing else was gathered.
+struct Escape
+{
+    float3 sun;
+    float3 rest;
+    bool surface;
+};
+
+Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, float tMax, AIR_INOUT(uint) seed)
+{
+    Escape escape;
+    escape.sun = float3(0.0f, 0.0f, 0.0f);
+    escape.rest = float3(0.0f, 0.0f, 0.0f);
+    escape.surface = false;
+    CloudData c = params.clouds;
+    float albedo = (params.flags & kFlagFurnace) != 0u ? 1.0f : c.albedo;
+    bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
+    float sunPdf = sunNee ? 1.0f / SunSolidAngle(params.sky) : 0.0f;
+    float throughput = 1.0f;
+    float phasePdf = 0.0f; // of the phase sample that produced `d`
+    float3 p = origin;
+    float3 d = direction;
+    for (uint event = 0u; event <= params.cloudEvents; ++event)
+    {
+        float t = 0.0f;
+        if (!CloudCollision(c, p, d, event == 0u ? tMax : 1e30f, seed, t))
+        {
+            if (event == 0u && tMax < 1e30f)
+            {
+                escape.surface = true;
+                break;
+            }
+            float3 sun = float3(0.0f, 0.0f, 0.0f);
+            if (HasSun(params.sky) && dot(d, params.sky.sunDirection) >= params.sky.sunCosRadius)
+            {
+                sun = params.sky.sunRadiance;
+            }
+            float3 sky = SkyRadiance(params.sky, d);
+            if (event == 0u)
+            {
+                escape.sun = sun;
+                escape.rest = sky;
+            }
+            else
+            {
+                escape.rest += (sky + sun * (sunNee ? PowerHeuristic(phasePdf, sunPdf) : 1.0f)) * throughput;
+            }
+            break;
+        }
+        if (event == params.cloudEvents)
+        {
+            break; // the walk is too long: its light is lost (rare, see docs/architecture.md §8.10)
+        }
+        p = p + d * t;
+        throughput *= albedo;
+        if (sunNee)
+        {
+            float3 wi = SampleSunDirection(params.sky, float2(Rand(seed), Rand(seed)));
+            float phase = CloudPhase(c, dot(d, wi));
+            float transmittance = CloudTransmittance(c, p, wi, 1e30f, seed);
+            float weight = PowerHeuristic(sunPdf, phase);
+            escape.rest += params.sky.sunRadiance * (throughput * transmittance * phase * weight / sunPdf);
+        }
+        float3 u = float3(Rand(seed), Rand(seed), Rand(seed));
+        float3 next = SampleCloudPhase(c, d, u);
+        phasePdf = CloudPhase(c, dot(d, next));
+        d = next;
+        if (throughput < 0.25f)
+        {
+            if (Rand(seed) >= throughput * 4.0f)
+            {
+                break;
+            }
+            throughput = 0.25f;
+        }
+    }
+    return escape;
+}
+
 // --- Path ----------------------------------------------------------------------------------------
 
 PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, AIR_INOUT(uint) seed)
@@ -451,16 +548,22 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         HitInfo hit = TraceClosest(origin, direction, bounce);
         bool direct = bounce <= 1u;
         bool beyondX2 = gi && bounce >= 2u; // light found here is the continuation candidate's
-        if (!hit.hit)
+        // Misses go on through the clouds; a ray from above their base (only the camera's) may meet
+        // them before its surface.
+        Escape escape;
+        escape.sun = float3(0.0f, 0.0f, 0.0f);
+        escape.rest = float3(0.0f, 0.0f, 0.0f);
+        escape.surface = true;
+        if (!hit.hit || (params.clouds.enabled != 0u && origin.y > params.clouds.bottom))
         {
-            // The sky, and the sun when the ray falls within its disc, weighed against sun NEE at the
-            // vertex the ray left.
-            float3 sky = SkyRadiance(params.sky, direction);
-            float3 sun = float3(0.0f, 0.0f, 0.0f);
-            if (HasSun(params.sky) && dot(direction, params.sky.sunDirection) >= params.sky.sunCosRadius)
-            {
-                sun = params.sky.sunRadiance;
-            }
+            escape = EscapeRadiance(params, origin, direction, hit.hit ? hit.t : 1e30f, seed);
+        }
+        if (!hit.hit || !escape.surface)
+        {
+            // The sky and the clouds, and the sun when the ray reaches it within its disc, weighed
+            // against sun NEE at the vertex the ray left.
+            float3 sky = escape.rest;
+            float3 sun = escape.sun;
             if (beyondX2 && bounce == 2u)
             {
                 // Reached from x2: ReSTIR GI weighs the sun itself (see the emission below).
@@ -628,7 +731,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             }
         }
 
-        // The sun: one direction within its disc. (ReSTIR DI only takes over the triangles.)
+        // The sun: one direction within its disc, through the clouds. (ReSTIR DI only takes over
+        // the triangles.)
         if (sunNee)
         {
             float2 uSun = float2(Rand(seed), Rand(seed));
@@ -638,8 +742,10 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
                 if (any(e.fCos) && TraceVisible(rayOrigin, wi, 1e30f))
                 {
+                    float3 sunRadiance =
+                        params.sky.sunRadiance * CloudTransmittance(params.clouds, rayOrigin, wi, 1e30f, seed);
                     float weight = PowerHeuristic(sunPdf, e.pdf);
-                    float3 contribution = throughput * e.fCos * params.sky.sunRadiance * (weight / sunPdf);
+                    float3 contribution = throughput * e.fCos * sunRadiance * (weight / sunPdf);
                     if (gi && bounce == 1u)
                     {
                         float w = Luminance(contribution);
@@ -648,13 +754,13 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                         {
                             neeWeight = w;
                             neeDirection = wi;
-                            neeRadiance = params.sky.sunRadiance;
+                            neeRadiance = sunRadiance;
                             neeLightPdf = sunPdf;
                         }
                     }
                     else if (beyondX2)
                     {
-                        continuationRest += restThroughput * e.fCos * params.sky.sunRadiance * (weight / sunPdf);
+                        continuationRest += restThroughput * e.fCos * sunRadiance * (weight / sunPdf);
                     }
                     else
                     {

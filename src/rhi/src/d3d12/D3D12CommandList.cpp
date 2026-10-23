@@ -214,7 +214,8 @@ D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint(const TextureDesc& desc, u32 mip, u
     footprint.Footprint.Format = ToDxgi(desc.format);
     footprint.Footprint.Width = std::max(1u, desc.width >> mip);
     footprint.Footprint.Height = std::max(1u, desc.height >> mip);
-    footprint.Footprint.Depth = 1;
+    footprint.Footprint.Depth =
+        desc.dimension == TextureDimension::Tex3D ? std::max(1u, desc.depthOrArraySize >> mip) : 1u;
     footprint.Footprint.RowPitch = TextureCopyRowPitch(desc.format, footprint.Footprint.Width);
     return footprint;
 }

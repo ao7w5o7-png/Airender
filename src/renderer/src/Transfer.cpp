@@ -74,6 +74,41 @@ rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc
     return buffer;
 }
 
+rhi::TextureHandle CreateTextureWithData(rhi::Device& device, rhi::TextureDesc desc, const void* texels)
+{
+    desc.usage |= rhi::TextureUsage::CopyDst | rhi::TextureUsage::ShaderResource;
+    desc.mipLevels = 1;
+    const u32 depth = desc.dimension == rhi::TextureDimension::Tex3D ? desc.depthOrArraySize : 1u;
+    const u64 rowBytes = u64(desc.width) * rhi::FormatBytesPerPixel(desc.format);
+    const u64 pitch = rhi::TextureCopyRowPitch(desc.format, desc.width);
+    const u64 rows = u64(desc.height) * depth;
+    const rhi::TextureHandle texture = device.CreateTexture(desc);
+    const rhi::BufferHandle staging = device.CreateBuffer({.size = pitch * rows,
+                                                           .usage = rhi::BufferUsage::CopySrc,
+                                                           .memory = rhi::MemoryLocation::Upload,
+                                                           .debugName = desc.debugName + ".Staging"});
+    if (!texture.IsValid() || !staging.IsValid())
+    {
+        AIR_LOG(Error, "Transfer", "out of memory creating '{}'", desc.debugName);
+        return texture;
+    }
+    auto* mapped = static_cast<u8*>(device.GetMappedPointer(staging));
+    for (u64 row = 0; row < rows; ++row)
+    {
+        std::memcpy(mapped + row * pitch, static_cast<const u8*>(texels) + row * rowBytes, rowBytes);
+    }
+    auto cmd = device.CreateCommandList(rhi::QueueType::Graphics);
+    cmd->Begin();
+    cmd->Barriers(std::array{Barrier::Tex(texture, Access::None, Access::CopyDst)});
+    cmd->CopyBufferToTexture(texture, 0, staging, 0);
+    cmd->Barriers(std::array{Barrier::Tex(texture, Access::CopyDst, Access::SRVCompute)});
+    cmd->End();
+    rhi::CommandList* lists[] = {cmd.get()};
+    device.WaitForFence(rhi::QueueType::Graphics, device.Submit(rhi::QueueType::Graphics, lists));
+    device.DestroyBuffer(staging);
+    return texture;
+}
+
 std::optional<Image> ReadbackTexture(rhi::Device& device, rhi::TextureHandle texture, Access current)
 {
     const rhi::TextureDesc* desc = device.GetTextureDesc(texture);

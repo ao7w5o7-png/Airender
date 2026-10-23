@@ -114,6 +114,9 @@ bool EditorApp::LoadScene(const std::string& name)
     mScene = std::make_unique<renderer::Scene>(mDevice, std::move(*desc));
     mSceneName = name;
     mCamera = mScene->Desc().camera;
+    mSceneTop = renderer::HighestPoint(mScene->Desc());
+    mSkyEdit.reset();
+    mCloudsEdit.reset();
     AIR_LOG(Info, "Editor", "scene '{}': {} triangles, {} instances, {} materials", name, mScene->GetTriangleCount(),
             mScene->Desc().instances.size(), mScene->Desc().materials.size());
     return true;
@@ -911,6 +914,51 @@ void EditorApp::BuildScenePanel()
     else if (edited)
     {
         mSkyEdit = sky;
+    }
+
+    ImGui::SeparatorText("Clouds");
+    renderer::Clouds clouds = mCloudsEdit.value_or(mScene->Desc().clouds);
+    bool applyClouds = ImGui::Checkbox("Volumetric clouds", &clouds.enabled);
+    ImGui::SetItemTooltip("A layer of cumulus above the scene, path traced through (docs/architecture.md, "
+                          "section 8.10).\nThe physical sky's sun lights them.");
+    bool cloudsEdited = applyClouds;
+    if (clouds.enabled)
+    {
+        auto slider = [&](const char* label, float* value, float lo, float hi, const char* format, int flags = 0)
+        {
+            cloudsEdited |= ImGui::SliderFloat(label, value, lo, hi, format, flags);
+            applyClouds |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        slider("Coverage", &clouds.coverage, 0.0f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Fraction of the sky under the clouds' outlines.");
+        slider("Cloud base", &clouds.bottom, std::max(mSceneTop + 1.0f, 50.0f), 6000.0f, "%.0f m");
+        slider("Cloud tops", &clouds.top, clouds.bottom + 100.0f, 12000.0f, "%.0f m");
+        slider("Extinction", &clouds.extinction, 0.005f, 0.3f, "%.3f /m", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Per metre where the density is 1. Cumulus: 0.02 to 0.1 (a mean free path of 10 to "
+                              "50 m).\nDenser clouds are whiter, darker below, and slower to render.");
+        slider("Droplet size", &clouds.dropletDiameter, 5.0f, 50.0f, "%.1f um");
+        ImGui::SetItemTooltip("Effective droplet diameter: shapes the phase function (Jendersie and d'Eon 2023).");
+        slider("Shape scale", &clouds.scale, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        int seed = int(clouds.seed);
+        cloudsEdited |= ImGui::DragInt("Seed##clouds", &seed, 0.2f, 0, 1 << 20);
+        applyClouds |= ImGui::IsItemDeactivatedAfterEdit();
+        clouds.seed = u32(std::max(seed, 0));
+        applyClouds |= ImGui::Checkbox("Exact phase function", &clouds.exactPhase);
+        ImGui::SetItemTooltip("Keep the diffraction peak as scattering (the reference, much noisier in sunlit "
+                              "clouds).\nOff: it counts as unscattered light (delta-M scaling), which only changes "
+                              "the image within a degree or so of the sun.");
+    }
+    // A valid layer: above the scene, at least 100 m (times the shape scale) thick.
+    clouds.bottom = std::max(clouds.bottom, mSceneTop + 1.0f);
+    clouds.top = std::max(clouds.top, clouds.bottom + 100.0f * clouds.scale);
+    if (applyClouds)
+    {
+        mScene->SetClouds(clouds);
+        mCloudsEdit.reset();
+    }
+    else if (cloudsEdited)
+    {
+        mCloudsEdit = clouds;
     }
 
     ImGui::SeparatorText("Materials");

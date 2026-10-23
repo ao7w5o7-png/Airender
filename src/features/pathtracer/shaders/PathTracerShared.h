@@ -2,6 +2,7 @@
 #ifndef AIR_PATH_TRACER_SHARED_H
 #define AIR_PATH_TRACER_SHARED_H
 
+#include "air/renderer/shader/CloudShared.h"
 #include "air/renderer/shader/HlslCompat.h"
 #include "air/renderer/shader/SkyShared.h"
 
@@ -9,6 +10,7 @@
 namespace air::pt::gpu
 {
 using namespace air::hlsl;
+using air::gpu::CloudData;
 using air::gpu::SkyData;
 #endif
 
@@ -63,6 +65,7 @@ struct FrameData
     CameraData camera;
     CameraData previousCamera; // for motion vectors
     SkyData sky;               // sky radiance (a table or uniform) and the sun; uniform in the furnace
+    CloudData clouds;          // the cloud layer and its resources; enabled == 0: none
     float2 jitter;             // sub-pixel offset in [-0.5, 0.5) for kFlagGlobalJitter
     uint frameIndex;
     uint flags;
@@ -75,7 +78,7 @@ struct FrameData
     float debugScale;      // normalizes depth / intersection debug views
     uint lightTreeBounces; // NEE uses the light tree at path vertices below this, power beyond
     float exposure;        // radiance -> scene-linear, applied by Resolve
-    uint pad0;
+    uint cloudEvents;      // scattering events a walk through the clouds may take
     uint pad1;
     uint pad2;
 };
@@ -113,7 +116,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 240);
+static_assert(sizeof(FrameData) == 336);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

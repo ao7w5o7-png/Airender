@@ -48,10 +48,12 @@ IntegratorParams MakeParams(FrameData f)
 {
     IntegratorParams params;
     params.sky = f.sky;
+    params.clouds = f.clouds;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
     params.lightTreeBounces = f.lightTreeBounces;
+    params.cloudEvents = f.cloudEvents;
     return params;
 }
 

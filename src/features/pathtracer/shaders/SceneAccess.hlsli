@@ -1,9 +1,12 @@
 // The integrator's scene hooks (Integrator.hlsli) over the bindless scene buffers, and inline shadow
 // rays: shared by the trace kernel and the ReSTIR passes. The including shader declares `g`, its push
 // constants, with the fields tlas, instances, materials, lights, instanceLights, lightTree, bsdfLut and
-// skyTable, and supplies TraceClosest itself (closest-hit shaders or an inline query).
+// skyTable, and supplies TraceClosest itself (closest-hit shaders or an inline query). The clouds'
+// resources come with their CloudData.
 #ifndef AIR_PT_SCENE_ACCESS_HLSLI
 #define AIR_PT_SCENE_ACCESS_HLSLI
+
+SamplerState gLinearWrap : register(s2); // a static sampler of the bindless root signature
 
 float BsdfLutLoad(uint index)
 {
@@ -51,6 +54,24 @@ float3 SkyTableLoad(uint texel)
 {
     StructuredBuffer<float> table = ResourceDescriptorHeap[g.skyTable];
     return float3(table[texel * 3u], table[texel * 3u + 1u], table[texel * 3u + 2u]);
+}
+
+float CloudBaseSample(CloudData c, float3 uvw)
+{
+    Texture3D<float> base = ResourceDescriptorHeap[c.baseTexture];
+    return base.SampleLevel(gLinearWrap, uvw, 0.0f);
+}
+
+float CloudDetailSample(CloudData c, float3 uvw)
+{
+    Texture3D<float> detail = ResourceDescriptorHeap[c.detailTexture];
+    return detail.SampleLevel(gLinearWrap, uvw, 0.0f);
+}
+
+float CloudMajorantLoad(CloudData c, uint cell)
+{
+    StructuredBuffer<float> majorants = ResourceDescriptorHeap[c.majorants];
+    return majorants[cell];
 }
 
 LightTreeNode LoadLightNode(uint node)

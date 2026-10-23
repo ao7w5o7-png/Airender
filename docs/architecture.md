@@ -403,7 +403,8 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `lightTreeBounces`, `restir*` (§8.7), `furnace`, `debugView`, `ser` and `debugScale`.
+`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `restir*` (§8.7), `furnace`, `debugView`, `ser`
+and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -434,6 +435,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `door` | light reaches the camera's room only through a door left ajar | indirect-dominated transport |
   | `terrain` | 2.1M triangle height field, lake, physical sky and sun | dense geometry, BLAS build and memory |
   | `sunset` | a plain, two spheres and five pillars under a sun 4 degrees high | the physical sky (§8.9), long shadows |
+  | `cumulus` | a 4 km meadow, a farmstead and trees under fair-weather cumulus | volumetric clouds (§8.10): their light, shadows, cost |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -815,8 +817,86 @@ Validation:
   agree (0.5% apart at 256 spp).
 - GPU against the CPU reference on `sunset` (96x54): the means differ by 0.06%, by 0.13% with
   ReSTIR DI and GI accumulated.
-- Not modelled yet: the air between surfaces in the scene (aerial perspective, visible at a few
-  hundred metres), which comes with participating media; the sun's limb darkening.
+- Not modelled yet: the air between surfaces in the scene and between the camera and the clouds
+  (aerial perspective, visible from a few hundred metres on); the sun's limb darkening.
+
+### 8.10 Volumetric clouds
+
+`SceneDesc::clouds` (`renderer/Clouds.h`) adds a layer of cumulus above the scene: the heights of
+its base and tops, coverage, extinction at density 1, the droplets' effective diameter and
+single-scattering albedo, a shape scale and a seed. `cumulus` uses it; `aircli render|reference
+--clouds COVERAGE[,BOTTOM,TOP]` adds it to any scene (0 removes it; it switches on the physical sky,
+whose sun lights the clouds), and the editor's Scene panel edits it.
+
+- **Density** (`src/renderer/src/Clouds.cpp`), procedural, baked on the CPU into two 8-bit 3D
+  textures when the clouds change (0.2 s in debug builds, all cores):
+  - the base, 256 x 256 texels over a 12.8 km tile that repeats horizontally and 25 m layers in
+    height. A 2D weather field (gradient noise for regional variation, cellular noise that gathers
+    clouds into cells) is thresholded at its 1 - coverage quantile, so the requested fraction of the
+    tile lies under cloud outlines; how far it exceeds the threshold sets a cloud's height and
+    density. Bases are flat at the condensation level, tops are domes, billowy cellular noise
+    carves the outline and liquid water grows with height above the base.
+  - the detail, 64^3 texels of cellular noise repeating every 400 m, which erodes the base's fringe
+    at render time; the eroded density is then sharpened (times 10, clamped to 1): crisp outlines,
+    even interiors.
+  - majorants, one per 8 x 4 x 8 base texels plus the texels around them that trilinear filtering
+    reaches. They bound the density everywhere because the erosion only lowers it and the
+    sharpening is monotonic.
+- **One lookup, two renderers**: `shader/CloudLookup.hlsli` (the density, a 3D DDA over the
+  majorant cells that skips empty ones, delta and ratio tracking, the phase function) is shared
+  like the integrator. The GPU samples the textures with hardware trilinear filtering (the root
+  signature's linear-wrap static sampler); the CPU reference emulates that filter including its
+  8-bit weights (`renderer::SampleTexture3D`). Hardware filtering halved the cost of a cloud frame
+  compared with 8 buffer loads per lookup.
+- **Phase function**: Mie scattering by water droplets as fitted by Jendersie and d'Eon 2023:
+  Henyey-Greenstein for the diffraction peak (g = 0.995 at 20 micrometres) blended with Draine's
+  function for the rest (g = 0.59, alpha = 27), all four parameters from the droplet diameter
+  (5-50 micrometres); both lobes are sampled exactly (Draine's CDF inverts in closed form).
+- **Delta-M scaling** by default (`Clouds::exactPhase` false, Wiscombe 1977): the diffraction peak,
+  about half of all scattering within a fraction of a degree, counts as unscattered light. The
+  extinction becomes sigma (1 - f albedo) and the albedo albedo (1 - f) / (1 - f albedo) for the
+  peak's weight f, and Draine's function alone is the phase function. Transport away from the
+  forward direction is unchanged (the means of the two agree to 0.1%), but the rare paths that line
+  up with the sun inside the peak, each carrying a large share of its 1.6e9 nits, are gone: with the
+  exact phase function sunlit clouds sparkle with fireflies for thousands of samples. It only
+  changes the image within a degree or so of the sun (the sun seen through a thin cloud keeps its
+  sharp disc instead of a glowing peak around it).
+- **Transport** (`EscapeRadiance` in `Integrator.hlsli`): the layer lies above all geometry
+  (`Validate` checks it), so a path meets it only on its way to the sky. Every ray that leaves the
+  geometry, and a camera ray from above the cloud base before it reaches its surface, walks through
+  the clouds by delta tracking. At each scattering event the sun is sampled by next event
+  estimation, its transmittance by ratio tracking (Russian roulette below 0.1), and weighted by the
+  power heuristic against phase sampling, which continues the walk. A walk that leaves the layer
+  gets the sky table's radiance; below the horizon that is the planet's sunlit ground: light that
+  the scene's own geometry reflects back up into the clouds is not traced. The sun's NEE at a
+  surface is dimmed by the clouds' transmittance, which casts their shadows. `pathtracer.cloudEvents`
+  (256) caps the scattering events of a walk; light beyond it is lost (raising it to 4096 changes
+  `cumulus` by less than its noise).
+- **ReSTIR**: DI is unchanged (it resamples triangle lights only). In GI the sun's NEE at x2
+  carries the clouds' transmittance into its candidate, and a continuation through the clouds
+  splits into the sun seen straight through (the MIS-weighted emission) and the rest.
+
+Validation:
+
+- `tests/CloudTests.cpp`: the phase fit at 20 micrometres; the phase function integrates to 1 for
+  5, 20 and 50 micrometres with a mean cosine of 0.75-0.92; sampled cosines follow its CDF at 8 cuts
+  (400k samples, within 0.003); the volume covers about the requested sky and, along 2000 random
+  rays, the density never exceeds the majorant of the cell the DDA is in; the density repeats with
+  the tile; ratio and delta tracking both match a 0.5 m ray march of exp(-optical depth) for rays of
+  optical depth 0.1-3; disabled clouds are transparent.
+- `Integrator_CloudsVanishInAWhiteFurnace`: with albedo 1 in a uniform environment every path
+  through the clouds returns the environment exactly, so every pixel is 0.18.
+- `Integrator_CloudSunNeeAndPhaseSamplingAgree`: with a 12-degree sun, NEE + MIS and phase sampling
+  alone agree within 0.5% at 512 spp, with and without delta-M scaling.
+- `Scene_CloudsStayAboveTheGeometry`, `Scene_CloudResourcesFollowEdits`.
+- GPU against the CPU reference on `cumulus` (160x90, `--sun 38,-20`, 8192 against 2048 spp): the
+  means differ by 0.014%; sky, horizon and ground separately by at most 0.2%.
+- Cost (RTX 5070, 960x540, 4 spp per frame, front-lit `cumulus`): 78 ms per frame. Multiple
+  scattering in thick media is the most expensive transport here, and noisy: a cloud pixel's
+  samples have a relative standard deviation of about 0.8, so clouds need hundreds of samples (or
+  a denoiser).
+- Not modelled: the planet's curvature (the layer is flat and ends 100 km along a ray), wind, the
+  scene's own geometry lighting the clouds, aerial perspective between the camera and the clouds.
 ---
 
 ## 9. Editor

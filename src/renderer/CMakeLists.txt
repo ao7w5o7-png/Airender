@@ -1,4 +1,5 @@
 add_library(air_renderer
+    src/Clouds.cpp
     src/Diagnostics.cpp
     src/FeatureRegistry.cpp
     src/FrameRunner.cpp

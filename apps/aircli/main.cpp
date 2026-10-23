@@ -8,10 +8,13 @@
 //                   [--no-async-compute] [--no-transient-pool] [--html profile.html]   (report of the last frame)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
+//                   [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)
+//                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
+//                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
 //
 // `render` fails (exit 1) if any frame produced a validation error.
@@ -32,6 +35,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <format>
@@ -59,9 +63,13 @@ int Usage()
                "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
                "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
+               "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)\n"
+               "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
+               "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
+               "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
                "  aircli features | scenes\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
                stderr);
@@ -155,11 +163,20 @@ int CommandScenes()
     return kExitOk;
 }
 
-// --sun ELEVATION,AZIMUTH (degrees) and --aerosols DEPTH: give any scene the physical sky (Sky.h).
-struct SkyOptions
+// Changes to a built-in scene:
+//   --sun ELEVATION,AZIMUTH (degrees) and --aerosols DEPTH give it the physical sky (Sky.h);
+//   --clouds COVERAGE[,BOTTOM,TOP] (metres) adds a cloud layer (Clouds.h), 0 removes it; --clouds-exact
+//   keeps their phase function's diffraction peak;
+//   --camera EX,EY,EZ,TX,TY,TZ[,FOV] puts the camera at the eye looking at the target (vertical field
+//   of view in degrees), --ev EV100 sets its exposure.
+struct SceneOptions
 {
     std::optional<std::pair<float, float>> sun;
     std::optional<float> aerosols;
+    std::vector<std::string> clouds;
+    bool cloudsExact = false;
+    std::vector<std::string> camera;
+    std::optional<float> ev100;
 
     // True when `arg` was one of these options.
     bool Parse(std::string_view arg, Args& args)
@@ -177,6 +194,26 @@ struct SkyOptions
             aerosols = std::stof(std::string(args.Next()));
             return true;
         }
+        if (arg == "--clouds")
+        {
+            clouds = Split(args.Next(), ',');
+            return true;
+        }
+        if (arg == "--clouds-exact")
+        {
+            cloudsExact = true;
+            return true;
+        }
+        if (arg == "--camera")
+        {
+            camera = Split(args.Next(), ',');
+            return true;
+        }
+        if (arg == "--ev")
+        {
+            ev100 = std::stof(std::string(args.Next()));
+            return true;
+        }
         return false;
     }
 
@@ -192,6 +229,36 @@ struct SkyOptions
         {
             scene.sky.aerosolDepth = *aerosols;
         }
+        if (!clouds.empty())
+        {
+            scene.clouds.coverage = std::stof(clouds[0]);
+            scene.clouds.enabled = scene.clouds.coverage > 0.0f;
+            if (clouds.size() >= 3)
+            {
+                scene.clouds.bottom = std::stof(clouds[1]);
+                scene.clouds.top = std::stof(clouds[2]);
+            }
+            // Clouds in a uniform environment would have no sun to light them.
+            scene.sky.physical = scene.sky.physical || scene.clouds.enabled;
+        }
+        scene.clouds.exactPhase = scene.clouds.exactPhase || cloudsExact;
+        if (camera.size() >= 6)
+        {
+            const hlsl::float3 eye(std::stof(camera[0]), std::stof(camera[1]), std::stof(camera[2]));
+            const hlsl::float3 d =
+                hlsl::normalize(hlsl::float3(std::stof(camera[3]), std::stof(camera[4]), std::stof(camera[5])) - eye);
+            scene.camera.position = eye;
+            scene.camera.yaw = std::atan2(-d.x, -d.z); // yaw 0, pitch 0 looks down -z
+            scene.camera.pitch = std::asin(std::clamp(d.y, -1.0f, 1.0f));
+            if (camera.size() >= 7)
+            {
+                scene.camera.verticalFov = std::stof(camera[6]) * 3.14159265f / 180.0f;
+            }
+        }
+        if (ev100)
+        {
+            scene.camera.ev100 = *ev100;
+        }
     }
 };
 
@@ -202,7 +269,7 @@ int CommandReference(Args& args)
 {
     std::string sceneName = "cornell_box";
     std::string outputPath;
-    SkyOptions skyOptions;
+    SceneOptions sceneOptions;
     pt::ReferenceSettings settings;
     settings.width = 320;
     settings.height = 180;
@@ -242,11 +309,15 @@ int CommandReference(Args& args)
         {
             settings.nextEventEstimation = false;
         }
+        else if (arg == "--cloud-events")
+        {
+            settings.cloudEvents = u32(std::stoul(std::string(args.Next()))); // as pathtracer.cloudEvents
+        }
         else if (arg == "--light-tree-bounces")
         {
             settings.lightTreeBounces = u32(std::stoul(std::string(args.Next()))); // as pathtracer.lightTreeBounces
         }
-        else if (skyOptions.Parse(arg, args))
+        else if (sceneOptions.Parse(arg, args))
         {
         }
         else
@@ -260,7 +331,7 @@ int CommandReference(Args& args)
     {
         return Usage();
     }
-    skyOptions.Apply(*scene);
+    sceneOptions.Apply(*scene);
     TaskSystem tasks;
     settings.tasks = &tasks;
     const auto start = std::chrono::steady_clock::now();
@@ -357,7 +428,7 @@ int CommandRender(Args& args)
     std::string htmlPath;
     std::string sceneName = "cornell_box";
     std::string outputPath;
-    SkyOptions skyOptions;
+    SceneOptions sceneOptions;
     bool dumpCommands = false;
 
     while (!args.Done())
@@ -437,7 +508,7 @@ int CommandRender(Args& args)
         {
             outputPath = args.Next();
         }
-        else if (skyOptions.Parse(arg, args))
+        else if (sceneOptions.Parse(arg, args))
         {
         }
         else
@@ -482,7 +553,7 @@ int CommandRender(Args& args)
             AIR_LOG(Error, "aircli", "unknown scene '{}'", sceneName);
             return kExitUsage;
         }
-        skyOptions.Apply(*sceneDesc);
+        sceneOptions.Apply(*sceneDesc);
         renderer::Scene scene(*device, std::move(*sceneDesc));
         const renderer::Camera camera = scene.Desc().camera;
         report["scene"] = sceneName;

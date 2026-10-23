@@ -133,10 +133,12 @@ void RayGen()
 
     IntegratorParams params;
     params.sky = f.sky;
+    params.clouds = f.clouds;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
     params.lightTreeBounces = f.lightTreeBounces;
+    params.cloudEvents = f.cloudEvents;
 
     uint seed = Pcg(pixel.x + Pcg(pixel.y + Pcg(f.frameIndex)));
     float3 sum = 0.0f;

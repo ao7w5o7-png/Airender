@@ -13,6 +13,7 @@ add_executable(air_tests
     ShaderHotReloadTests.cpp
     SceneTests.cpp
     SkyTests.cpp
+    CloudTests.cpp
     ${feature_tests}
 )
 target_include_directories(air_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
