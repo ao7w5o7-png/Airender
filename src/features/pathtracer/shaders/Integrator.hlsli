@@ -23,12 +23,18 @@
 // whose light reaches the image after a bounce, choose by power alone in O(1). The environment is
 // only reached by BSDF sampling. Russian roulette starts after the third bounce and is unbiased.
 // With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
-// entirely: ReSTIR DI (ReSTIR.hlsli) estimates it.
+// entirely: ReSTIR DI (ReSTIRDI.hlsli) estimates it.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
 #define AIR_PT_INTEGRATOR_HLSLI
 
 #include "Bsdf.hlsli"
 #include "Sampling.hlsli"
+
+// ReSTIR GI's candidate recording (kFlagReSTIRGI) is compiled only where it is used (PathTracerGi.hlsl):
+// its state halves the speed of the plain kernel through register pressure.
+#ifndef AIR_PT_RESTIR_GI
+#define AIR_PT_RESTIR_GI 0
+#endif
 
 struct IntegratorParams
 {
@@ -49,6 +55,28 @@ struct Surface
     BsdfMaterial material;
 };
 
+// The indirect light of a path, as ReSTIR GI (ReSTIRGI.hlsli) resamples it: the part of the path
+// beyond its second vertex x2 (the hit of the first surface's BSDF ray). From x2 it goes on in
+// `direction`, either to the light NEE chose there (strategy 0) or along x2's BSDF sample
+// (strategy 1). The radiance arriving at x2 along it is radianceMis (emission at the end of that
+// segment, weighted against the other technique by the power heuristic, whose pdfs depend on the
+// direction x2 is seen from) plus radianceFixed (everything further). One of the two candidates is
+// chosen by RIS; `weight` is its unbiased contribution weight W in area measure at x2 times solid
+// angle at x2.
+struct GiPath
+{
+    bool valid;
+    uint instance; // x2
+    uint primitive;
+    float2 barycentrics;
+    float3 direction;
+    uint strategy;
+    float3 radianceMis;
+    float3 radianceFixed;
+    float lightPdf; // solid angle pdf of NEE at x2 choosing the light at the end of `direction`; 0: none
+    float weight;
+};
+
 struct PathSample
 {
     float3 radiance;
@@ -62,10 +90,11 @@ struct PathSample
     float3 diffuseAlbedo;
     float3 specularAlbedo;
     uint bounces; // surfaces the path scattered at
-    // The first hit as TraceClosest reported it (instance kInvalidIndex: none), for ReSTIR DI.
+    // The first hit as TraceClosest reported it (instance kInvalidIndex: none), for ReSTIR.
     uint instance;
     uint primitive;
     float2 barycentrics;
+    GiPath gi; // with kFlagRecordGi
 };
 
 float3 Xyz(float4 v)
@@ -365,11 +394,43 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.instance = kInvalidIndex;
     result.primitive = 0u;
     result.barycentrics = float2(0.0f, 0.0f);
+    result.gi.valid = false;
+    result.gi.instance = kInvalidIndex;
+    result.gi.primitive = 0u;
+    result.gi.barycentrics = float2(0.0f, 0.0f);
+    result.gi.direction = float3(0.0f, 0.0f, 1.0f);
+    result.gi.strategy = 0u;
+    result.gi.radianceMis = float3(0.0f, 0.0f, 0.0f);
+    result.gi.radianceFixed = float3(0.0f, 0.0f, 0.0f);
+    result.gi.lightPdf = 0.0f;
+    result.gi.weight = 0.0f;
 
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
     // ReSTIR DI estimates the whole direct light at the first surface (from emissive triangles): the
     // path neither samples a light there nor counts the emission its BSDF sample reaches.
     bool restir = useNee && (params.flags & kFlagReSTIR) != 0u;
+    // ReSTIR GI estimates the light of every path with two or more bounces, so none of it goes into
+    // `radiance`. The sample that records it (kFlagRecordGi) gathers it as two candidates at x2:
+    // NEE there, and the BSDF continuation, whose incoming radiance splits into the emission it
+    // reaches and the rest. Other samples stop at x2.
+    bool gi = AIR_PT_RESTIR_GI != 0 && (params.flags & kFlagReSTIRGI) != 0u;
+    bool recordGi = gi && (params.flags & kFlagRecordGi) != 0u;
+    float firstBsdfPdf = 0.0f; // solid angle pdf of the ray from the first surface to x2
+    float x2AreaPdf = 0.0f;
+    float3 x2Throughput = float3(0.0f, 0.0f, 0.0f);
+    float3 neeContribution = float3(0.0f, 0.0f, 0.0f); // candidate 0: NEE at x2
+    float3 neeDirection = float3(0.0f, 0.0f, 1.0f);
+    float3 neeRadiance = float3(0.0f, 0.0f, 0.0f);
+    float neeLightPdf = 0.0f;
+    bool continued = false; // candidate 1: the BSDF continuation from x2
+    float3 continuationDirection = float3(0.0f, 0.0f, 1.0f);
+    float continuationPdf = 0.0f;
+    float3 continuationWeight = float3(0.0f, 0.0f, 0.0f);
+    float3 continuationEmission = float3(0.0f, 0.0f, 0.0f);
+    float continuationLightPdf = 0.0f;
+    float3 continuationRest = float3(0.0f, 0.0f, 0.0f);
+    float3 restThroughput = float3(1.0f, 1.0f, 1.0f); // from x3 on, relative to the radiance reaching x2
+
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     float previousBsdfPdf = 0.0f; // solid angle pdf of the BSDF sample that produced `direction`
     // The vertex that produced `direction` and how NEE chose lights there (for MIS).
@@ -381,13 +442,21 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     {
         HitInfo hit = TraceClosest(origin, direction, bounce);
         bool direct = bounce <= 1u;
+        bool beyondX2 = gi && bounce >= 2u; // light found here is the continuation candidate's
         if (!hit.hit)
         {
-            float3 environment = throughput * params.environment;
-            result.radiance += environment;
-            if (direct)
+            if (beyondX2)
             {
-                result.directRadiance += environment;
+                continuationRest += restThroughput * params.environment;
+            }
+            else
+            {
+                float3 environment = throughput * params.environment;
+                result.radiance += environment;
+                if (direct)
+                {
+                    result.directRadiance += environment;
+                }
             }
             break;
         }
@@ -405,26 +474,49 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             result.primitive = hit.primitive;
             result.barycentrics = hit.barycentrics;
         }
+        if (bounce == 1u && recordGi)
+        {
+            result.gi.instance = hit.instance;
+            result.gi.primitive = hit.primitive;
+            result.gi.barycentrics = hit.barycentrics;
+            x2AreaPdf = firstBsdfPdf * abs(dot(s.geometricNormal, direction)) / (hit.t * hit.t);
+            x2Throughput = throughput;
+        }
 
         // Emission found by the BSDF sample, weighted against NEE having found it.
         if (any(s.emission) && !(restir && bounce == 1u))
         {
             float weight = 1.0f;
+            float lightPdf = 0.0f;
             if (bounce > 0u && useNee)
             {
                 LightTriangle light = LoadLight(s.lightIndex);
                 float pmf = previousTree ? LightTreePmf(s.lightIndex, previousPosition, previousNormal) : light.probability;
-                float lightPdf = LightPdf(pmf, light.area, hit.t, dot(-direction, s.geometricNormal));
+                lightPdf = LightPdf(pmf, light.area, hit.t, dot(-direction, s.geometricNormal));
                 weight = PowerHeuristic(previousBsdfPdf, lightPdf);
             }
-            float3 emitted = throughput * s.emission * weight;
-            result.radiance += emitted;
-            if (direct)
+            if (beyondX2 && bounce == 2u)
             {
-                result.directRadiance += emitted;
+                // Reached from x2: the MIS weight depends on the direction x2 is seen from, which
+                // ReSTIR GI changes, so it keeps the unweighted emission and the light pdf.
+                continuationEmission = s.emission;
+                continuationLightPdf = lightPdf;
+            }
+            else if (beyondX2)
+            {
+                continuationRest += restThroughput * s.emission * weight;
+            }
+            else
+            {
+                float3 emitted = throughput * s.emission * weight;
+                result.radiance += emitted;
+                if (direct)
+                {
+                    result.directRadiance += emitted;
+                }
             }
         }
-        if (bounce == params.maxBounces)
+        if (bounce == params.maxBounces || (gi && !recordGi && bounce == 1u))
         {
             break;
         }
@@ -481,10 +573,24 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 {
                     float weight = PowerHeuristic(lightPdf, e.pdf);
                     float3 contribution = throughput * e.fCos * light.radiance * (weight / lightPdf);
-                    result.radiance += contribution;
-                    if (bounce == 0u)
+                    if (gi && bounce == 1u)
                     {
-                        result.directRadiance += contribution;
+                        neeContribution = contribution;
+                        neeDirection = wi;
+                        neeRadiance = light.radiance;
+                        neeLightPdf = lightPdf;
+                    }
+                    else if (beyondX2)
+                    {
+                        continuationRest += restThroughput * e.fCos * light.radiance * (weight / lightPdf);
+                    }
+                    else
+                    {
+                        result.radiance += contribution;
+                        if (bounce == 0u)
+                        {
+                            result.directRadiance += contribution;
+                        }
                     }
                 }
             }
@@ -504,6 +610,21 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             break; // shading normal sent the ray into the surface
         }
         throughput *= bs.weight;
+        if (gi && bounce == 0u)
+        {
+            firstBsdfPdf = bs.pdf;
+        }
+        else if (gi && bounce == 1u)
+        {
+            continued = true;
+            continuationDirection = wiWorld;
+            continuationPdf = bs.pdf;
+            continuationWeight = bs.weight;
+        }
+        else if (beyondX2)
+        {
+            restThroughput *= bs.weight;
+        }
         previousBsdfPdf = bs.pdf;
         previousPosition = s.position;
         previousNormal = ns;
@@ -519,6 +640,44 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 break;
             }
             throughput /= survive;
+            restThroughput /= survive;
+        }
+    }
+
+    // ReSTIR GI: RIS between the two candidates at x2 by the luminance of what each contributes.
+    if (recordGi && x2AreaPdf > 0.0f)
+    {
+        float continuationMis = continuationLightPdf > 0.0f ? PowerHeuristic(continuationPdf, continuationLightPdf) : 1.0f;
+        float3 continuationContribution = float3(0.0f, 0.0f, 0.0f);
+        if (continued)
+        {
+            continuationContribution =
+                x2Throughput * continuationWeight * (continuationEmission * continuationMis + continuationRest);
+        }
+        float wNee = Luminance(neeContribution);
+        float wContinuation = Luminance(continuationContribution);
+        if (wNee + wContinuation > 0.0f)
+        {
+            // W = sum(w) / p̂(Y), p̂(Y) being the luminance of the integrand: contribution * pdf(Y).
+            bool nee = Rand(seed) * (wNee + wContinuation) < wNee;
+            result.gi.valid = true;
+            if (nee)
+            {
+                result.gi.strategy = 0u;
+                result.gi.direction = neeDirection;
+                result.gi.radianceMis = neeRadiance;
+                result.gi.lightPdf = neeLightPdf;
+                result.gi.weight = (wNee + wContinuation) / (wNee * x2AreaPdf * neeLightPdf);
+            }
+            else
+            {
+                result.gi.strategy = 1u;
+                result.gi.direction = continuationDirection;
+                result.gi.radianceMis = continuationEmission;
+                result.gi.radianceFixed = continuationRest;
+                result.gi.lightPdf = continuationLightPdf;
+                result.gi.weight = (wNee + wContinuation) / (wContinuation * x2AreaPdf * continuationPdf);
+            }
         }
     }
     return result;

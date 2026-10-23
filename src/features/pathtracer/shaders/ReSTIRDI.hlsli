@@ -19,126 +19,12 @@
 // Without it they assume the other surface sees the sample: fewer rays, darker penumbrae.
 // Neighbours are chosen from their geometry (normal, distance) only, never from their samples,
 // which keeps the reuse unbiased.
-#ifndef AIR_PT_RESTIR_HLSLI
-#define AIR_PT_RESTIR_HLSLI
+#ifndef AIR_PT_RESTIR_DI_HLSLI
+#define AIR_PT_RESTIR_DI_HLSLI
 
-#include "air/renderer/shader/SceneShared.h"
-#include "PathTracerShared.h"
-#include "ReSTIRShared.h"
+#include "ReSTIRCommon.hlsli"
 
-[[vk::push_constant]] ConstantBuffer<ReSTIRConstants> g : register(b0);
-
-#include "SceneAccess.hlsli"
-
-HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
-{
-    RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = direction;
-    ray.TMin = 0.0f;
-    ray.TMax = 1e30f;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
-    query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
-    query.Proceed();
-    HitInfo hit;
-    hit.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
-    hit.t = hit.hit ? query.CommittedRayT() : -1.0f;
-    hit.instance = hit.hit ? query.CommittedInstanceID() : 0u;
-    hit.primitive = hit.hit ? query.CommittedPrimitiveIndex() : 0u;
-    hit.barycentrics = hit.hit ? query.CommittedTriangleBarycentrics() : float2(0.0f, 0.0f);
-    return hit;
-}
-
-#include "Integrator.hlsli"
-
-AIR_CONST float kNormalThreshold = 0.5f;   // cosine between the normals of surfaces that share samples
-AIR_CONST float kDistanceThreshold = 0.1f; // relative difference of their distances to the eye
-
-FrameData LoadFrame()
-{
-    StructuredBuffer<FrameData> frames = ResourceDescriptorHeap[g.frameData];
-    return frames[g.frameSlot];
-}
-
-IntegratorParams MakeParams(FrameData f)
-{
-    IntegratorParams params;
-    params.environment = f.environment.rgb;
-    params.lightCount = f.lightCount;
-    params.maxBounces = f.maxBounces;
-    params.flags = f.flags;
-    params.lightTreeBounces = f.lightTreeBounces;
-    return params;
-}
-
-// Independent random streams per pixel, frame and use.
-uint StreamSeed(uint2 pixel, uint frameIndex, uint stream)
-{
-    return Pcg(pixel.x + Pcg(pixel.y + Pcg(frameIndex + Pcg(stream + 0x52455354u))));
-}
-
-PrimaryHit LoadPrimaryHit(uint buffer, uint index)
-{
-    StructuredBuffer<PrimaryHit> hits = ResourceDescriptorHeap[buffer];
-    return hits[index];
-}
-
-// Whether a surface (b) is close enough to another (a) in normal and distance to the same eye to
-// share samples with it. Only a heuristic for variance: the MIS weights keep any reuse unbiased.
-bool SimilarSurface(PrimaryHit a, PrimaryHit b, float expectedDistance)
-{
-    return b.instance != kInvalidIndex &&
-           dot(DecodeOctahedral(a.normal), DecodeOctahedral(b.normal)) >= kNormalThreshold &&
-           abs(b.distance - expectedDistance) <= kDistanceThreshold * expectedDistance;
-}
-
-// --- Receivers and light samples -----------------------------------------------------------------
-
-// A pixel's first surface as TracePath shades it at bounce 0, rebuilt from its PrimaryHit and seen
-// from `eye`.
-struct Receiver
-{
-    bool valid;
-    float3 position;
-    float3 origin; // where its rays start, off the surface
-    float3 ng;     // geometric normal, facing the eye
-    Frame frame;   // around the shading normal the BSDF uses
-    BsdfContext bsdf;
-};
-
-Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
-{
-    Receiver r = (Receiver)0;
-    r.valid = false;
-    if (h.instance == kInvalidIndex)
-    {
-        return r;
-    }
-    HitInfo hit;
-    hit.hit = true;
-    hit.t = h.distance;
-    hit.instance = h.instance;
-    hit.primitive = h.primitive;
-    hit.barycentrics = h.barycentrics;
-    // LoadSurface orients the normals against a ray, unknown here: orient them towards the eye.
-    Surface s = LoadSurface(hit, float3(0.0f, 0.0f, 0.0f), params);
-    float3 toEye = eye - s.position;
-    if (dot(s.geometricNormal, toEye) < 0.0f)
-    {
-        s.geometricNormal = -s.geometricNormal;
-        s.shadingNormal = -s.shadingNormal;
-    }
-    float3 wo = normalize(toEye);
-    float3 ns = dot(s.shadingNormal, wo) > 0.0f ? s.shadingNormal : s.geometricNormal;
-    r.valid = true;
-    r.position = s.position;
-    r.origin = OffsetRayOrigin(s.position, s.geometricNormal);
-    r.ng = s.geometricNormal;
-    r.frame = MakeFrame(ns);
-    r.bsdf = PrepareBsdf(s.material, ToLocal(r.frame, wo));
-    return r;
-}
+// --- Light samples -------------------------------------------------------------------------------
 
 struct LightSample
 {
@@ -437,23 +323,6 @@ void TemporalPass(uint2 pixel)
     output[index] = Pack(result);
 }
 
-// Draws the next spatial neighbour of `pixel`: uniform in the disc of spatialRadius, accepted when
-// inside the image and similar to the centre. Replaying the same `draw` state gives the same
-// neighbours.
-bool NextNeighbour(inout uint draw, uint2 pixel, PrimaryHit center, FrameData f, out uint neighbour)
-{
-    float radius = g.spatialRadius * sqrt(Rand(draw));
-    float angle = kTwoPi * Rand(draw);
-    int2 q = int2(pixel) + int2(round(radius * float2(cos(angle), sin(angle))));
-    neighbour = 0u;
-    if (any(q < 0) || q.x >= int(f.width) || q.y >= int(f.height) || all(q == int2(pixel)))
-    {
-        return false;
-    }
-    neighbour = uint(q.y) * f.width + uint(q.x);
-    return SimilarSurface(center, LoadPrimaryHit(g.primaryHits, neighbour), center.distance);
-}
-
 void SpatialPass(uint2 pixel)
 {
     FrameData f = LoadFrame();
@@ -484,7 +353,7 @@ void SpatialPass(uint2 pixel)
     for (uint i = 0u; i < draws; ++i)
     {
         uint neighbour;
-        if (NextNeighbour(draw, pixel, hit, f, neighbour))
+        if (NextNeighbour(draw, pixel, hit, f, 0.0f, neighbour))
         {
             neighbourConfidence += Unpack(temporal[neighbour]).M;
         }
@@ -509,7 +378,7 @@ void SpatialPass(uint2 pixel)
     for (uint j = 0u; j < draws; ++j)
     {
         uint neighbour;
-        if (!NextNeighbour(draw, pixel, hit, f, neighbour))
+        if (!NextNeighbour(draw, pixel, hit, f, 0.0f, neighbour))
         {
             continue;
         }
@@ -539,7 +408,7 @@ void SpatialPass(uint2 pixel)
         direct += canonicalPoint.contribution * (canonicalMis * canonical.W);
     }
     ReservoirState result = Finish(s, total);
-    if ((g.flags & kReSTIRAddDirect) != 0u && any(direct > 0.0f) && all(isfinite(direct)))
+    if ((g.flags & kReSTIRShade) != 0u && any(direct > 0.0f) && all(isfinite(direct)))
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
         accumulation[pixel] += float4(direct * float(f.samplesPerPixel), 0.0f);

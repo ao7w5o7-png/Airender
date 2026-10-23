@@ -456,14 +456,18 @@ differ.
   whatever the light count; the alias decision uses its own random number, so the selection
   probability is exactly `probability`, as MIS assumes. A light tree can choose instead (§8.6).
   Russian roulette from the third bounce.
-- **Hardware ray tracing**: DXR raygen + closest hit for primary and bounce rays (20 byte payload
-  with access qualifiers, bounce loop in raygen, recursion depth 1); inline `RayQuery` for shadow
-  rays and the intersection heatmap. Push constants only carry bindless indices; per-frame data comes
-  from rings in the GPU upload heap (`DeviceLocalHost`) where available.
-- **Kernel variants**: `PathTracer.hlsl` (SM 6.6) and `PathTracerSer.hlsl` (SM 6.9, DXR 1.2 shader
-  execution reordering: bounce rays trace into hit objects, threads regroup by hit instance, the
-  hit is read from the object without a closest-hit call) share `PathTracerKernel.hlsli`. SER is
-  chosen with `pathtracer.ser=1` on GPUs that reorder (`DeviceCaps::shaderExecutionReordering`).
+- **Hardware ray tracing**: a DXR ray generation shader runs the whole path (bounce loop in raygen);
+  primary, bounce and shadow rays are inline `RayQuery`s. `TraceRay` into a closest-hit shader (20
+  byte payload) measured 19-29% slower on every test scene at 1080p (cornell_box 2.00 -> 1.53 ms,
+  many_lights 4.00 -> 2.93 ms): the call saves the megakernel's live state around each ray. The miss
+  and closest-hit shaders remain for the SER variant. Push constants only carry bindless indices;
+  per-frame data comes from rings in the GPU upload heap (`DeviceLocalHost`) where available.
+- **Kernel variants** of `PathTracerKernel.hlsli`: `PathTracer.hlsl` (SM 6.6), `PathTracerSer.hlsl`
+  (SM 6.9, DXR 1.2 shader execution reordering: bounce rays trace into hit objects, threads regroup
+  by hit instance, the hit is read from the object without a closest-hit call; `pathtracer.ser=1` on
+  GPUs that reorder, `DeviceCaps::shaderExecutionReordering`) and `PathTracerGi.hlsl`
+  (`AIR_PT_RESTIR_GI`: records ReSTIR GI's candidates, §8.8; compiled apart because that state
+  halves the plain kernel's speed).
 - **Guides** (albedos, normal/roughness, depth, motion) are written only when an active feature
   lists them in `RenderFeature::ConsumedSlots()` (dlss does): they cost about a tenth of the trace.
 
@@ -617,16 +621,19 @@ behind the horizon get nothing.
 
 ### 8.7 ReSTIR DI
 
-`pathtracer.restir=1` estimates the direct light at each pixel's first surface with spatiotemporal
-reservoir resampling (Bitterli et al. 2020) instead of one NEE sample per path, in the generalized
-RIS formulation (Lin et al. 2022; the 2023 SIGGRAPH course "A Gentle Introduction to ReSTIR").
-Files: `shaders/ReSTIR.hlsli` (all of the math), `ReSTIRInitial/Temporal/Spatial.hlsl`,
-`shaders/ReSTIRShared.h`, `src/ReSTIR.h/.cpp` (buffers and passes).
+ReSTIR DI estimates the direct light at each pixel's first surface with spatiotemporal reservoir
+resampling (Bitterli et al. 2020) instead of one NEE sample per path, in the generalized RIS
+formulation (Lin et al. 2022; the 2023 SIGGRAPH course "A Gentle Introduction to ReSTIR").
+`pathtracer.restirDi` (and `restirGi`, §8.8): 0 off, 1 (default) only when frames do not accumulate
+(`accumulate=0`, the real-time path under a denoiser), 2 always (to check it is unbiased by
+accumulating). Files: `shaders/ReSTIRDI.hlsli` (the DI math), `shaders/ReSTIRCommon.hlsli` (shared
+with GI: receivers, neighbours, push constants), `ReSTIRDIInitial/Temporal/Spatial.hlsl`,
+`shaders/ReSTIRShared.h`, `src/ReSTIR.h/.cpp` (buffers and passes of both).
 
 - **Split with the path tracer**: with `kFlagReSTIR`, `PathTracer.Trace` leaves out the direct light
   from emissive triangles at the first surface (no NEE there, and no emission found by its BSDF
   sample), and writes the first sample's hit (`PrimaryHit`: instance, primitive, barycentrics, plus a
-  normal and distance for similarity tests). The passes rebuild the surface from it with the
+  normal, roughness and distance for the choice of neighbours). The passes rebuild the surface from it with the
   integrator's own `LoadSurface`, so they shade exactly what the path tracer would have, and add
   the result (times the samples per pixel) to the accumulation before `PathTracer.Resolve`. The
   environment is still reached only by BSDF sampling, and deeper vertices keep NEE.
@@ -638,9 +645,9 @@ Files: `shaders/ReSTIR.hlsli` (all of the math), `ReSTIRInitial/Temporal/Spatial
 
   | Pass | Inputs | What it does | Shadow rays |
   |---|---|---|---|
-  | `ReSTIR.Initial` | primary hits | RIS over `restirLights` points on lights chosen by power and `restirBsdf` BSDF rays that hit an emitter, balance heuristic between the two strategies | 1 BSDF + 1 |
-  | `ReSTIR.Temporal` | + last frame's hits and final reservoirs | reprojects the point with the previous camera; if the surface there is similar, generalized balance heuristic between the two domains, last frame's confidence capped at `restirHistory` | 1 + 1 |
-  | `ReSTIR.Spatial` | temporal reservoirs | `restirSpatial` neighbours in a disc of `restirRadius` pixels (`restirDisocclusion` where the pixel has no history), defensive pairwise MIS (course eq. 7.8) with this pixel's visibility in the target; shades and stores the result as next frame's history | k + k |
+  | `ReSTIRDI.Initial` | primary hits | RIS over `restirLights` points on lights chosen by power and `restirBsdf` BSDF rays that hit an emitter, balance heuristic between the two strategies | 1 BSDF + 1 |
+  | `ReSTIRDI.Temporal` | + last frame's hits and final reservoirs | reprojects the point with the previous camera; if the surface there is similar, generalized balance heuristic between the two domains, last frame's confidence capped at `restirHistory` | 1 + 1 |
+  | `ReSTIRDI.Spatial` | temporal reservoirs | `restirSpatial` neighbours in a disc of `restirRadius` pixels (`restirDisocclusion` where the pixel has no history), defensive pairwise MIS (course eq. 7.8) with this pixel's visibility in the target; shades and stores the result as next frame's history | k + k |
 
 - **Visibility reuse, without bias**: each pass traces the shadow ray of the sample it chose when the
   sample is new to the pixel, and zeroes W when it is occluded, so a reservoir only ever holds light
@@ -677,23 +684,86 @@ Validation (`aircli render --set pathtracer.debugView=8` isolates the direct lig
   light at 1920x1080: `many_lights` NEE 21.8, ReSTIR 0.20 (k=3: 0.18, 16 light candidates: 0.13,
   no BSDF candidate: 1.95, which the glossy floor needs). At 640x360: `veach_mis` 1.88 -> 0.0098,
   `cornell_box` 0.0089 -> 0.0019.
-- Cost at 1920x1080 (RTX 5070, defaults):
+- Cost at 1920x1080 (RTX 5070, defaults, `accumulate=0, spp=1`):
 
   | Scene | Trace | Initial | Temporal | Spatial |
   |---|---|---|---|---|
-  | `cornell_box` | 2.02 ms | 0.32 ms | 0.35 ms | 0.72 ms |
-  | `many_lights` | 3.94 ms | 1.09 ms | 0.64 ms | 1.61 ms |
-  | `sphere_field` | 1.58 ms | 0.56 ms | 0.43 ms | 1.13 ms |
-  | `veach_mis` | 1.25 ms | 0.85 ms | 0.57 ms | 1.48 ms |
+  | `cornell_box` | 1.45 ms | 0.32 ms | 0.35 ms | 0.73 ms |
+  | `door` | 2.73 ms | 0.46 ms | 0.39 ms | 0.76 ms |
+  | `many_lights` | 2.74 ms | 1.10 ms | 0.65 ms | 1.62 ms |
+  | `sphere_field` | 1.12 ms | 0.60 ms | 0.61 ms | 1.22 ms |
 
   The unbiased MIS rays cost about 0.1 ms; each neighbour about 0.4 ms on `many_lights`, each light
   candidate about 0.1 ms. Rebuilding a surface from its `PrimaryHit` costs about 0.1 ms per use
   (six per pixel), cheaper in total than storing a full-precision G-buffer twice.
-- It is off by default: it pays off wherever direct light dominates the noise (one frame of
-  `veach_mis` is 190x less noisy), but where indirect light dominates (`many_lights`) the image as a
-  whole improves less than the extra time would buy in more paths.
+- When frames accumulate, ReSTIR's correlated samples converge about as fast per unit of time as
+  plain paths (§8.8 has the measurement), and with several samples per pixel per frame only the first
+  one's light is resampled; hence the default of running it in real time only.
 - Tests: `PathTracer_ReSTIRResamplesAcrossFrames` and `PathTracer_ReSTIROnlyRunsForLitViews`
-  (Null backend: passes, buffer ping-pong, which views run it).
+  (Null backend: passes, buffer ping-pong, modes, which views run it).
+
+### 8.8 ReSTIR GI
+
+`pathtracer.restirGi` (same modes as `restirDi`) resamples the indirect light at each pixel's first
+surface, all paths of two or more bounces, across pixels and frames (Ouyang et al. 2021), in the
+path-space form of ReSTIR PT (Lin et al. 2022) with the reconnection shift always at the second
+vertex x2. Files: `shaders/ReSTIRGI.hlsli`, `ReSTIRGITemporal/Spatial.hlsl`, the `GiPath` part of
+`TracePath` (Integrator.hlsli), `PathTracerGi.hlsl`.
+
+- **Initial samples from the path tracer**: with `kFlagReSTIRGI` the trace kernel (its GI variant)
+  leaves every path of two or more bounces out of the radiance. Its first sample records them at x2
+  instead, as two candidate paths: NEE at x2 (the light point), and x2's BSDF continuation, whose
+  radiance arriving at x2 splits into the emission at x3 (weighted against NEE at x2 by MIS) and the
+  rest, gathered with throughputs from x3 on. RIS picks one by the luminance of its contribution and
+  writes it as the pixel's initial reservoir (`GiReservoir`, 64 bytes): x2's hit, the outgoing
+  direction at x2, the two radiances, the light pdf the MIS needs, W, M and which of the two it is.
+  The two candidates' sum is exactly what the path tracer would have added.
+- **The shift, without a Lambertian assumption**: a sample moves to another pixel by connecting
+  that pixel's x1 to the same x2 and keeping the rest: in area measure at x2 times solid angle at x2
+  the shift is the identity. Its value there is evaluated in full: x1's BSDF towards x2, the
+  geometry term, x2's BSDF between the new incoming and the kept outgoing direction (x2's shading
+  frame rebuilt as `TracePath` builds it), and the power heuristic between NEE and BSDF sampling at
+  x2, whose BSDF pdf depends on the incoming direction. Only the radiance arriving at x2 is reused as
+  it is, and that does not depend on x1, so the reuse stays unbiased on glossy x2 too.
+- **Where reconnection is allowed**: through a near-mirror vertex a moved path's value swings
+  between nothing and a spike, which reuse turns into fireflies that persist. The shift exists only
+  when x1 on both sides and x2 have a roughness of at least 0.25 (`kGiMinRoughness`; ReSTIR PT
+  Enhanced, Lin et al. 2026, keeps such a threshold before the reconnection too): smoother pixels
+  keep their own sample, neighbours are chosen among rough pixels, and a sample with a smooth x2
+  stays where it was found. The criteria depend on surfaces only, so the reuse stays unbiased.
+- **Passes**, sharing DI's receivers, neighbour choice, confidence cap and visibility handling (a
+  reservoir only holds samples whose x2 its surface sees; MIS weights trace the other surfaces'
+  visibility with `restirUnbiased`):
+
+  | Pass | Inputs | What it does | Shadow rays |
+  |---|---|---|---|
+  | `ReSTIRGI.Temporal` | initial reservoirs, last frame's hits and history | generalized balance heuristic with the reprojected pixel | 1 + 1 |
+  | `ReSTIRGI.Spatial` | temporal reservoirs | defensive pairwise MIS with neighbours; shades every candidate by its resampling weight; history | k + k |
+
+Validation (`--set pathtracer.debugView=9` isolates the indirect light):
+
+- Unbiased: accumulated ReSTIR GI (`restirGi=2`, 4096 frames, 640x360) matches 8192 spp NEE
+  references within 0.06% on `cornell_box`, `many_lights`, `door` and `material_grid` (NEE alone:
+  within 0.03%); DI and GI together on the full image within 0.04%. In the white furnace the
+  accumulated mean is the same 0.1799 as without it.
+- Noise of one frame (`accumulate=0, spp=1`, after 30 frames, 640x360), relMSE of the indirect
+  light: `cornell_box` 0.284 -> 0.0089 (temporal reuse alone 0.0138, spatial alone 0.0606), `door`
+  52.9 -> 0.68, `many_lights` 78.9 -> 5.0, `material_grid` 0.044 -> 0.026. Of the whole image with
+  DI and GI: `door` 50.7 -> 0.57, `cornell_box` 0.223 -> 0.0083, `many_lights` 40.4 -> 2.94.
+- The white furnace is the exception: white, energy-conserving BSDFs under a uniform sky make plain
+  BSDF sampling almost noiseless, so any reuse adds noise there (std of one frame 0.016 -> 0.021).
+  It stays a test of the mean only.
+- Cost at 1920x1080 (RTX 5070, `accumulate=0, spp=1`, frame time NEE -> DI -> GI -> both):
+  `cornell_box` 1.44 -> 2.89 -> 5.52 -> 6.87 ms, `door` 2.75 -> 4.37 -> 8.47 -> 9.98 ms,
+  `many_lights` 2.88 -> 6.17 -> 8.88 -> 11.65 ms. Of GI's share, the trace kernel's recording costs
+  1.1-1.3 ms (register pressure), the temporal pass 1.0-1.5 ms and the spatial pass 2.0-3.3 ms
+  (per neighbour two surfaces rebuilt, three BSDF pairs, two shadow rays). Next steps there: ReSTIR
+  PT Enhanced's paired spatial reuse (one shift serves both pixels) and a cheaper target function.
+- Accumulating instead (`accumulate=1`): at equal time, 4096 frames of DI+GI against 16384 frames of
+  NEE reach about the same error (`many_lights` 0.0067 vs 0.0066, `door` 0.0077 vs 0.0093,
+  `cornell_box` rmse 0.0027 vs 0.0019), which is why both default to real time only.
+- Tests: `PathTracer_ReSTIRGIResamplesTheIndirectLight` (Null backend: passes, history ping-pong,
+  with and without DI, the furnace).
 
 ---
 

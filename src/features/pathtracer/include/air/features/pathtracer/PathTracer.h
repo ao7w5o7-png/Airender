@@ -5,8 +5,8 @@
 // Each frame AddPasses() appends these render graph passes:
 //   PathTracer.Trace    DispatchRays: N samples per pixel into a persistent RGBA32F accumulation
 //                       buffer, plus first-hit guide textures for denoisers
-//   PathTracer.ReSTIR.* Compute, with restir.enabled: the direct light at the first surface by
-//                       ReSTIR DI (src/ReSTIR.h), added to the accumulation
+//   PathTracer.ReSTIR*  Compute, with restir.di / restir.gi: the direct / indirect light at the
+//                       first surface by ReSTIR DI / GI (src/ReSTIR.h), added to the accumulation
 //   PathTracer.Resolve  Compute: average * exposure (or a debug view) into the frame output
 // The estimator (shaders/Integrator.hlsli: NEE + MIS over emissive triangles, energy-conserving
 // GGX) is shared with the CPU ReferenceRenderer. The output is scene-linear and exposed
@@ -24,11 +24,18 @@
 namespace air::pt
 {
 
-// ReSTIR DI (docs/architecture.md §8.7): the direct light at each pixel's first surface, resampled
-// across pixels and frames (shaders/ReSTIR.hlsli) instead of one NEE sample per path.
+// ReSTIR (docs/architecture.md §8.7, §8.8): the light at each pixel's first surface, resampled
+// across pixels and frames instead of estimated by each path alone.
+// When ReSTIR DI / GI run. Reuse pays off in single frames (real-time, under a denoiser); when
+// frames accumulate, plain paths converge about as fast for the same time.
+inline constexpr u32 kReSTIROff = 0;
+inline constexpr u32 kReSTIRRealTime = 1; // only with accumulate=false
+inline constexpr u32 kReSTIRAlways = 2;   // also when accumulating (e.g. to check it is unbiased)
+
 struct ReSTIRSettings
 {
-    bool enabled = false;
+    u32 di = kReSTIRRealTime;    // direct light (shaders/ReSTIRDI.hlsli) instead of one NEE sample
+    u32 gi = kReSTIRRealTime;    // indirect light, all paths of two or more bounces (shaders/ReSTIRGI.hlsli)
     u32 lightCandidates = 8;     // initial candidates: light points chosen by power
     u32 bsdfCandidates = 1;      // initial candidates: BSDF rays that may reach an emitter
     u32 spatialSamples = 2;      // neighbours reused per pixel
@@ -94,14 +101,16 @@ public:
                    renderer::Blackboard& blackboard, rdg::TextureRef output);
 
     u32 GetAccumulatedSamples() const { return mAccumulatedSamples; }
-    // True when this frame's trace uses the shader execution reordering pipeline.
+    // True when this frame's trace uses the shader execution reordering pipeline (not with ReSTIR GI,
+    // which has a kernel of its own).
     bool UsesShaderExecutionReordering() const
     {
-        return mSettings.shaderExecutionReordering && mTracePipelineSer.IsValid();
+        return mSettings.shaderExecutionReordering && mTracePipelineSer.IsValid() && !mUsedReSTIRGI;
     }
     bool IsConverged() const { return mSettings.accumulate && mAccumulatedSamples >= mSettings.targetSamples; }
-    // True when the last frame's direct light at the first surface came from ReSTIR DI.
-    bool UsesReSTIR() const { return mUsedReSTIR; }
+    // Whether the last traced frame's direct / indirect light came from ReSTIR DI / GI.
+    bool UsesReSTIRDI() const { return mUsedReSTIRDI; }
+    bool UsesReSTIRGI() const { return mUsedReSTIRGI; }
     const PathTracerSettings& GetSettings() const { return mSettings; }
     // Settings other than width/height may change between frames.
     PathTracerSettings& MutableSettings() { return mSettings; }
@@ -115,6 +124,7 @@ private:
 
     rhi::PipelineHandle mTracePipeline;
     rhi::PipelineHandle mTracePipelineSer; // PathTracerSer.lib (SM 6.9), when the device reorders
+    rhi::PipelineHandle mTracePipelineGi;  // PathTracerGi.lib: records ReSTIR GI's candidates
     rhi::PipelineHandle mResolvePipeline;
     rhi::TextureHandle mAccumulation;
     rhi::Access mAccumulationAccess = rhi::Access::None;
@@ -122,7 +132,8 @@ private:
     rhi::BufferHandle mFrameRing; // StructuredBuffer<FrameData>, framesInFlight + 1 elements
     u32 mFrameRingSize = 0;
     std::unique_ptr<ReSTIR> mReSTIR;
-    bool mUsedReSTIR = false;
+    bool mUsedReSTIRDI = false;
+    bool mUsedReSTIRGI = false;
 
     u32 mAccumulatedSamples = 0;
     u32 mFrameIndex = 0;

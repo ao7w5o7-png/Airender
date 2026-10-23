@@ -81,7 +81,7 @@ PathTracer::~PathTracer()
             mDevice.DestroyBuffer(buffer);
         }
     }
-    for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mResolvePipeline})
+    for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mResolvePipeline})
     {
         if (pipeline.IsValid())
         {
@@ -120,6 +120,10 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
         AIR_LOG(Info, "PathTracer", "shader execution reordering {}",
                 mTracePipelineSer.IsValid() ? "available" : "unavailable (PathTracerSer.lib missing)");
     }
+    // The kernel that records ReSTIR GI's candidates (AIR_PT_RESTIR_GI).
+    trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGi.lib", "");
+    trace.debugName = "PathTracer.TraceGi";
+    mTracePipelineGi = mDevice.CreateRayTracingPipeline(trace);
 
     rhi::ComputePipelineDesc resolve;
     resolve.shader = renderer::LoadShader(mDevice, shaderDir, "Resolve.cs", "Main");
@@ -141,7 +145,7 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
         {.stride = sizeof(float), .usage = rhi::BufferUsage::ShaderResource, .debugName = "PathTracer.BsdfLut"},
         lut.data(), lut.size_bytes());
 
-    // Optional: without its shaders the path tracer runs with NEE at the first surface.
+    // Optional: without their shaders the path tracer estimates all the light itself.
     mReSTIR = std::make_unique<ReSTIR>(mDevice);
     mReSTIR->Initialize(shaderDir);
 
@@ -188,21 +192,27 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                                      mSettings.accumulate ? mSettings.targetSamples - mAccumulatedSamples : ~0u)
                           : 0u;
 
-    // ReSTIR DI replaces NEE at the first surface for the lit and direct/indirect views.
+    // ReSTIR replaces the path's own estimate of the direct (DI) and indirect (GI) light at the first
+    // surface, for the lit and direct / indirect views.
     const u32 view = mSettings.debugView;
-    const bool restirWanted = mSettings.restir.enabled && mSettings.nextEventEstimation && !mSettings.furnace &&
-                              scene.lightCount > 0 && mReSTIR && mReSTIR->IsAvailable() &&
-                              (view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect);
-    const bool restir = restirWanted && spp > 0;
-    AIR_CHECK(!restir || scene.lightCount <= gpu::kReSTIRMaxLight, "ReSTIR: {} lights exceed the reservoirs' 24 bits",
-              scene.lightCount);
-    if (!restirWanted && mReSTIR)
+    const bool lightView = view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect;
+    auto on = [&](u32 mode) { return mode == kReSTIRAlways || (mode == kReSTIRRealTime && !mSettings.accumulate); };
+    const bool diWanted = on(mSettings.restir.di) && mSettings.nextEventEstimation && !mSettings.furnace &&
+                          scene.lightCount > 0 && lightView && mReSTIR->IsDiAvailable();
+    const bool giWanted =
+        on(mSettings.restir.gi) && lightView && mReSTIR->IsGiAvailable() && mTracePipelineGi.IsValid();
+    const bool restirDi = diWanted && spp > 0;
+    const bool restirGi = giWanted && spp > 0;
+    AIR_CHECK(!restirDi || scene.lightCount <= gpu::kReSTIRMaxLight,
+              "ReSTIR DI: {} lights exceed the reservoirs' 24 bits", scene.lightCount);
+    if (!diWanted && !giWanted)
     {
         mReSTIR->Invalidate();
     }
     if (spp > 0)
     {
-        mUsedReSTIR = restir;
+        mUsedReSTIRDI = restirDi;
+        mUsedReSTIRGI = restirGi;
     }
 
     const float aspect = float(mSettings.width) / float(mSettings.height);
@@ -232,7 +242,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.frameIndex = mFrameIndex++;
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
-                  (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restir ? gpu::kFlagReSTIR : 0u);
+                  (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restirDi ? gpu::kFlagReSTIR : 0u) |
+                  (restirGi ? gpu::kFlagReSTIRGI : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -297,18 +308,27 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             blackboard.SetTexture(slots::kMotionVectors, guides.motionVectors);
         }
 
-        const rdg::BufferRef primaryHits =
-            restir ? mReSTIR->BeginFrame(graph, width, height, !historyInvalid) : rdg::BufferRef{};
+        ReSTIR::TraceOutputs restirOutputs;
+        if (restirDi || restirGi)
+        {
+            restirOutputs = mReSTIR->BeginFrame(graph, width, height, !historyInvalid, restirDi, restirGi);
+        }
+        const rdg::BufferRef primaryHits = restirOutputs.primaryHits;
+        const rdg::BufferRef giReservoirs = restirOutputs.giReservoirs;
 
-        const rhi::PipelineHandle pipeline = UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline;
+        const rhi::PipelineHandle pipeline =
+            restirGi ? mTracePipelineGi : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
         graph.AddPass(
             "PathTracer.Trace", rdg::PassFlags::RayTracing,
             [&](rdg::PassBuilder& b)
             {
                 b.Write(accumulation, Access::UAVCompute);
-                if (primaryHits.IsValid())
+                for (rdg::BufferRef buffer : {primaryHits, giReservoirs})
                 {
-                    b.Write(primaryHits, Access::UAVCompute);
+                    if (buffer.IsValid())
+                    {
+                        b.Write(buffer, Access::UAVCompute);
+                    }
                 }
                 for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
                                           guides.viewDepth, guides.motionVectors})
@@ -334,12 +354,16 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                 {
                     constants.primaryHits = ctx.UAV(primaryHits);
                 }
+                if (giReservoirs.IsValid())
+                {
+                    constants.giReservoirs = ctx.UAV(giReservoirs);
+                }
                 ctx.cmd.SetPipeline(pipeline);
                 ctx.cmd.PushConstants(&constants, sizeof(constants));
                 ctx.cmd.DispatchRays(width, height, 1);
             });
 
-        if (restir)
+        if (restirDi || restirGi)
         {
             gpu::ReSTIRConstants restirScene{};
             restirScene.frameData = constants.frameData;
@@ -351,8 +375,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.instanceLights = constants.instanceLights;
             restirScene.lightTree = constants.lightTree;
             restirScene.bsdfLut = constants.bsdfLut;
-            const bool addDirect = view != gpu::kDebugIndirect;
-            mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, addDirect);
+            mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, view != gpu::kDebugIndirect,
+                               view != gpu::kDebugDirect);
         }
     }
 

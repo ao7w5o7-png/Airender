@@ -33,8 +33,14 @@ public:
                         "Path vertices whose NEE chooses lights with the light tree (power, distance, orientation); "
                         "deeper ones choose by power. 0: by power only",
                         0, 64);
-        mParameters.Add("restir", &mSettings.restir.enabled,
-                        "ReSTIR DI: resample the direct light at the first surface across pixels and frames");
+        mParameters.Add("restirDi", &mSettings.restir.di,
+                        "ReSTIR DI: resample the direct light at the first surface across pixels and frames "
+                        "(0 off, 1 when not accumulating, 2 always)",
+                        0, kReSTIRAlways);
+        mParameters.Add("restirGi", &mSettings.restir.gi,
+                        "ReSTIR GI: resample the indirect light at the first surface across pixels and frames "
+                        "(0 off, 1 when not accumulating, 2 always)",
+                        0, kReSTIRAlways);
         mParameters.Add("restirLights", &mSettings.restir.lightCandidates,
                         "ReSTIR initial candidates: light points chosen by power", 0, 64);
         mParameters.Add("restirBsdf", &mSettings.restir.bsdfCandidates,
@@ -100,7 +106,8 @@ public:
         status["accumulatedSamples"] = mTracer ? mTracer->GetAccumulatedSamples() : 0u;
         status["converged"] = mTracer && mTracer->IsConverged();
         status["ser"] = mTracer && mTracer->UsesShaderExecutionReordering();
-        status["restir"] = mTracer && mTracer->UsesReSTIR();
+        status["restirDi"] = mTracer && mTracer->UsesReSTIRDI();
+        status["restirGi"] = mTracer && mTracer->UsesReSTIRGI();
         return status;
     }
 

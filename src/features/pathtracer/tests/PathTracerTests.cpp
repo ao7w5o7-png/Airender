@@ -122,14 +122,14 @@ TEST(PathTracer_DebugViewsAndFurnaceRun)
 TEST(PathTracer_ReSTIRResamplesAcrossFrames)
 {
     Headless h({"pathtracer", "tonemap"});
-    EXPECT(h.runner->SetParameter("pathtracer.restir", "1"));
+    EXPECT(h.runner->SetParameter("pathtracer.restirGi", "0"));
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
     for (int frame = 0; frame < 4; ++frame)
     {
         const auto result = h.Frame();
         EXPECT(result.validationErrors.empty());
         for (const char* pass :
-             {"PathTracer.ReSTIR.Initial", "PathTracer.ReSTIR.Temporal", "PathTracer.ReSTIR.Spatial"})
+             {"PathTracer.ReSTIRDI.Initial", "PathTracer.ReSTIRDI.Temporal", "PathTracer.ReSTIRDI.Spatial"})
         {
             EXPECT(CountLines(result.commands, std::string("BeginEvent '") + pass + "'") == 1);
         }
@@ -141,16 +141,22 @@ TEST(PathTracer_ReSTIRResamplesAcrossFrames)
         EXPECT((result.graphText.find(previous) != std::string::npos) == history);
     }
     const auto status = h.runner->DescribeFeatures().Dump(0);
-    EXPECT(status.find("\"restir\":true") != std::string::npos);
+    EXPECT(status.find("\"restirDi\":true") != std::string::npos);
+    EXPECT(status.find("\"restirGi\":false") != std::string::npos);
 }
 
-// ReSTIR only replaces NEE where there is one: not for BSDF-only paths, the furnace or the views
-// that show no light.
+// ReSTIR runs by default only in real time (no accumulation), and DI only replaces NEE where there
+// is one: not for BSDF-only paths, the furnace or the views that show no light.
 TEST(PathTracer_ReSTIROnlyRunsForLitViews)
 {
     Headless h({"pathtracer", "tonemap"});
-    EXPECT(h.runner->SetParameter("pathtracer.restir", "1"));
-    auto restirPasses = [&] { return CountLines(h.Frame().commands, "BeginEvent 'PathTracer.ReSTIR."); };
+    auto restirPasses = [&] { return CountLines(h.Frame().commands, "BeginEvent 'PathTracer.ReSTIR"); };
+    EXPECT(restirPasses() == 0); // accumulating
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    EXPECT(restirPasses() == 5); // DI and GI
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "1"));
+    EXPECT(h.runner->SetParameter("pathtracer.restirGi", "0"));
+    EXPECT(h.runner->SetParameter("pathtracer.restirDi", "2")); // also when accumulating
     EXPECT(restirPasses() == 3);
     EXPECT(h.runner->SetParameter("pathtracer.debugView", "1")); // normals
     EXPECT(restirPasses() == 0);
@@ -163,4 +169,36 @@ TEST(PathTracer_ReSTIROnlyRunsForLitViews)
     EXPECT(h.runner->SetParameter("pathtracer.furnace", "1"));
     EXPECT(restirPasses() == 0);
     EXPECT(h.Frame().validationErrors.empty());
+}
+
+// ReSTIR GI: the trace writes the initial reservoirs, two passes reuse them; it runs with or
+// without ReSTIR DI, and also without lights (the furnace), where all light is indirect or sky.
+TEST(PathTracer_ReSTIRGIResamplesTheIndirectLight)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.restirDi", "0"));
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        const auto result = h.Frame();
+        EXPECT(result.validationErrors.empty());
+        EXPECT(CountLines(result.commands, "BeginEvent 'PathTracer.ReSTIRGI.Temporal'") == 1);
+        EXPECT(CountLines(result.commands, "BeginEvent 'PathTracer.ReSTIRGI.Spatial'") == 1);
+        EXPECT(CountLines(result.commands, "BeginEvent 'PathTracer.ReSTIRDI.") == 0);
+        EXPECT(result.graphText.find("PathTracer.ReSTIRGI.InitialReservoirs") != std::string::npos);
+        // History from the second frame on.
+        EXPECT((result.graphText.find(frame % 2 == 0 ? "ReSTIRGI.History[1]" : "ReSTIRGI.History[0]") !=
+                std::string::npos) == (frame > 0));
+    }
+    EXPECT(h.runner->SetParameter("pathtracer.restirDi", "1"));
+    const auto both = h.Frame();
+    EXPECT(both.validationErrors.empty());
+    EXPECT(CountLines(both.commands, "BeginEvent 'PathTracer.ReSTIR") == 5);
+    EXPECT(h.runner->SetParameter("pathtracer.furnace", "1"));
+    const auto furnace = h.Frame();
+    EXPECT(furnace.validationErrors.empty());
+    EXPECT(CountLines(furnace.commands, "BeginEvent 'PathTracer.ReSTIRGI.") == 2);
+    EXPECT(CountLines(furnace.commands, "BeginEvent 'PathTracer.ReSTIRDI.") == 0);
+    const auto status = h.runner->DescribeFeatures().Dump(0);
+    EXPECT(status.find("\"restirGi\":true") != std::string::npos);
 }
