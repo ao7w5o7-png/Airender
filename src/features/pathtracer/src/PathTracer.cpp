@@ -130,15 +130,16 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     namespace slots = renderer::slots;
 
     const bool cameraChanged = !mLastCamera || !(*mLastCamera == camera);
-    if (cameraChanged || scene.version != mLastSceneVersion || !SameImage(mSettings, mLastSettings) ||
-        !mSettings.accumulate) {
+    const bool historyInvalid =
+        !mLastCamera || scene.version != mLastSceneVersion || !SameImage(mSettings, mLastSettings);
+    if (cameraChanged || historyInvalid || !mSettings.accumulate) {
         ResetAccumulation();
     }
     const renderer::Camera previousCamera = mLastCamera.value_or(camera);
     mLastCamera = camera;
     mLastSceneVersion = scene.version;
     mLastSettings = mSettings;
-    blackboard.SetValue(slots::kCameraReset, cameraChanged ? 1.0 : 0.0);
+    blackboard.SetValue(slots::kHistoryReset, historyInvalid ? 1.0 : 0.0);
     blackboard.SetValue(slots::kOutputIsDisplay, IsDisplayDebugView(mSettings.debugView) ? 1.0 : 0.0);
 
     // Converged: keep showing the result without tracing more samples.

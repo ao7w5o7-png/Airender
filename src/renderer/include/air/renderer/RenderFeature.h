@@ -47,14 +47,16 @@ namespace slots {
 inline constexpr std::string_view kDiffuseAlbedo = "guide.diffuseAlbedo";     // RGBA16F, rgb
 inline constexpr std::string_view kSpecularAlbedo = "guide.specularAlbedo";   // RGBA16F, rgb
 inline constexpr std::string_view kNormalRoughness = "guide.normalRoughness"; // RGBA16F, world normal, a = roughness
-inline constexpr std::string_view kViewDepth = "guide.viewDepth";             // R32F, linear distance along -forward
-inline constexpr std::string_view kMotionVectors = "guide.motionVectors";     // RG16F, pixels, current -> previous
+inline constexpr std::string_view kViewDepth = "guide.viewDepth";             // R32F, metres along the view axis
+inline constexpr std::string_view kMotionVectors = "guide.motionVectors";     // RG16F, previous - current, pixels
 // Values.
 inline constexpr std::string_view kJitterX = "camera.jitterX"; // sub-pixel offset of the frame's samples, pixels
 inline constexpr std::string_view kJitterY = "camera.jitterY";
-inline constexpr std::string_view kCameraReset = "camera.reset"; // 1 when history must be discarded
-inline constexpr std::string_view kOutputIsDisplay =
-    "output.isDisplay"; // 1: output is already display-referred (debug views)
+// 1 when temporal history is meaningless (first frame, scene or render settings changed); camera
+// motion alone does not reset it.
+inline constexpr std::string_view kHistoryReset = "history.reset";
+// 1 when the output is already display-referred (debug views): no tone curve.
+inline constexpr std::string_view kOutputIsDisplay = "output.isDisplay";
 } // namespace slots
 
 // Per-frame named exchange between features. Lives for one RenderFrame().
