@@ -13,6 +13,7 @@
 //   LightTriangle LoadLight(uint light)
 //   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
+//   float3        SkyTableLoad(uint texel)            the sky radiance table (SkyLookup.hlsli)
 // HitInfo, CameraData and the kFlag* constants come from PathTracerShared.h.
 //
 // Estimator: emitted radiance is gathered at path vertices 1 .. maxBounces + 1 (vertex 1 is the
@@ -20,8 +21,10 @@
 // strategies are weighted with the power heuristic. The first lightTreeBounces vertices choose the
 // triangle with the light tree (power, distance and orientation as seen from the vertex: far fewer
 // wasted samples among many lights, but a walk of ~log2(lights) dependent loads); deeper vertices,
-// whose light reaches the image after a bounce, choose by power alone in O(1). The environment is
-// only reached by BSDF sampling. Russian roulette starts after the third bounce and is unbiased.
+// whose light reaches the image after a bounce, choose by power alone in O(1). The sky (a table, or
+// uniform) is only reached by BSDF sampling; the sun's disc is a light of its own, sampled at every
+// vertex and weighed against BSDF samples that reach it, like the triangles. Russian roulette
+// starts after the third bounce and is unbiased.
 // With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
 // entirely: ReSTIR DI (ReSTIRDI.hlsli) estimates it.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
@@ -29,6 +32,7 @@
 
 #include "Bsdf.hlsli"
 #include "Sampling.hlsli"
+#include "air/renderer/shader/SkyLookup.hlsli"
 
 // ReSTIR GI's candidate recording (kFlagReSTIRGI) is compiled only where it is used (PathTracerGi.hlsl):
 // its state halves the speed of the plain kernel through register pressure.
@@ -38,7 +42,7 @@
 
 struct IntegratorParams
 {
-    float3 environment; // radiance, nits
+    SkyData sky; // the sky's radiance (a table or uniform) and the sun's disc
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
@@ -406,19 +410,23 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.gi.weight = 0.0f;
 
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
+    bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
+    float sunPdf = sunNee ? 1.0f / SunSolidAngle(params.sky) : 0.0f; // of sun NEE, per solid angle
     // ReSTIR DI estimates the whole direct light at the first surface (from emissive triangles): the
     // path neither samples a light there nor counts the emission its BSDF sample reaches.
     bool restir = useNee && (params.flags & kFlagReSTIR) != 0u;
     // ReSTIR GI estimates the light of every path with two or more bounces, so none of it goes into
-    // `radiance`. The sample that records it (kFlagRecordGi) gathers it as two candidates at x2:
-    // NEE there, and the BSDF continuation, whose incoming radiance splits into the emission it
-    // reaches and the rest. Other samples stop at x2.
+    // `radiance`. The sample that records it (kFlagRecordGi) gathers it as candidates at x2: NEE
+    // there (a triangle and the sun, streamed into one by weighted reservoir sampling), and the BSDF
+    // continuation, whose incoming radiance splits into the emission it reaches (triangle or sun) and
+    // the rest. Other samples stop at x2.
     bool gi = AIR_PT_RESTIR_GI != 0 && (params.flags & kFlagReSTIRGI) != 0u;
     bool recordGi = gi && (params.flags & kFlagRecordGi) != 0u;
     float firstBsdfPdf = 0.0f; // solid angle pdf of the ray from the first surface to x2
     float x2AreaPdf = 0.0f;
     float3 x2Throughput = float3(0.0f, 0.0f, 0.0f);
-    float3 neeContribution = float3(0.0f, 0.0f, 0.0f); // candidate 0: NEE at x2
+    float neeWeightSum = 0.0f; // candidate 0, NEE at x2: luminances of the contributions streamed
+    float neeWeight = 0.0f;    // of the one kept
     float3 neeDirection = float3(0.0f, 0.0f, 1.0f);
     float3 neeRadiance = float3(0.0f, 0.0f, 0.0f);
     float neeLightPdf = 0.0f;
@@ -445,17 +453,36 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         bool beyondX2 = gi && bounce >= 2u; // light found here is the continuation candidate's
         if (!hit.hit)
         {
-            if (beyondX2)
+            // The sky, and the sun when the ray falls within its disc, weighed against sun NEE at the
+            // vertex the ray left.
+            float3 sky = SkyRadiance(params.sky, direction);
+            float3 sun = float3(0.0f, 0.0f, 0.0f);
+            if (HasSun(params.sky) && dot(direction, params.sky.sunDirection) >= params.sky.sunCosRadius)
             {
-                continuationRest += restThroughput * params.environment;
+                sun = params.sky.sunRadiance;
+            }
+            if (beyondX2 && bounce == 2u)
+            {
+                // Reached from x2: ReSTIR GI weighs the sun itself (see the emission below).
+                continuationEmission = sun;
+                continuationLightPdf = sunPdf;
+                continuationRest += sky;
             }
             else
             {
-                float3 environment = throughput * params.environment;
-                result.radiance += environment;
-                if (direct)
+                float sunWeight = bounce > 0u ? PowerHeuristic(previousBsdfPdf, sunPdf) : 1.0f;
+                float3 environment = sky + sun * sunWeight;
+                if (beyondX2)
                 {
-                    result.directRadiance += environment;
+                    continuationRest += restThroughput * environment;
+                }
+                else
+                {
+                    result.radiance += throughput * environment;
+                    if (direct)
+                    {
+                        result.directRadiance += throughput * environment;
+                    }
                 }
             }
             break;
@@ -575,14 +602,59 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     float3 contribution = throughput * e.fCos * light.radiance * (weight / lightPdf);
                     if (gi && bounce == 1u)
                     {
-                        neeContribution = contribution;
-                        neeDirection = wi;
-                        neeRadiance = light.radiance;
-                        neeLightPdf = lightPdf;
+                        float w = Luminance(contribution);
+                        neeWeightSum += w;
+                        if (Rand(seed) * neeWeightSum < w)
+                        {
+                            neeWeight = w;
+                            neeDirection = wi;
+                            neeRadiance = light.radiance;
+                            neeLightPdf = lightPdf;
+                        }
                     }
                     else if (beyondX2)
                     {
                         continuationRest += restThroughput * e.fCos * light.radiance * (weight / lightPdf);
+                    }
+                    else
+                    {
+                        result.radiance += contribution;
+                        if (bounce == 0u)
+                        {
+                            result.directRadiance += contribution;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The sun: one direction within its disc. (ReSTIR DI only takes over the triangles.)
+        if (sunNee)
+        {
+            float2 uSun = float2(Rand(seed), Rand(seed));
+            float3 wi = SampleSunDirection(params.sky, uSun);
+            if (dot(wi, ng) > 0.0f)
+            {
+                BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
+                if (any(e.fCos) && TraceVisible(rayOrigin, wi, 1e30f))
+                {
+                    float weight = PowerHeuristic(sunPdf, e.pdf);
+                    float3 contribution = throughput * e.fCos * params.sky.sunRadiance * (weight / sunPdf);
+                    if (gi && bounce == 1u)
+                    {
+                        float w = Luminance(contribution);
+                        neeWeightSum += w;
+                        if (Rand(seed) * neeWeightSum < w)
+                        {
+                            neeWeight = w;
+                            neeDirection = wi;
+                            neeRadiance = params.sky.sunRadiance;
+                            neeLightPdf = sunPdf;
+                        }
+                    }
+                    else if (beyondX2)
+                    {
+                        continuationRest += restThroughput * e.fCos * params.sky.sunRadiance * (weight / sunPdf);
                     }
                     else
                     {
@@ -644,7 +716,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
     }
 
-    // ReSTIR GI: RIS between the two candidates at x2 by the luminance of what each contributes.
+    // ReSTIR GI: RIS between the candidates at x2 by the luminance of what each contributes (the NEE
+    // ones were already streamed into one, with their weight sum).
     if (recordGi && x2AreaPdf > 0.0f)
     {
         float continuationMis = continuationLightPdf > 0.0f ? PowerHeuristic(continuationPdf, continuationLightPdf) : 1.0f;
@@ -654,12 +727,12 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             continuationContribution =
                 x2Throughput * continuationWeight * (continuationEmission * continuationMis + continuationRest);
         }
-        float wNee = Luminance(neeContribution);
         float wContinuation = Luminance(continuationContribution);
-        if (wNee + wContinuation > 0.0f)
+        float total = neeWeightSum + wContinuation;
+        if (total > 0.0f)
         {
             // W = sum(w) / p̂(Y), p̂(Y) being the luminance of the integrand: contribution * pdf(Y).
-            bool nee = Rand(seed) * (wNee + wContinuation) < wNee;
+            bool nee = Rand(seed) * total < neeWeightSum;
             result.gi.valid = true;
             if (nee)
             {
@@ -667,7 +740,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 result.gi.direction = neeDirection;
                 result.gi.radianceMis = neeRadiance;
                 result.gi.lightPdf = neeLightPdf;
-                result.gi.weight = (wNee + wContinuation) / (wNee * x2AreaPdf * neeLightPdf);
+                result.gi.weight = total / (neeWeight * x2AreaPdf * neeLightPdf);
             }
             else
             {
@@ -676,7 +749,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 result.gi.radianceMis = continuationEmission;
                 result.gi.radianceFixed = continuationRest;
                 result.gi.lightPdf = continuationLightPdf;
-                result.gi.weight = (wNee + wContinuation) / (wContinuation * x2AreaPdf * continuationPdf);
+                result.gi.weight = total / (wContinuation * x2AreaPdf * continuationPdf);
             }
         }
     }

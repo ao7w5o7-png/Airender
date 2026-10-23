@@ -159,6 +159,9 @@ private:
     float mResolutionScale = 1.0f;
     float mMoveSpeed = 1.5f; // metres per second
     bool mViewportHovered = false;
+    // The sky as being edited: applied to the scene when a control is released, since every change
+    // rebuilds the sky table (Scene::SetSky).
+    std::optional<renderer::Sky> mSkyEdit;
     // Path tracer settings from before DLSS was enabled, restored when it is disabled.
     std::string mPreDlssAccumulate;
     std::string mPreDlssSpp;

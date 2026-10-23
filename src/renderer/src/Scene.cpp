@@ -201,6 +201,8 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
     mLightRingCapacity.assign(slots, 0);
     mLightTreeRing.assign(slots, {});
     mLightTreeRingCapacity.assign(slots, 0);
+    mSkyRing.assign(slots, {});
+    mSkyRingCapacity.assign(slots, 0);
     for (u32 i = 0; i < slots; ++i)
     {
         mInstanceLightRing.push_back(
@@ -210,7 +212,6 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
                                   .memory = MemoryLocation::DeviceLocalHost,
                                   .debugName = std::format("{}.InstanceLights[{}]", mDesc.name, i)}));
     }
-    mGpu.environment = mDesc.environment;
     Update();
 }
 
@@ -226,7 +227,7 @@ Scene::~Scene()
     {
         mDevice.DestroyBuffer(buffer);
     }
-    for (const auto* ring : {&mLightRing, &mLightTreeRing})
+    for (const auto* ring : {&mLightRing, &mLightTreeRing, &mSkyRing})
     {
         for (rhi::BufferHandle buffer : *ring)
         {
@@ -355,6 +356,15 @@ void Scene::SetMaterial(u32 index, const Material& material)
     }
 }
 
+void Scene::SetSky(const Sky& sky)
+{
+    if (!(mDesc.sky == sky))
+    {
+        mDesc.sky = sky;
+        mDirty = true;
+    }
+}
+
 void Scene::SetEnvironment(float3 radiance)
 {
     if (!(mDesc.environment == radiance))
@@ -372,7 +382,6 @@ void Scene::Update()
     }
     mRingSlot = (mRingSlot + 1) % u32(mMaterialRing.size());
     WriteDynamicData();
-    mGpu.environment = mDesc.environment;
     ++mGpu.version;
     mDirty = false;
 }
@@ -427,6 +436,21 @@ void Scene::WriteDynamicData()
     mGpu.instanceLights = mInstanceLightRing[mRingSlot];
     mGpu.lightCount = totalPower > 0.0 ? u32(lights.size()) : 0u;
     mGpu.lightPower = float(totalPower);
+
+    // The sky table is only rebuilt when the sky changes; every slot gets a copy.
+    if (!mSkyTableBuilt || !(mSkyTableFor == mDesc.sky))
+    {
+        mSkyTable = BuildSkyTable(mDesc.sky, mDesc.environment);
+        mSkyTableFor = mDesc.sky;
+        mSkyTableBuilt = true;
+    }
+    mSkyTable.data.uniformRadiance = mDesc.environment;
+    const std::vector<float> placeholder(3, 0.0f);
+    const std::vector<float>& skyTable = mSkyTable.radiance.empty() ? placeholder : mSkyTable.radiance;
+    ensure(mSkyRing, mSkyRingCapacity, skyTable.size(), sizeof(float), "SkyTable");
+    WriteBuffer(mDevice, mSkyRing[mRingSlot], skyTable.data(), skyTable.size() * sizeof(float));
+    mGpu.skyTable = mSkyRing[mRingSlot];
+    mGpu.sky = mSkyTable.data;
 }
 
 } // namespace air::renderer

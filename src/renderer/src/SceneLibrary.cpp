@@ -322,6 +322,7 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"many_lights", detail::MakeManyLights},
     {"door", detail::MakeDoor},
     {"terrain", detail::MakeTerrain},
+    {"sunset", detail::MakeSunset},
 };
 
 } // namespace

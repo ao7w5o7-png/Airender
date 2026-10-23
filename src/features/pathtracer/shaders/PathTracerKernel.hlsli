@@ -132,7 +132,7 @@ void RayGen()
     float2 size = float2(f.width, f.height);
 
     IntegratorParams params;
-    params.environment = f.environment.rgb;
+    params.sky = f.sky;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;

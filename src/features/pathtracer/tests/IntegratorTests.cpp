@@ -179,3 +179,22 @@ TEST(Integrator_VeachMisNeeAndBsdfSamplingAgree)
     EXPECT(withNee > 0.0);
     EXPECT(Near(withNee, bsdfOnly, 0.08, "veach_mis plates, NEE vs BSDF-only"));
 }
+
+// The sun's disc is a light of its own: next event estimation of it, weighted by MIS against BSDF
+// samples that reach it, must give the same image as BSDF sampling alone. The sun is made 12
+// degrees wide here so that BSDF sampling finds it often enough to converge.
+TEST(Integrator_SunNeeAndBsdfSamplingAgree)
+{
+    TaskSystem tasks(4);
+    renderer::SceneDesc scene = *renderer::MakeBuiltinScene("sunset");
+    scene.sky.sunElevation = 40.0f;
+    scene.sky.sunAngularRadius = 12.0f;
+    pt::ReferenceSettings settings = Settings(tasks, 256, 3);
+    settings.width = 32;
+    settings.height = 18;
+    const double withNee = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+    settings.nextEventEstimation = false;
+    const double bsdfOnly = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+    EXPECT(withNee > 0.0);
+    EXPECT(Near(withNee, bsdfOnly, 0.05, "sunset, NEE vs BSDF-only"));
+}

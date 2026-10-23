@@ -429,13 +429,14 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `furnace` | spheres of roughness 0..1 in a uniform environment | energy conservation (`furnace=1`) |
   | `veach_mis` | 4 glossy plates, 4 spherical lights of equal power, r = 3 cm..90 cm | MIS: NEE and BSDF sampling each fail somewhere |
   | `material_grid` | white / red / gold spheres, roughness 0..1, one area light | BSDF appearance |
-  | `sphere_field` | ~2400 instances of 2 meshes, 32 materials, sun (1.6e9 nits) + sky | TLAS scale, dynamic range, light imbalance |
+  | `sphere_field` | ~2400 instances of 2 meshes, 32 materials, physical sky and sun | TLAS scale, dynamic range, light imbalance |
   | `many_lights` | hall with 66 panels + 300 LEDs, radiance over 2 orders of magnitude | light selection (baseline for many-light sampling) |
   | `door` | light reaches the camera's room only through a door left ajar | indirect-dominated transport |
-  | `terrain` | 2.1M triangle height field, lake, sun + sky | dense geometry, BLAS build and memory |
+  | `terrain` | 2.1M triangle height field, lake, physical sky and sun | dense geometry, BLAS build and memory |
+  | `sunset` | a plain, two spheres and five pillars under a sun 4 degrees high | the physical sky (§8.9), long shadows |
 
-  The sun is a disc 10 km away with the real angular radius (0.2665 degrees) and luminance, so
-  daylight scenes use daylight exposure (EV100 14..15).
+  Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
+  luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
 
 ### 8.2 Integrator
 
@@ -765,6 +766,57 @@ Validation (`--set pathtracer.debugView=9` isolates the indirect light):
 - Tests: `PathTracer_ReSTIRGIResamplesTheIndirectLight` (Null backend: passes, history ping-pong,
   with and without DI, the furnace).
 
+
+### 8.9 Physical sky
+
+`SceneDesc::sky` (`renderer/Sky.h`) replaces the uniform `environment` with an Earth-like
+atmosphere lit by the sun: sun elevation, azimuth and angular radius, the scene's altitude, the
+aerosol (haze) optical depth at 550 nm (0.005 pristine, 0.05 the default clear day, 0.3 and up
+hazy) and the albedo of the planet seen below the horizon. `sphere_field`, `terrain` and `sunset`
+use it; `aircli render|reference --sun ELEVATION,AZIMUTH [--aerosols DEPTH]` gives it to any scene,
+and the editor's Scene panel edits it.
+
+- **Model** (`src/renderer/src/Sky.cpp`): the medium and data of Bruneton's 2017 reference
+  implementation (Rayleigh scattering 1.24062e-6 / lambda^4 per metre over an 8 km scale height;
+  aerosols over 1.2 km with single-scattering albedo 0.9 and a Cornette-Shanks phase, g = 0.8; 300
+  Dobson units of ozone peaking at 25 km; the measured solar spectrum outside the atmosphere), and
+  the light transport of Hillaire 2020: a transmittance table (256 x 64, Bruneton's
+  parameterisation, 500 steps each), a multiple-scattering table (32 x 32; 64 directions, all
+  orders as the geometric series of the second) and a 96-step ray march per sky direction with the
+  planet's sunlit ground below the horizon.
+- **Spectral, then RGB**: every table is computed for 16 bins of 25 nm (380-780 nm) and the sky
+  radiance converted to linear sRGB in nits through the CIE 1931 colour matching functions (the
+  analytic fit of Wyman, Sloan and Shirley 2013) and 683 lm/W. Colours come from spectra: the
+  reddening of a low sun, the blue zenith, the twilight sky.
+- **One table, two renderers**: the result is a 256 x 256 table of sky radiance over all
+  directions as seen from the scene (`u = sqrt(azimuth from the sun / pi)`, elevation through a
+  signed square root: texels gather near the sun's azimuth and the horizon) plus the sun's
+  radiance after the atmosphere (`gpu::SkyData`, `shader/SkyShared.h`). The CPU builds it when the
+  sky changes (0.75 s in debug builds, on all cores) and `Scene` uploads it into its ring; the GPU
+  kernels and the CPU reference read it through the same `SkyLookup.hlsli`, so their skies are
+  identical.
+- **The sun is a disc light**: every path vertex samples a direction uniformly within the disc
+  (next event estimation, one shadow ray), weighted by the power heuristic against BSDF samples
+  that reach the disc, exactly like the emissive triangles. The sky itself is only reached by BSDF
+  sampling. ReSTIR DI keeps resampling the triangles only; in ReSTIR GI the sun's NEE at x2 is one
+  more NEE candidate (streamed with the triangle's), and a continuation that escapes into the disc
+  keeps the sun as its MIS-weighted emission. The furnace replaces the sky with a uniform white one
+  and switches the sun off.
+
+Validation:
+
+- `tests/SkyTests.cpp`: the zenith optical depth at 550 nm (0.19: Rayleigh 0.11, ozone 0.03,
+  aerosols 0.05) and its transmittance; the solar spectrum's illuminance outside the atmosphere
+  (about 128 klux); with the sun 60 degrees high a sun of 1.3-1.75e9 nits, 75-100 klux direct and
+  8-30 klux of sky light on a horizontal surface, a blue zenith of 1.5-12 kcd/m^2; a red sun and
+  warm horizon at 2 degrees; no sun and a dim sky in civil twilight; the lookup returns the table and
+  is mirror-symmetric; sun samples stay in the disc.
+- `Integrator_SunNeeAndBsdfSamplingAgree`: with a 12-degree sun, NEE + MIS and BSDF sampling alone
+  agree (0.5% apart at 256 spp).
+- GPU against the CPU reference on `sunset` (96x54): the means differ by 0.06%, by 0.13% with
+  ReSTIR DI and GI accumulated.
+- Not modelled yet: the air between surfaces in the scene (aerial perspective, visible at a few
+  hundred metres), which comes with participating media; the sun's limb darkening.
 ---
 
 ## 9. Editor

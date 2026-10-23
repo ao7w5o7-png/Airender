@@ -3,11 +3,13 @@
 #define AIR_PATH_TRACER_SHARED_H
 
 #include "air/renderer/shader/HlslCompat.h"
+#include "air/renderer/shader/SkyShared.h"
 
 #ifdef __cplusplus
 namespace air::pt::gpu
 {
 using namespace air::hlsl;
+using air::gpu::SkyData;
 #endif
 
 // Debug views (pathtracer.debugView). Everything but kDebugNone replaces the radiance.
@@ -60,7 +62,7 @@ struct FrameData
 {
     CameraData camera;
     CameraData previousCamera; // for motion vectors
-    float4 environment;        // rgb radiance (nits), w = exposure scale applied by Resolve
+    SkyData sky;               // sky radiance (a table or uniform) and the sun; uniform in the furnace
     float2 jitter;             // sub-pixel offset in [-0.5, 0.5) for kFlagGlobalJitter
     uint frameIndex;
     uint flags;
@@ -72,6 +74,10 @@ struct FrameData
     uint debugView;
     float debugScale;      // normalizes depth / intersection debug views
     uint lightTreeBounces; // NEE uses the light tree at path vertices below this, power beyond
+    float exposure;        // radiance -> scene-linear, applied by Resolve
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -94,6 +100,7 @@ struct TraceConstants
     uint lightTree;       // StructuredBuffer<LightTreeNode>
     uint primaryHits;     // RWStructuredBuffer<PrimaryHit>, written with kFlagReSTIR or kFlagReSTIRGI
     uint giReservoirs;    // RWStructuredBuffer<GiReservoir>, written with kFlagReSTIRGI
+    uint skyTable;        // StructuredBuffer<float>: the sky radiance table (SkyShared.h)
 };
 
 struct ResolveConstants
@@ -106,7 +113,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 192);
+static_assert(sizeof(FrameData) == 240);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

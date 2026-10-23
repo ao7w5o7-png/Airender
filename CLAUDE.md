@@ -36,7 +36,8 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Test scenes (`aircli scenes` lists them with sizes; docs/architecture.md §8.1): pick the one that
   stresses the change, e.g. `veach_mis` for MIS / light sampling, `many_lights` for light
   selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`
-  for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory.
+  for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory,
+  `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9).
   Validate GPU against `aircli reference` on the same scene.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post

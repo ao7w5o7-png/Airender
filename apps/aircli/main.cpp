@@ -7,10 +7,11 @@
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
 //                   [--no-async-compute] [--no-transient-pool] [--html profile.html]   (report of the last frame)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
+//                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
-//                    [--furnace] [--no-nee] [--light-tree-bounces N]
+//                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
 //
 // `render` fails (exit 1) if any frame produced a validation error.
@@ -57,8 +58,10 @@ int Usage()
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
                "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
                "                [--scene NAME] [--output image.pfm|image.ppm]\n"
+               "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
+               "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
                "  aircli features | scenes\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
                stderr);
@@ -152,6 +155,46 @@ int CommandScenes()
     return kExitOk;
 }
 
+// --sun ELEVATION,AZIMUTH (degrees) and --aerosols DEPTH: give any scene the physical sky (Sky.h).
+struct SkyOptions
+{
+    std::optional<std::pair<float, float>> sun;
+    std::optional<float> aerosols;
+
+    // True when `arg` was one of these options.
+    bool Parse(std::string_view arg, Args& args)
+    {
+        if (arg == "--sun")
+        {
+            const std::string value(args.Next());
+            const size_t comma = value.find(',');
+            sun = std::pair{std::stof(value.substr(0, comma)),
+                            comma == std::string::npos ? 0.0f : std::stof(value.substr(comma + 1))};
+            return true;
+        }
+        if (arg == "--aerosols")
+        {
+            aerosols = std::stof(std::string(args.Next()));
+            return true;
+        }
+        return false;
+    }
+
+    void Apply(renderer::SceneDesc& scene) const
+    {
+        if (sun)
+        {
+            scene.sky.physical = true;
+            scene.sky.sunElevation = sun->first;
+            scene.sky.sunAzimuth = sun->second;
+        }
+        if (aerosols)
+        {
+            scene.sky.aerosolDepth = *aerosols;
+        }
+    }
+};
+
 // ---------------------------------------------------------------------------
 // reference: the path tracer's estimator on the CPU, to validate GPU output with `compare`
 // ---------------------------------------------------------------------------
@@ -159,6 +202,7 @@ int CommandReference(Args& args)
 {
     std::string sceneName = "cornell_box";
     std::string outputPath;
+    SkyOptions skyOptions;
     pt::ReferenceSettings settings;
     settings.width = 320;
     settings.height = 180;
@@ -202,17 +246,21 @@ int CommandReference(Args& args)
         {
             settings.lightTreeBounces = u32(std::stoul(std::string(args.Next()))); // as pathtracer.lightTreeBounces
         }
+        else if (skyOptions.Parse(arg, args))
+        {
+        }
         else
         {
             AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
             return Usage();
         }
     }
-    const std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
+    std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
     if (args.error || outputPath.empty() || !scene)
     {
         return Usage();
     }
+    skyOptions.Apply(*scene);
     TaskSystem tasks;
     settings.tasks = &tasks;
     const auto start = std::chrono::steady_clock::now();
@@ -309,6 +357,7 @@ int CommandRender(Args& args)
     std::string htmlPath;
     std::string sceneName = "cornell_box";
     std::string outputPath;
+    SkyOptions skyOptions;
     bool dumpCommands = false;
 
     while (!args.Done())
@@ -388,6 +437,9 @@ int CommandRender(Args& args)
         {
             outputPath = args.Next();
         }
+        else if (skyOptions.Parse(arg, args))
+        {
+        }
         else
         {
             AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
@@ -430,6 +482,7 @@ int CommandRender(Args& args)
             AIR_LOG(Error, "aircli", "unknown scene '{}'", sceneName);
             return kExitUsage;
         }
+        skyOptions.Apply(*sceneDesc);
         renderer::Scene scene(*device, std::move(*sceneDesc));
         const renderer::Camera camera = scene.Desc().camera;
         report["scene"] = sceneName;

@@ -19,7 +19,7 @@ Resources:
 [Graphics] Barrier [tex 'PathTracer.Accumulation' None -> UAVCompute]
 [Graphics] BeginEvent 'PathTracer.Trace'
 [Graphics] SetPipeline pipeline 'PathTracer.Trace'
-[Graphics] PushConstants 68 bytes
+[Graphics] PushConstants 72 bytes
 [Graphics] DispatchRays 64x32x1
 [Graphics] EndEvent
 [Graphics] Barrier [tex 'PathTracer.Accumulation' UAVCompute -> SRVCompute] [tex 'FrameOutput' None -> UAVCompute]
@@ -47,7 +47,7 @@ Resources:
 [Graphics] Barrier [tex 'PathTracer.Accumulation' SRVCompute -> UAVCompute]
 [Graphics] BeginEvent 'PathTracer.Trace'
 [Graphics] SetPipeline pipeline 'PathTracer.Trace'
-[Graphics] PushConstants 68 bytes
+[Graphics] PushConstants 72 bytes
 [Graphics] DispatchRays 64x32x1
 [Graphics] EndEvent
 [Graphics] Barrier [tex 'PathTracer.Accumulation' UAVCompute -> SRVCompute] [tex 'FrameOutput' SRVCompute -> UAVCompute]

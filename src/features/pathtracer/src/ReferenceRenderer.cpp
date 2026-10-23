@@ -4,7 +4,9 @@
 
 #include "air/core/Assert.h"
 #include "air/features/pathtracer/Bsdf.h"
+#include "air/renderer/Sky.h"
 #include "air/renderer/shader/SceneShared.h"
+#include "air/renderer/shader/SkyShared.h"
 
 #include "PathTracerShared.h"
 
@@ -195,6 +197,7 @@ struct SceneTables
     std::vector<LightTriangle> lights;
     std::vector<LightTreeNode> lightTree;
     std::span<const float> lut;
+    std::vector<float> skyTable; // renderer::SkyTable::radiance
     const Bvh* bvh = nullptr;
 };
 
@@ -211,6 +214,10 @@ struct Kernel
     MaterialData LoadMaterial(uint material) const { return tables.materials[material]; }
     LightTriangle LoadLight(uint light) const { return tables.lights[light]; }
     LightTreeNode LoadLightNode(uint node) const { return tables.lightTree[node]; }
+    float3 SkyTableLoad(uint texel) const
+    {
+        return float3(tables.skyTable[texel * 3], tables.skyTable[texel * 3 + 1], tables.skyTable[texel * 3 + 2]);
+    }
     HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/) const
     {
         HitInfo hit{};
@@ -279,11 +286,13 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
         tables.lights.emplace_back(); // like the GPU list: NEE reads entry 0 when no light is chosen
     }
     tables.lut = GetBsdfLut();
+    renderer::SkyTable sky = renderer::BuildSkyTable(scene.sky, scene.environment);
+    tables.skyTable = std::move(sky.radiance);
     const Bvh bvh(std::move(triangles));
     tables.bvh = &bvh;
 
     Kernel::IntegratorParams params;
-    params.environment = scene.environment;
+    params.sky = sky.data;
     params.lightCount = lightPower > 0.0 ? u32(tables.lights.size()) : 0u;
     params.maxBounces = settings.maxBounces;
     params.flags = (settings.furnace ? kFlagFurnace : 0u) | (settings.nextEventEstimation ? 0u : kFlagNoNee);
@@ -291,9 +300,13 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     float exposure = settings.applyExposure ? renderer::ExposureScale(camera.ev100) : 1.0f;
     if (settings.furnace)
     {
-        // Same convention as the GPU path tracer: the environment maps to 0.18.
-        const float environment = dot(scene.environment, float3(0.2126f, 0.7152f, 0.0722f));
-        params.environment = environment > 0.0f ? scene.environment : float3(1.0f);
+        // Same convention as the GPU path tracer: a uniform sky mapped to 0.18, no sun.
+        const float3 uniform = sky.data.width == 0 ? sky.data.uniformRadiance : float3(1.0f);
+        const float environment = dot(uniform, float3(0.2126f, 0.7152f, 0.0722f));
+        params.sky.width = 0;
+        params.sky.height = 0;
+        params.sky.uniformRadiance = environment > 0.0f ? uniform : float3(1.0f);
+        params.sky.sunRadiance = float3(0.0f);
         exposure = settings.applyExposure ? 0.18f / (environment > 0.0f ? environment : 1.0f) : 1.0f;
     }
 

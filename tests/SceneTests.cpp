@@ -55,7 +55,9 @@ TEST(Scene_BuiltinScenesValidateAndRender)
             EXPECT(runner.AddFeature("pathtracer", registry.Create("pathtracer")));
             const renderer::FrameResult result = runner.RenderFrame(scene.Get(), scene.Desc().camera);
             EXPECT(result.validationErrors.empty());
-            EXPECT(scene.Get().lightCount > 0 || name == "furnace"); // only the furnace has no emitters
+            // Every scene but the furnace has light: emitters, or the physical sky's sun.
+            const renderer::float3 sun = scene.Get().sky.sunRadiance;
+            EXPECT(scene.Get().lightCount > 0 || sun.x + sun.y + sun.z > 0.0f || name == "furnace");
         }
     }
     device->WaitIdle();
@@ -70,6 +72,11 @@ TEST(Scene_TestScenesContainWhatTheyTest)
     EXPECT(EmissiveInstances(*renderer::MakeBuiltinScene("many_lights")) >= 360);
     EXPECT(Triangles(*renderer::MakeBuiltinScene("terrain")) > 2'000'000);
     EXPECT(EmissiveInstances(*renderer::MakeBuiltinScene("door")) == 1);
+    for (const char* name : {"sphere_field", "terrain", "sunset"})
+    {
+        const renderer::Sky sky = renderer::MakeBuiltinScene(name)->sky;
+        EXPECT(sky.physical && sky.sunElevation > 0.0f); // daylight from the physical sky
+    }
     // Generated with a fixed seed: building twice gives the same scene.
     const renderer::SceneDesc again = *renderer::MakeBuiltinScene("sphere_field");
     EXPECT(again.instances.size() == field.instances.size());

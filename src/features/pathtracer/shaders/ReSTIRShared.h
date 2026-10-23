@@ -79,7 +79,7 @@ struct ReSTIRConstants
     uint disocclusionSamples; // neighbours where there is no temporal history
     float spatialRadius;      // pixels
     float maxConfidence;      // cap of the temporal history's M
-    uint pad0;
+    uint skyTable;            // StructuredBuffer<float> (SkyShared.h), for the integrator's hooks
     uint pad1;
 };
 

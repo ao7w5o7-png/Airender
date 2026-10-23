@@ -2,13 +2,14 @@
 
 // Scenes: a CPU description (SceneDesc) and its GPU form (Scene / GpuScene).
 //
-// SceneDesc is plain data: meshes, physically based materials, instances, a camera and a uniform
-// environment. Scene uploads it once (device-local geometry, one BLAS per mesh, one TLAS) and
-// keeps the small editable parts (materials, emissive triangle list) in per-frame upload rings so
-// an editor can change them between frames without stalling the GPU. Features only read GpuScene.
+// SceneDesc is plain data: meshes, physically based materials, instances, a camera and either a
+// uniform environment or a physically based sky with a sun (Sky.h). Scene uploads it once (device-local geometry, one
+// BLAS per mesh, one TLAS) and keeps the small editable parts (materials, emissive triangle list) in per-frame upload
+// rings so an editor can change them between frames without stalling the GPU. Features only read GpuScene.
 //
 // Units: metres, radiance in nits (cd/m^2), camera exposure as EV100.
 
+#include "air/renderer/Sky.h"
 #include "air/renderer/shader/SceneShared.h"
 #include "air/rhi/RHIDevice.h"
 
@@ -77,7 +78,8 @@ struct SceneDesc
     std::vector<Material> materials;
     std::vector<Instance> instances;
     Camera camera;
-    float3 environment = {0.0f, 0.0f, 0.0f}; // uniform environment radiance, nits
+    float3 environment = {0.0f, 0.0f, 0.0f}; // uniform environment radiance, nits (sky.physical: unused)
+    Sky sky;                                 // physical sky and sun; replaces `environment`
 };
 
 // Mesh builders. Quads are emitted so that cross(p1 - p0, p2 - p0) points along `normal`.
@@ -93,12 +95,13 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //   veach_mis      4 glossy plates reflecting 4 spherical lights of equal power and very different
 //                  sizes (Veach's MIS test): NEE and BSDF sampling each fail somewhere
 //   material_grid  roughness x material grid of spheres under one area light
-//   sphere_field   ~2400 instanced spheres and boxes, 32 materials, sun (1.6e9 nits) + sky,
+//   sphere_field   ~2400 instanced spheres and boxes, 32 materials, physical sky and sun,
 //                  emissive spheres: TLAS scale, material variety, extreme dynamic range
 //   many_lights    a hall lit by ~370 lights spanning two orders of magnitude: light selection
 //   door           light reaches the camera's room only through a door left ajar: indirect-
 //                  dominated transport, hard for unidirectional path tracing
 //   terrain        a 2.1M triangle height field with a lake, sun and sky: dense geometry
+//   sunset         a plain under a low sun: the physical sky's colours, long shadows
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 std::vector<std::string> BuiltinSceneNames();
@@ -130,9 +133,10 @@ struct GpuScene
     // not emit. Written together with `materials` and `lights`, so the three always agree.
     rhi::BufferHandle instanceLights;
     u32 lightCount = 0;
-    float lightPower = 0.0f; // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
-    float3 environment = {0.0f, 0.0f, 0.0f};
-    u64 version = 0; // bumped whenever anything that changes the image changes
+    float lightPower = 0.0f;    // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
+    gpu::SkyData sky;           // the sun and how to read skyTable (uniform radiance when width == 0)
+    rhi::BufferHandle skyTable; // StructuredBuffer<float>: 3 per texel, at least 3
+    u64 version = 0;            // bumped whenever anything that changes the image changes
 };
 
 class Scene
@@ -150,6 +154,7 @@ public:
     // Editing, on the frame thread between frames. Changes reach the GPU at the next Update().
     void SetMaterial(u32 index, const Material& material);
     void SetEnvironment(float3 radiance);
+    void SetSky(const Sky& sky); // rebuilds the sky table at the next Update() (about 0.1 s)
     // Call once per frame before rendering: uploads pending edits into the next ring slot.
     void Update();
 
@@ -179,6 +184,11 @@ private:
     std::vector<rhi::BufferHandle> mLightTreeRing;
     std::vector<u32> mLightTreeRingCapacity;
     std::vector<rhi::BufferHandle> mInstanceLightRing;
+    std::vector<rhi::BufferHandle> mSkyRing;
+    std::vector<u32> mSkyRingCapacity;
+    SkyTable mSkyTable; // of mSkyTableFor
+    Sky mSkyTableFor;
+    bool mSkyTableBuilt = false;
     u32 mRingSlot = 0;
     bool mDirty = true;
     u64 mGeometryBytes = 0;

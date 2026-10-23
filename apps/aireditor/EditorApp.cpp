@@ -869,16 +869,48 @@ void EditorApp::BuildScenePanel()
         mCamera = mScene->Desc().camera;
     }
 
-    ImGui::SeparatorText("Environment");
-    renderer::float3 env = mScene->Desc().environment;
-    float envNits = std::max({env.x, env.y, env.z});
-    renderer::float3 envColor = envNits > 0.0f ? env / envNits : renderer::float3(1.0f);
-    bool envChanged = ImGui::ColorEdit3("Color##env", &envColor.x, ImGuiColorEditFlags_Float);
-    envChanged |=
-        ImGui::DragFloat("Radiance (nits)##env", &envNits, 1.0f, 0.0f, 1e6f, "%.1f", ImGuiSliderFlags_Logarithmic);
-    if (envChanged)
+    ImGui::SeparatorText("Sky");
+    renderer::Sky sky = mSkyEdit.value_or(mScene->Desc().sky);
+    bool apply = ImGui::Checkbox("Physical sky and sun", &sky.physical);
+    ImGui::SetItemTooltip("An Earth-like atmosphere lit by the sun, computed spectrally (docs/architecture.md, "
+                          "section 8.9).\nOff: a uniform environment and no sun.");
+    bool edited = apply;
+    if (sky.physical)
     {
-        mScene->SetEnvironment(envColor * envNits);
+        auto slider = [&](const char* label, float* value, float lo, float hi, const char* format, int flags = 0)
+        {
+            edited |= ImGui::SliderFloat(label, value, lo, hi, format, flags);
+            apply |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        slider("Sun elevation", &sky.sunElevation, -10.0f, 90.0f, "%.1f deg");
+        slider("Sun azimuth", &sky.sunAzimuth, -180.0f, 180.0f, "%.1f deg");
+        slider("Aerosol depth", &sky.aerosolDepth, 0.001f, 2.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Haze optical depth at 550 nm: 0.005 pristine, 0.05 clear, 0.3 and up hazy.");
+        slider("Sun radius", &sky.sunAngularRadius, 0.05f, 5.0f, "%.3f deg", ImGuiSliderFlags_Logarithmic);
+        slider("Ground albedo", &sky.groundAlbedo, 0.0f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Of the planet seen below the horizon, beyond the scene.");
+    }
+    else
+    {
+        renderer::float3 env = mScene->Desc().environment;
+        float envNits = std::max({env.x, env.y, env.z});
+        renderer::float3 envColor = envNits > 0.0f ? env / envNits : renderer::float3(1.0f);
+        bool envChanged = ImGui::ColorEdit3("Color##env", &envColor.x, ImGuiColorEditFlags_Float);
+        envChanged |=
+            ImGui::DragFloat("Radiance (nits)##env", &envNits, 1.0f, 0.0f, 1e6f, "%.1f", ImGuiSliderFlags_Logarithmic);
+        if (envChanged)
+        {
+            mScene->SetEnvironment(envColor * envNits);
+        }
+    }
+    if (apply)
+    {
+        mScene->SetSky(sky);
+        mSkyEdit.reset();
+    }
+    else if (edited)
+    {
+        mSkyEdit = sky;
     }
 
     ImGui::SeparatorText("Materials");

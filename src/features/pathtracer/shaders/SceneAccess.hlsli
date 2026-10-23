@@ -1,7 +1,7 @@
 // The integrator's scene hooks (Integrator.hlsli) over the bindless scene buffers, and inline shadow
 // rays: shared by the trace kernel and the ReSTIR passes. The including shader declares `g`, its push
-// constants, with the fields tlas, instances, materials, lights, instanceLights, lightTree and bsdfLut,
-// and supplies TraceClosest itself (closest-hit shaders or an inline query).
+// constants, with the fields tlas, instances, materials, lights, instanceLights, lightTree, bsdfLut and
+// skyTable, and supplies TraceClosest itself (closest-hit shaders or an inline query).
 #ifndef AIR_PT_SCENE_ACCESS_HLSLI
 #define AIR_PT_SCENE_ACCESS_HLSLI
 
@@ -45,6 +45,12 @@ LightTriangle LoadLight(uint light)
 {
     StructuredBuffer<LightTriangle> lights = ResourceDescriptorHeap[g.lights];
     return lights[light];
+}
+
+float3 SkyTableLoad(uint texel)
+{
+    StructuredBuffer<float> table = ResourceDescriptorHeap[g.skyTable];
+    return float3(table[texel * 3u], table[texel * 3u + 1u], table[texel * 3u + 2u]);
 }
 
 LightTreeNode LoadLightNode(uint node)

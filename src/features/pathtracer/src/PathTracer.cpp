@@ -220,18 +220,20 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.camera = ToGpu(camera, aspect);
     frame.previousCamera = ToGpu(previousCamera, aspect);
     float exposure = renderer::ExposureScale(camera.ev100);
+    frame.sky = scene.sky;
     if (mSettings.furnace)
     {
-        // Map the environment to middle grey: a correct furnace image is a flat 0.18.
-        const float environment = std::max(hlsl::dot(scene.environment, hlsl::float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
-        frame.environment = {environment > 0.0f ? scene.environment : hlsl::float3(1.0f), 0.0f};
-        exposure = environment > 0.0f ? 0.18f / environment : 0.18f;
+        // A uniform sky (white for a physical one) mapped to middle grey and no sun: a correct
+        // furnace image is a flat 0.18.
+        const hlsl::float3 uniform = scene.sky.width == 0 ? scene.sky.uniformRadiance : hlsl::float3(1.0f);
+        const float luminance = std::max(hlsl::dot(uniform, hlsl::float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
+        frame.sky.width = 0;
+        frame.sky.height = 0;
+        frame.sky.uniformRadiance = luminance > 0.0f ? uniform : hlsl::float3(1.0f);
+        frame.sky.sunRadiance = hlsl::float3(0.0f);
+        exposure = luminance > 0.0f ? 0.18f / luminance : 0.18f;
     }
-    else
-    {
-        frame.environment = {scene.environment, 0.0f};
-    }
-    frame.environment.w = exposure;
+    frame.exposure = exposure;
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;
@@ -275,6 +277,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     constants.instanceLights = mDevice.GetBindlessSRV(scene.instanceLights);
     constants.lightTree = mDevice.GetBindlessSRV(scene.lightTree);
     constants.bsdfLut = mDevice.GetBindlessSRV(mBsdfLut);
+    constants.skyTable = mDevice.GetBindlessSRV(scene.skyTable);
 
     if (spp > 0)
     {
@@ -375,6 +378,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.instanceLights = constants.instanceLights;
             restirScene.lightTree = constants.lightTree;
             restirScene.bsdfLut = constants.bsdfLut;
+            restirScene.skyTable = constants.skyTable;
             mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, view != gpu::kDebugIndirect,
                                view != gpu::kDebugDirect);
         }

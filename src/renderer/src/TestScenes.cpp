@@ -23,25 +23,11 @@ using hlsl::normalize;
 
 constexpr float kPi = std::numbers::pi_v<float>;
 
-// Daylight: the sun as an emissive disc 10 km away with the real angular radius (0.2665 degrees)
-// and luminance (1.6e9 nits), facing the origin, plus a uniform sky.
-void AddSunAndSky(SceneDesc& scene, float elevationDegrees, float azimuthDegrees, float skyNits)
+// Daylight: the physically based sky (Sky.h), the sun at the given position.
+void AddSky(SceneDesc& scene, float elevationDegrees, float azimuthDegrees, float altitude = 0.0f)
 {
-    const float elevation = elevationDegrees * kPi / 180.0f;
-    const float azimuth = azimuthDegrees * kPi / 180.0f;
-    const float3 toSun(std::cos(elevation) * std::sin(azimuth), std::sin(elevation),
-                       std::cos(elevation) * std::cos(azimuth));
-    constexpr float kDistance = 10000.0f;
-    const float radius = kDistance * std::tan(0.2665f * kPi / 180.0f);
-    const u32 sun = AddMaterial(scene, {.name = "Sun",
-                                        .baseColor = {0.0f, 0.0f, 0.0f},
-                                        .roughness = 1.0f,
-                                        .emissionColor = {1.0f, 0.95f, 0.88f},
-                                        .emissionNits = 1.6e9f});
-    AddInstance(scene, "Sun", AddMesh(scene, MakeDisc("Sun", toSun * kDistance, -toSun, radius, 32)), sun);
-    // Blue sky of the given luminance.
-    const float3 sky(0.55f, 0.70f, 1.0f);
-    scene.environment = sky * (skyNits / dot(sky, float3(0.2126f, 0.7152f, 0.0722f)));
+    scene.sky = {
+        .physical = true, .sunElevation = elevationDegrees, .sunAzimuth = azimuthDegrees, .altitude = altitude};
 }
 
 // Axis-aligned box centred at `center`.
@@ -302,7 +288,7 @@ SceneDesc MakeSphereField()
     };
     scatter(-30.0f, 30.0f, -45.0f, 8.0f, 1.5f);
     scatter(-70.0f, 70.0f, -110.0f, -46.0f, 3.0f);
-    AddSunAndSky(scene, 32.0f, 140.0f, 8000.0f);
+    AddSky(scene, 32.0f, 140.0f);
     LookAt(scene.camera, {0.0f, 3.2f, 13.0f}, {0.0f, 0.6f, -6.0f});
     scene.camera.verticalFov = 0.75f;
     scene.camera.ev100 = 14.5f;
@@ -529,10 +515,43 @@ SceneDesc MakeTerrain()
                 AddMesh(scene, MakeQuad("Lake", {-h, 6.0f, h}, {h, 6.0f, h}, {h, 6.0f, -h}, {-h, 6.0f, -h},
                                         {0.0f, 1.0f, 0.0f})),
                 water);
-    AddSunAndSky(scene, 18.0f, -60.0f, 6000.0f);
+    AddSky(scene, 18.0f, -60.0f, 300.0f);
     LookAt(scene.camera, {-60.0f, 65.0f, 260.0f}, {20.0f, 15.0f, -40.0f});
     scene.camera.verticalFov = 0.7f;
     scene.camera.ev100 = 14.0f;
+    return scene;
+}
+
+// Late afternoon on an open plain: the sun 4 degrees above the horizon, long shadows across a
+// 400 m ground, a few objects against the low sun. Shows the sky's colours, which come from the
+// spectral atmosphere, and the planet's ground beyond the plane.
+SceneDesc MakeSunset()
+{
+    SceneDesc scene;
+    scene.name = "sunset";
+    const u32 ground = AddMaterial(scene, {.name = "Grass", .baseColor = {0.16f, 0.2f, 0.09f}, .roughness = 0.9f});
+    const u32 white = AddMaterial(scene, {.name = "White", .baseColor = {0.8f, 0.8f, 0.8f}, .roughness = 0.5f});
+    const u32 metal =
+        AddMaterial(scene, {.name = "Steel", .baseColor = {0.9f, 0.9f, 0.88f}, .roughness = 0.15f, .metallic = 1.0f});
+    const u32 stone = AddMaterial(scene, {.name = "Stone", .baseColor = {0.45f, 0.4f, 0.35f}, .roughness = 0.8f});
+    constexpr float kHalf = 200.0f;
+    AddInstance(scene, "Ground",
+                AddMesh(scene, MakeQuad("Ground", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                ground);
+    const u32 sphere = AddMesh(scene, MakeSphere("Sphere", 1.0f, 48));
+    SetTransform(AddInstance(scene, "WhiteSphere", sphere, white), {-1.6f, 1.0f, 0.0f});
+    SetTransform(AddInstance(scene, "SteelSphere", sphere, metal), {1.4f, 0.8f, 1.2f}, 0.0f, 0.8f);
+    const u32 pillar = AddMesh(scene, MakeBox("Pillar", {0.4f, 2.5f, 0.4f}));
+    for (int i = 0; i < 5; ++i)
+    {
+        SetTransform(AddInstance(scene, std::format("Pillar{}", i), pillar, stone),
+                     {-6.0f + 3.0f * float(i), 2.5f, -7.0f - 1.5f * float(i)}, 0.3f * float(i));
+    }
+    AddSky(scene, 4.0f, -35.0f);
+    LookAt(scene.camera, {0.5f, 1.8f, 9.0f}, {-1.5f, 1.6f, -10.0f});
+    scene.camera.verticalFov = 0.9f;
+    scene.camera.ev100 = 11.5f;
     return scene;
 }
 
