@@ -4,7 +4,7 @@
 //
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
 //                   [--frames N] [--width W] [--height H] [--shaders DIR]
-//                   [--dump-graph out.dot] [--dump-commands] [--report out.json]
+//                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
 //
@@ -13,7 +13,9 @@
 #include "air/core/Image.h"
 #include "air/core/Json.h"
 #include "air/core/Log.h"
+#include "air/core/Profiler.h"
 #include "air/core/TaskSystem.h"
+#include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
@@ -40,7 +42,7 @@ int Usage() {
     std::fputs("usage:\n"
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
                "                [--frames N] [--width W] [--height H] [--shaders DIR]\n"
-               "                [--dump-graph out.dot] [--dump-commands] [--report out.json]\n"
+               "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
                "  aircli features\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
                stderr);
@@ -179,6 +181,8 @@ int CommandRender(Args& args) {
             dumpCommands = true;
         } else if (arg == "--report") {
             reportPath = args.Next();
+        } else if (arg == "--profile") {
+            desc.profile = true;
         } else {
             AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
             return Usage();
@@ -189,6 +193,8 @@ int CommandRender(Args& args) {
     }
     desc.captureCommands = dumpCommands;
     desc.captureGraph = true;
+    Profiler::Get().SetEnabled(desc.profile);
+    Profiler::Get().SetThreadName("Main");
 
     auto device = rhi::CreateDevice({.backend = backend});
     if (!device) {
@@ -238,7 +244,9 @@ int CommandRender(Args& args) {
         json::Value frameReports = json::Value::MakeArray();
         json::Value commands = json::Value::MakeArray();
         for (u32 frame = 0; frame < frames; ++frame) {
+            Profiler::Get().BeginFrame();
             renderer::FrameResult result = runner.RenderFrame(scene.Get());
+            Profiler::Get().EndFrame();
             if (frame == 0) {
                 std::fputs(result.graphText.c_str(), stdout);
                 report["graph"] = result.graphText;
@@ -259,6 +267,13 @@ int CommandRender(Args& args) {
         }
         report["frames"] = std::move(frameReports);
         report["features"] = runner.DescribeFeatures();
+        if (desc.profile) {
+            device->WaitIdle(); // lets the last frames' GPU timings resolve
+            report["gpuProfile"] = renderer::ToJson(device->GetGpuTimings());
+            report["cpuProfile"] = renderer::ToJson(Profiler::Get().GetLastFrame());
+            report["memory"] = renderer::ToJson(device->GetMemoryStats());
+            report["processMemory"] = renderer::ToJson(GetProcessMemory());
+        }
         if (dumpCommands) {
             report["commands"] = std::move(commands);
         }

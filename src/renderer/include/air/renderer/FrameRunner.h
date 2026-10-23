@@ -5,6 +5,7 @@
 // exact same code path.
 
 #include "air/core/Json.h"
+#include "air/core/Profiler.h"
 #include "air/rdg/RenderGraph.h"
 #include "air/renderer/RenderFeature.h"
 
@@ -22,6 +23,9 @@ struct FrameRunnerDesc {
     rdg::RenderGraph::Config graphConfig;
     bool captureCommands = false; // keep each frame's command stream in FrameResult
     bool captureGraph = false;    // keep each frame's graph dump in FrameResult
+    // GPU timestamps per pass, CPU recording time per pass and a memory snapshot in every
+    // FrameResult (and in its JSON).
+    bool profile = false;
 };
 
 struct FrameResult {
@@ -32,6 +36,11 @@ struct FrameResult {
     std::string graphviz;              // when captureGraph
     std::vector<std::string> commands; // when captureCommands
     std::vector<std::string> validationErrors;
+    // When FrameRunnerDesc::profile is set:
+    std::vector<rdg::RenderGraph::PassTiming> passCpu; // this frame
+    rhi::GpuFrameTimings gpu;                          // latest frame the GPU finished (a few frames back)
+    rhi::MemoryStats memory;                           // after this frame
+    ProcessMemory processMemory;
 
     json::Value ToJson() const;
 };

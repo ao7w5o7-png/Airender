@@ -65,8 +65,9 @@ public:
     template <typename Fn> void ForEach(Fn&& fn) const {
         std::lock_guard lock(mMutex);
         for (u32 i = 0; i < mSlots.size(); ++i) {
-            if (mSlots[i].value) {
-                fn(HandleType{i, mSlots[i].generation}, *mSlots[i].value);
+            const Slot& slot = mSlots[i];
+            if (slot.value.has_value()) {
+                fn(HandleType{i, slot.generation}, *slot.value);
             }
         }
     }

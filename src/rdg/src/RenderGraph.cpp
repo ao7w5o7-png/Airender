@@ -2,8 +2,10 @@
 
 #include "air/core/Assert.h"
 #include "air/core/Log.h"
+#include "air/core/Profiler.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 #include <memory>
 #include <sstream>
@@ -238,6 +240,7 @@ const RenderGraph::Resource& RenderGraph::ResourceFor(u32 passIndex, u32 id, Res
 // ===========================================================================
 
 void RenderGraph::Compile() {
+    AIR_PROFILE_SCOPE("RDG.Compile");
     CheckThread();
     if (mCompiled) {
         return;
@@ -410,7 +413,10 @@ void RenderGraph::RecordRange(rhi::CommandList& cmd, u32 begin, u32 end, bool la
         cmd.BeginEvent(pass.name);
         PassContext context(cmd, mDevice, *this, passIndex);
         if (pass.execute) {
+            AIR_PROFILE_SCOPE(pass.name);
+            const auto start = std::chrono::steady_clock::now();
             pass.execute(context);
+            pass.cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         }
         cmd.EndEvent();
     }
@@ -419,7 +425,17 @@ void RenderGraph::RecordRange(rhi::CommandList& cmd, u32 begin, u32 end, bool la
     }
 }
 
+std::vector<RenderGraph::PassTiming> RenderGraph::GetPassTimings() const {
+    std::vector<PassTiming> timings;
+    timings.reserve(mLivePasses.size());
+    for (u32 p : mLivePasses) {
+        timings.push_back({mPasses[p].name, mPasses[p].cpuMs});
+    }
+    return timings;
+}
+
 u64 RenderGraph::Execute() {
+    AIR_PROFILE_SCOPE("RDG.Execute");
     CheckThread();
     AIR_CHECK(!mExecuted, "RenderGraph::Execute called twice");
     Compile();

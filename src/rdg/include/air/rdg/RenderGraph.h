@@ -142,6 +142,13 @@ public:
     u64 Execute();
 
     const Stats& GetStats() const { return mStats; }
+
+    // CPU time each live pass spent recording (its execute lambda), valid after Execute().
+    struct PassTiming {
+        std::string name;
+        double cpuMs = 0.0;
+    };
+    std::vector<PassTiming> GetPassTimings() const;
     // Human readable dump of the compiled graph: passes, accesses, barriers, lifetimes, heap offsets.
     std::string DumpText() const;
     // Graphviz dot of passes and resources (culled passes are grey).
@@ -192,6 +199,7 @@ private:
         bool culled = false;
         std::vector<rhi::Barrier> barriersBefore;
         std::vector<u32> barrierResources; // resource id of each barrier
+        double cpuMs = 0.0;                // recording time, written by the recording thread
     };
 
     u32 AddPassInternal(std::string name, PassFlags flags, std::function<void(PassContext&)> execute);

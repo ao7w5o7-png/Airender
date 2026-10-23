@@ -2,12 +2,14 @@
 
 #include "air/core/Assert.h"
 #include "air/core/Log.h"
+#include "air/core/Profiler.h"
 
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <exception>
+#include <format>
 
 namespace air {
 
@@ -138,6 +140,7 @@ void TaskSystem::Schedule(std::shared_ptr<TaskState> task) {
 void TaskSystem::Execute(const std::shared_ptr<TaskState>& task) {
     try {
         if (task->fn) {
+            AIR_PROFILE_SCOPE(task->name);
             task->fn();
         }
     } catch (const std::exception& e) {
@@ -197,6 +200,7 @@ void TaskSystem::HelpUntil(const TaskState& target) {
 
 void TaskSystem::WorkerMain(u32 index) {
     tlsWorkerOwner = this;
+    Profiler::Get().SetThreadName(std::format("Worker {}", index));
     for (;;) {
         std::shared_ptr<TaskState> task;
         {
