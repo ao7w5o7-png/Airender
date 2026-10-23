@@ -2,6 +2,7 @@ add_library(air_renderer
     src/Diagnostics.cpp
     src/FeatureRegistry.cpp
     src/FrameRunner.cpp
+    src/LightTree.cpp
     src/Parameters.cpp
     src/ProfileReport.cpp
     src/Transfer.cpp

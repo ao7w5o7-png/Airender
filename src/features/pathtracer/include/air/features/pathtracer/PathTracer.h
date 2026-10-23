@@ -33,6 +33,12 @@ struct PathTracerSettings
     bool accumulate = true;
     bool guides = true; // write the denoiser guide textures (blackboard slots::kDiffuseAlbedo ...)
     bool nextEventEstimation = true;
+    // NEE at the first lightTreeBounces path vertices chooses lights with the light tree (power,
+    // distance and orientation from the vertex), deeper ones by power alone (O(1)). 0: by power only.
+    // At every vertex the tree halves the noise of many_lights per sample but costs ~3x the trace
+    // time (a walk of ~log2(lights) dependent loads per sample): off by default, worth it for
+    // offline references of many-light scenes (docs/architecture.md §8.6).
+    u32 lightTreeBounces = 0;
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap

@@ -31,8 +31,9 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   integrator changes must keep `BsdfTests` / `IntegratorTests` (white furnace, energy) green.
 - Test scenes (`aircli scenes` lists them with sizes; docs/architecture.md §8.1): pick the one that
   stresses the change, e.g. `veach_mis` for MIS / light sampling, `many_lights` for light
-  selection, `door` for indirect transport, `sphere_field` / `terrain` for instancing, dense
-  geometry and memory. Validate GPU against `aircli reference` on the same scene.
+  selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`
+  for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory.
+  Validate GPU against `aircli reference` on the same scene.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.

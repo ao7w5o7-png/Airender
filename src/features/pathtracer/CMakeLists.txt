@@ -7,5 +7,6 @@ air_add_feature(NAME pathtracer
     TESTS
         tests/BsdfTests.cpp
         tests/IntegratorTests.cpp
+        tests/LightTreeTests.cpp
         tests/PathTracerTests.cpp
 )

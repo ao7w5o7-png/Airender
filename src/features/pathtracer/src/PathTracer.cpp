@@ -24,8 +24,8 @@ namespace
 bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 {
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
-           a.nextEventEstimation == b.nextEventEstimation && a.furnace == b.furnace && a.debugView == b.debugView &&
-           a.debugScale == b.debugScale;
+           a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
+           a.furnace == b.furnace && a.debugView == b.debugView && a.debugScale == b.debugScale;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -210,6 +210,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
                   (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee);
+    frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
     frame.samplesPerPixel = spp;
@@ -238,6 +239,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     constants.materials = mDevice.GetBindlessSRV(scene.materials);
     constants.lights = mDevice.GetBindlessSRV(scene.lights);
     constants.instanceLights = mDevice.GetBindlessSRV(scene.instanceLights);
+    constants.lightTree = mDevice.GetBindlessSRV(scene.lightTree);
     constants.bsdfLut = mDevice.GetBindlessSRV(mBsdfLut);
 
     if (spp > 0)

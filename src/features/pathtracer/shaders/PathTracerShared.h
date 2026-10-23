@@ -63,8 +63,8 @@ struct FrameData
     uint maxBounces;
     uint lightCount;
     uint debugView;
-    float debugScale; // normalizes depth / intersection debug views
-    uint pad0;
+    float debugScale;      // normalizes depth / intersection debug views
+    uint lightTreeBounces; // NEE uses the light tree at path vertices below this, power beyond
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -84,7 +84,7 @@ struct TraceConstants
     uint viewDepth;       // RWTexture2D<float>
     uint motionVectors;   // RWTexture2D<float2>
     uint instanceLights;  // StructuredBuffer<uint>: first light-list entry per instance
-    uint pad1;
+    uint lightTree;       // StructuredBuffer<LightTreeNode>
     uint pad2;
 };
 

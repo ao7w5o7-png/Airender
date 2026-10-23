@@ -113,6 +113,9 @@ std::string Validate(const SceneDesc& desc);
 // the materials, which is why they live in per-frame buffers rather than in the instance data.
 std::vector<u32> FirstLightIndices(const SceneDesc& desc);
 std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, double* totalPower = nullptr);
+// The light tree over `lights` (gpu::LightTreeNode), which also gets each light's tree trail and
+// depth. Lights without power are left out; with none, the tree is one leaf without power.
+std::vector<gpu::LightTreeNode> BuildLightTree(std::vector<gpu::LightTriangle>& lights);
 gpu::InstanceData MakeInstanceData(const Instance& instance, u32 vertexBuffer, u32 indexBuffer);
 float3 TransformPoint(const float transform[3][4], float3 p);
 
@@ -122,6 +125,7 @@ struct GpuScene
     rhi::BufferHandle instances; // StructuredBuffer<gpu::InstanceData>, indexed by InstanceID()
     rhi::BufferHandle materials; // StructuredBuffer<gpu::MaterialData>
     rhi::BufferHandle lights;    // StructuredBuffer<gpu::LightTriangle>, at least one element
+    rhi::BufferHandle lightTree; // StructuredBuffer<gpu::LightTreeNode> over `lights`, at least one node
     // StructuredBuffer<uint> per instance: its first entry in `lights`, gpu::kInvalidIndex if it does
     // not emit. Written together with `materials` and `lights`, so the three always agree.
     rhi::BufferHandle instanceLights;
@@ -172,6 +176,8 @@ private:
     std::vector<rhi::BufferHandle> mMaterialRing;
     std::vector<rhi::BufferHandle> mLightRing;
     std::vector<u32> mLightRingCapacity;
+    std::vector<rhi::BufferHandle> mLightTreeRing;
+    std::vector<u32> mLightTreeRingCapacity;
     std::vector<rhi::BufferHandle> mInstanceLightRing;
     u32 mRingSlot = 0;
     bool mDirty = true;

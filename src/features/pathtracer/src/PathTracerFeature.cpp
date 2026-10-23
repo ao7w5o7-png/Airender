@@ -28,6 +28,10 @@ public:
                         "Write denoiser guide textures (albedo, normals, depth, motion) when a feature reads them");
         mParameters.Add("nee", &mSettings.nextEventEstimation,
                         "Next event estimation with MIS (off: BSDF sampling only, for comparison)");
+        mParameters.Add("lightTreeBounces", &mSettings.lightTreeBounces,
+                        "Path vertices whose NEE chooses lights with the light tree (power, distance, orientation); "
+                        "deeper ones choose by power. 0: by power only",
+                        0, 64);
         mParameters.Add("furnace", &mSettings.furnace,
                         "White furnace: white materials, lights off; energy conservation shows as a flat grey image");
         mParameters.Add("debugView", &mSettings.debugView,

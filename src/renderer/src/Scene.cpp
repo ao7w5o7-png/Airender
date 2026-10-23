@@ -199,6 +199,8 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
     }
     mLightRing.assign(slots, {});
     mLightRingCapacity.assign(slots, 0);
+    mLightTreeRing.assign(slots, {});
+    mLightTreeRingCapacity.assign(slots, 0);
     for (u32 i = 0; i < slots; ++i)
     {
         mInstanceLightRing.push_back(
@@ -224,11 +226,14 @@ Scene::~Scene()
     {
         mDevice.DestroyBuffer(buffer);
     }
-    for (rhi::BufferHandle buffer : mLightRing)
+    for (const auto* ring : {&mLightRing, &mLightTreeRing})
     {
-        if (buffer.IsValid())
+        for (rhi::BufferHandle buffer : *ring)
         {
-            mDevice.DestroyBuffer(buffer);
+            if (buffer.IsValid())
+            {
+                mDevice.DestroyBuffer(buffer);
+            }
         }
     }
     for (rhi::BufferHandle buffer : mInstanceLightRing)
@@ -386,28 +391,37 @@ void Scene::WriteDynamicData()
 
     double totalPower = 0.0;
     std::vector<gpu::LightTriangle> lights = BuildLightTriangles(mDesc, &totalPower);
+    const std::vector<gpu::LightTreeNode> tree = BuildLightTree(lights); // also sets the lights' trails
     if (lights.empty())
     {
         lights.emplace_back(); // keep a valid buffer to bind
     }
 
-    const u64 bytes = lights.size() * sizeof(gpu::LightTriangle);
-    if (mLightRingCapacity[mRingSlot] < lights.size())
+    // Grows a ring slot to hold `count` elements; the old buffer goes once the GPU is done with it.
+    auto ensure = [&](std::vector<rhi::BufferHandle>& ring, std::vector<u32>& capacity, size_t count, u32 stride,
+                      const char* what)
     {
-        if (mLightRing[mRingSlot].IsValid())
+        if (capacity[mRingSlot] >= count)
         {
-            mDevice.DestroyBuffer(mLightRing[mRingSlot]); // deferred until the GPU is done with it
+            return;
         }
-        mLightRing[mRingSlot] =
-            mDevice.CreateBuffer({.size = bytes,
-                                  .stride = sizeof(gpu::LightTriangle),
-                                  .usage = BufferUsage::ShaderResource,
-                                  .memory = MemoryLocation::DeviceLocalHost,
-                                  .debugName = std::format("{}.Lights[{}]", mDesc.name, mRingSlot)});
-        mLightRingCapacity[mRingSlot] = u32(lights.size());
-    }
-    WriteBuffer(mDevice, mLightRing[mRingSlot], lights.data(), bytes);
+        if (ring[mRingSlot].IsValid())
+        {
+            mDevice.DestroyBuffer(ring[mRingSlot]);
+        }
+        ring[mRingSlot] = mDevice.CreateBuffer({.size = count * stride,
+                                                .stride = stride,
+                                                .usage = BufferUsage::ShaderResource,
+                                                .memory = MemoryLocation::DeviceLocalHost,
+                                                .debugName = std::format("{}.{}[{}]", mDesc.name, what, mRingSlot)});
+        capacity[mRingSlot] = u32(count);
+    };
+    ensure(mLightRing, mLightRingCapacity, lights.size(), sizeof(gpu::LightTriangle), "Lights");
+    WriteBuffer(mDevice, mLightRing[mRingSlot], lights.data(), lights.size() * sizeof(gpu::LightTriangle));
     mGpu.lights = mLightRing[mRingSlot];
+    ensure(mLightTreeRing, mLightTreeRingCapacity, tree.size(), sizeof(gpu::LightTreeNode), "LightTree");
+    WriteBuffer(mDevice, mLightTreeRing[mRingSlot], tree.data(), tree.size() * sizeof(gpu::LightTreeNode));
+    mGpu.lightTree = mLightTreeRing[mRingSlot];
     const std::vector<u32> firstLights = FirstLightIndices(mDesc);
     WriteBuffer(mDevice, mInstanceLightRing[mRingSlot], firstLights.data(), firstLights.size() * sizeof(u32));
     mGpu.instanceLights = mInstanceLightRing[mRingSlot];

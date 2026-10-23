@@ -67,6 +67,12 @@ LightTriangle LoadLight(uint light)
     return lights[light];
 }
 
+LightTreeNode LoadLightNode(uint node)
+{
+    StructuredBuffer<LightTreeNode> tree = ResourceDescriptorHeap[g.lightTree];
+    return tree[node];
+}
+
 HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
 {
     RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
@@ -182,6 +188,7 @@ void RayGen()
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
+    params.lightTreeBounces = f.lightTreeBounces;
 
     uint seed = Pcg(pixel.x + Pcg(pixel.y + Pcg(f.frameIndex)));
     float3 sum = 0.0f;

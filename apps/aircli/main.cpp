@@ -10,7 +10,7 @@
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
-//                    [--furnace] [--no-nee]
+//                    [--furnace] [--no-nee] [--light-tree-bounces N]
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
 //
 // `render` fails (exit 1) if any frame produced a validation error.
@@ -58,7 +58,7 @@ int Usage()
                "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
                "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
-               "                [--bounces N] [--furnace] [--no-nee]\n"
+               "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
                "  aircli features | scenes\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
                stderr);
@@ -197,6 +197,10 @@ int CommandReference(Args& args)
         else if (arg == "--no-nee")
         {
             settings.nextEventEstimation = false;
+        }
+        else if (arg == "--light-tree-bounces")
+        {
+            settings.lightTreeBounces = u32(std::stoul(std::string(args.Next()))); // as pathtracer.lightTreeBounces
         }
         else
         {

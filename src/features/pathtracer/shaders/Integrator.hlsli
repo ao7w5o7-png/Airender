@@ -11,13 +11,17 @@
 //   Vertex        LoadVertex(InstanceData instance, uint index)
 //   MaterialData  LoadMaterial(uint material)
 //   LightTriangle LoadLight(uint light)
+//   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
 // HitInfo, CameraData and the kFlag* constants come from PathTracerShared.h.
 //
 // Estimator: emitted radiance is gathered at path vertices 1 .. maxBounces + 1 (vertex 1 is the
-// first hit). Every vertex below the limit samples one emissive triangle (power-proportional)
-// and the BSDF; both strategies are weighted with the power heuristic. The environment is only
-// reached by BSDF sampling. Russian roulette starts after the third bounce and is unbiased.
+// first hit). Every vertex below the limit samples one emissive triangle and the BSDF; both
+// strategies are weighted with the power heuristic. The first lightTreeBounces vertices choose the
+// triangle with the light tree (power, distance and orientation as seen from the vertex: far fewer
+// wasted samples among many lights, but a walk of ~log2(lights) dependent loads); deeper vertices,
+// whose light reaches the image after a bounce, choose by power alone in O(1). The environment is
+// only reached by BSDF sampling. Russian roulette starts after the third bounce and is unbiased.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
 #define AIR_PT_INTEGRATOR_HLSLI
 
@@ -29,7 +33,8 @@ struct IntegratorParams
     float3 environment; // radiance, nits
     uint lightCount;
     uint maxBounces;
-    uint flags; // kFlagFurnace, kFlagNoNee
+    uint flags;            // kFlagFurnace, kFlagNoNee
+    uint lightTreeBounces; // vertices 0 .. lightTreeBounces - 1 choose lights with the light tree
 };
 
 struct Surface
@@ -115,10 +120,172 @@ LightTriangle SampleLight(float uSelect, float uAlias, uint count)
     return light;
 }
 
-// Solid angle pdf of NEE choosing the point at distance `dist` on `light`, seen under cosLight.
-float LightPdf(LightTriangle light, float dist, float cosLight)
+// Solid angle pdf of NEE choosing, with probability `pmf`, a light of `area` and the point on it at
+// distance `dist`, seen under cosLight.
+float LightPdf(float pmf, float area, float dist, float cosLight)
 {
-    return cosLight > 0.0f ? light.probability * dist * dist / (light.area * cosLight) : 0.0f;
+    return cosLight > 0.0f ? pmf * dist * dist / (area * cosLight) : 0.0f;
+}
+
+// --- Light tree ----------------------------------------------------------------------------------
+
+float SafeSqrt(float v)
+{
+    return sqrt(max(v, 0.0f));
+}
+
+// cos(a - b) with the angle difference clamped at 0, from the sines and cosines of a and b.
+float CosSubClamped(float sinA, float cosA, float sinB, float cosB)
+{
+    return cosA > cosB ? 1.0f : cosA * cosB + sinA * sinB;
+}
+
+float SinSubClamped(float sinA, float cosA, float sinB, float cosB)
+{
+    return cosA > cosB ? 0.0f : sinA * cosB - cosA * sinB;
+}
+
+// Importance of the emitters below `node` for point p with normal n (n = 0: no receiver cosine):
+// power x a bound of the emitter cosine towards p x a bound of the receiver cosine / distance^2.
+// The angles widen by the cone under which p sees the node's box; the distance is clamped so the
+// importance stays finite inside the box. Zero only when no emitter below can light p: none faces
+// it, or (the BSDFs only reflect) all are below its horizon.
+float LightNodeImportance(LightTreeNode node, float3 p, float3 n)
+{
+    float3 center = (node.boundsMin + node.boundsMax) * 0.5f;
+    float3 diagonal = node.boundsMax - node.boundsMin;
+    float3 toPoint = p - center;
+    // Emitters sharing one normal (a row of ceiling panels): exact test of p against the side of the
+    // box they emit from, which the bounding sphere below would blur for a long, flat group.
+    if (node.cosThetaO >= 0.9999f && dot(node.axis, toPoint) + dot(abs(node.axis), diagonal * 0.5f) <= 0.0f)
+    {
+        return 0.0f;
+    }
+    float distance2 = dot(toPoint, toPoint);
+    float3 wi = toPoint * rsqrt(max(distance2, 1e-30f));
+    float cosThetaW = dot(node.axis, wi);
+    float sinThetaW = SafeSqrt(1.0f - cosThetaW * cosThetaW);
+    // Directions from p into the box's bounding sphere: all of them from inside it.
+    float radius2 = dot(diagonal, diagonal) * 0.25f;
+    float cosThetaB = distance2 <= radius2 ? -1.0f : SafeSqrt(1.0f - radius2 / distance2);
+    float sinThetaB = SafeSqrt(1.0f - cosThetaB * cosThetaB);
+    float sinThetaO = SafeSqrt(1.0f - node.cosThetaO * node.cosThetaO);
+    float cosThetaX = CosSubClamped(sinThetaW, cosThetaW, sinThetaO, node.cosThetaO);
+    float sinThetaX = SinSubClamped(sinThetaW, cosThetaW, sinThetaO, node.cosThetaO);
+    float cosThetaP = CosSubClamped(sinThetaX, cosThetaX, sinThetaB, cosThetaB);
+    if (cosThetaP <= node.cosThetaE)
+    {
+        return 0.0f;
+    }
+    float importance = node.power * cosThetaP / max(distance2, length(diagonal) * 0.5f);
+    if (any(n))
+    {
+        // Exact horizon test on the box (its support along n): a long, flat group of lights below
+        // the tangent plane has a bounding sphere reaching far above it, which would keep it.
+        if (dot(n, center - p) + dot(abs(n), diagonal * 0.5f) <= 0.0f)
+        {
+            return 0.0f;
+        }
+        float cosThetaI = dot(-wi, n); // towards the node
+        float sinThetaI = SafeSqrt(1.0f - cosThetaI * cosThetaI);
+        importance *= max(CosSubClamped(sinThetaI, cosThetaI, sinThetaB, cosThetaB), 0.0f);
+    }
+    return max(importance, 0.0f);
+}
+
+struct LightChoice
+{
+    uint light; // kInvalidIndex: no light can reach the point
+    float pmf;
+};
+
+// Walks the light tree from the root, choosing each child by its importance at p (one uniform,
+// rescaled at every level).
+LightChoice SampleLightTree(float3 p, float3 n, float u)
+{
+    LightChoice choice;
+    choice.light = kInvalidIndex;
+    choice.pmf = 0.0f;
+    uint index = 0u;
+    LightTreeNode node = LoadLightNode(0u);
+    float pmf = 1.0f;
+    for (uint depth = 0u; depth <= 64u; ++depth)
+    {
+        if (node.isLeaf != 0u)
+        {
+            if (index > 0u || LightNodeImportance(node, p, n) > 0.0f)
+            {
+                choice.light = node.child;
+                choice.pmf = pmf;
+            }
+            return choice;
+        }
+        LightTreeNode first = LoadLightNode(index + 1u);
+        LightTreeNode second = LoadLightNode(node.child);
+        float i0 = LightNodeImportance(first, p, n);
+        float i1 = LightNodeImportance(second, p, n);
+        if (i0 + i1 <= 0.0f)
+        {
+            return choice;
+        }
+        float p0 = i0 / (i0 + i1);
+        if (u < p0)
+        {
+            u = min(u / p0, 0.99999994f);
+            pmf *= p0;
+            index = index + 1u;
+            node = first;
+        }
+        else
+        {
+            u = min((u - p0) / (1.0f - p0), 0.99999994f);
+            pmf *= 1.0f - p0;
+            index = node.child;
+            node = second;
+        }
+    }
+    return choice;
+}
+
+// The probability SampleLightTree(p, n, u) chooses `light`: follows its trail from the root.
+float LightTreePmf(uint light, float3 p, float3 n)
+{
+    LightTriangle l = LoadLight(light);
+    if (l.treeDepth == kInvalidIndex)
+    {
+        return 0.0f;
+    }
+    uint index = 0u;
+    LightTreeNode node = LoadLightNode(0u);
+    float pmf = 1.0f;
+    for (uint depth = 0u; depth < l.treeDepth; ++depth)
+    {
+        LightTreeNode first = LoadLightNode(index + 1u);
+        LightTreeNode second = LoadLightNode(node.child);
+        float i0 = LightNodeImportance(first, p, n);
+        float i1 = LightNodeImportance(second, p, n);
+        if (i0 + i1 <= 0.0f)
+        {
+            return 0.0f;
+        }
+        uint bit = depth < 32u ? (l.treeTrailLow >> depth) & 1u : (l.treeTrailHigh >> (depth - 32u)) & 1u;
+        pmf *= (bit != 0u ? i1 : i0) / (i0 + i1);
+        if (bit != 0u) // (HLSL has no conditional operator on structs)
+        {
+            index = node.child;
+            node = second;
+        }
+        else
+        {
+            index = index + 1u;
+            node = first;
+        }
+    }
+    if (l.treeDepth == 0u && LightNodeImportance(node, p, n) <= 0.0f)
+    {
+        return 0.0f; // the only light, facing away (sampling finds nothing either)
+    }
+    return pmf;
 }
 
 // --- Surfaces ------------------------------------------------------------------------------------
@@ -185,6 +352,10 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     float previousBsdfPdf = 0.0f; // solid angle pdf of the BSDF sample that produced `direction`
+    // The vertex that produced `direction` and how NEE chose lights there (for MIS).
+    float3 previousPosition = origin;
+    float3 previousNormal = float3(0.0f, 0.0f, 0.0f);
+    bool previousTree = false;
 
     for (uint bounce = 0u; bounce <= params.maxBounces; ++bounce)
     {
@@ -219,7 +390,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             if (bounce > 0u && useNee)
             {
                 LightTriangle light = LoadLight(s.lightIndex);
-                float lightPdf = LightPdf(light, hit.t, dot(-direction, s.geometricNormal));
+                float pmf = previousTree ? LightTreePmf(s.lightIndex, previousPosition, previousNormal) : light.probability;
+                float lightPdf = LightPdf(pmf, light.area, hit.t, dot(-direction, s.geometricNormal));
                 weight = PowerHeuristic(previousBsdfPdf, lightPdf);
             }
             float3 emitted = throughput * s.emission * weight;
@@ -245,14 +417,30 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         Frame frame = MakeFrame(ns);
         float3 woLocal = ToLocal(frame, wo);
         float3 rayOrigin = OffsetRayOrigin(s.position, ng);
+        bool lightTree = bounce < params.lightTreeBounces;
 
         // Next event estimation: one point on one emissive triangle.
         if (useNee)
         {
             float uLight = Rand(seed);
-            float uAlias = Rand(seed);
+            float uAlias = Rand(seed); // drawn in both modes: the random sequence stays the same
             float2 uPoint = float2(Rand(seed), Rand(seed));
-            LightTriangle light = SampleLight(uLight, uAlias, params.lightCount);
+            LightTriangle light = LoadLight(0u); // the list has an entry even without lights
+            float pmf = 0.0f;
+            if (lightTree)
+            {
+                LightChoice choice = SampleLightTree(s.position, ns, uLight);
+                if (choice.light != kInvalidIndex)
+                {
+                    light = LoadLight(choice.light);
+                    pmf = choice.pmf;
+                }
+            }
+            else
+            {
+                light = SampleLight(uLight, uAlias, params.lightCount);
+                pmf = light.probability;
+            }
             float2 b = SampleTriangle(uPoint);
             float3 lightPoint = light.p0 + light.e1 * b.x + light.e2 * b.y;
             float3 toLight = lightPoint - rayOrigin;
@@ -260,10 +448,10 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             float3 wi = toLight / dist;
             float3 lightNormal = normalize(cross(light.e1, light.e2));
             float cosLight = dot(-wi, lightNormal);
-            if (cosLight > 0.0f && dot(wi, ng) > 0.0f)
+            if (pmf > 0.0f && cosLight > 0.0f && dot(wi, ng) > 0.0f)
             {
                 BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
-                float lightPdf = LightPdf(light, dist, cosLight);
+                float lightPdf = LightPdf(pmf, light.area, dist, cosLight);
                 if (any(e.fCos) && lightPdf > 0.0f && TraceVisible(rayOrigin, wi, dist * (1.0f - 1e-4f)))
                 {
                     float weight = PowerHeuristic(lightPdf, e.pdf);
@@ -292,6 +480,9 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
         throughput *= bs.weight;
         previousBsdfPdf = bs.pdf;
+        previousPosition = s.position;
+        previousNormal = ns;
+        previousTree = lightTree;
         origin = rayOrigin;
         direction = wiWorld;
 

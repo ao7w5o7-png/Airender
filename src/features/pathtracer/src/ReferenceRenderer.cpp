@@ -193,6 +193,7 @@ struct SceneTables
     std::vector<std::span<const u32>> indices;
     std::vector<MaterialData> materials;
     std::vector<LightTriangle> lights;
+    std::vector<LightTreeNode> lightTree;
     std::span<const float> lut;
     const Bvh* bvh = nullptr;
 };
@@ -209,6 +210,7 @@ struct Kernel
     Vertex LoadVertex(InstanceData instance, uint index) const { return tables.vertices[instance.vertexBuffer][index]; }
     MaterialData LoadMaterial(uint material) const { return tables.materials[material]; }
     LightTriangle LoadLight(uint light) const { return tables.lights[light]; }
+    LightTreeNode LoadLightNode(uint node) const { return tables.lightTree[node]; }
     HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/) const
     {
         HitInfo hit{};
@@ -271,6 +273,11 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     }
     double lightPower = 0.0;
     tables.lights = renderer::BuildLightTriangles(scene, &lightPower);
+    tables.lightTree = renderer::BuildLightTree(tables.lights);
+    if (tables.lights.empty())
+    {
+        tables.lights.emplace_back(); // like the GPU list: NEE reads entry 0 when no light is chosen
+    }
     tables.lut = GetBsdfLut();
     const Bvh bvh(std::move(triangles));
     tables.bvh = &bvh;
@@ -280,6 +287,7 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     params.lightCount = lightPower > 0.0 ? u32(tables.lights.size()) : 0u;
     params.maxBounces = settings.maxBounces;
     params.flags = (settings.furnace ? kFlagFurnace : 0u) | (settings.nextEventEstimation ? 0u : kFlagNoNee);
+    params.lightTreeBounces = settings.lightTreeBounces;
     float exposure = settings.applyExposure ? renderer::ExposureScale(camera.ev100) : 1.0f;
     if (settings.furnace)
     {
@@ -331,6 +339,48 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
         }
     }
     return image;
+}
+
+struct LightTreeProbe::Tables
+{
+    SceneTables scene;
+};
+
+LightTreeProbe::LightTreeProbe(const renderer::SceneDesc& scene) : mTables(std::make_unique<Tables>())
+{
+    mTables->scene.lights = renderer::BuildLightTriangles(scene);
+    mTables->scene.lightTree = renderer::BuildLightTree(mTables->scene.lights);
+}
+
+LightTreeProbe::~LightTreeProbe() = default;
+
+u32 LightTreeProbe::GetLightCount() const
+{
+    return u32(mTables->scene.lights.size());
+}
+
+u32 LightTreeProbe::GetNodeCount() const
+{
+    return u32(mTables->scene.lightTree.size());
+}
+
+u32 LightTreeProbe::GetDepth(u32 light) const
+{
+    return mTables->scene.lights[light].treeDepth;
+}
+
+float LightTreeProbe::Pmf(u32 light, renderer::float3 p, renderer::float3 n) const
+{
+    Kernel kernel{mTables->scene}; // the shader functions are not const members
+    return kernel.LightTreePmf(light, p, n);
+}
+
+u32 LightTreeProbe::Sample(renderer::float3 p, renderer::float3 n, float u, float* pmf) const
+{
+    Kernel kernel{mTables->scene}; // the shader functions are not const members
+    const Kernel::LightChoice choice = kernel.SampleLightTree(p, n, u);
+    *pmf = choice.pmf;
+    return choice.light;
 }
 
 } // namespace air::pt

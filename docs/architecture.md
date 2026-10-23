@@ -403,7 +403,7 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `furnace`, `debugView` and `debugScale`.
+`nee`, `lightTreeBounces`, `furnace`, `debugView`, `ser` and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -454,7 +454,8 @@ differ.
   with BSDF sampling by the power heuristic (MIS). Emitters are one sided (front = `cross(e1, e2)`).
   The light list is also a Walker/Vose alias table, so choosing a light is O(1) (one or two loads)
   whatever the light count; the alias decision uses its own random number, so the selection
-  probability is exactly `probability`, as MIS assumes. Russian roulette from the third bounce.
+  probability is exactly `probability`, as MIS assumes. A light tree can choose instead (§8.6).
+  Russian roulette from the third bounce.
 - **Hardware ray tracing**: DXR raygen + closest hit for primary and bounce rays (20 byte payload
   with access qualifiers, bounce loop in raygen, recursion depth 1); inline `RayQuery` for shadow
   rays and the intersection heatmap. Push constants only carry bindless indices; per-frame data comes
@@ -565,6 +566,54 @@ including each other. Slots live in `renderer::slots`:
 - **tonemap**: exposure is applied by the path tracer; tonemap maps HDR to display with `clamp`,
   `aces` or `neutral` (Khronos PBR Neutral), highlights NaN/Inf (magenta) and negative values
   (cyan), and optionally encodes sRGB.
+
+### 8.6 Many lights: the light tree
+
+Choosing the light by power ignores where the shading point is: in `many_lights` most samples go
+to panels across the hall that barely light the point. The light tree (Conty Estevez and Kulla,
+"Importance Sampling of Many Lights with Adaptive Tree Splitting", 2018, in the form of pbrt-v4)
+chooses by power, distance and orientation as seen from the point instead.
+
+- **Build** (`renderer::BuildLightTree`, `src/renderer/src/LightTree.cpp`): a binary tree over the
+  light list, split by the surface area orientation heuristic (12 buckets per axis; median splits
+  past depth 40 bound the depth). A node (`gpu::LightTreeNode`, 64 bytes) stores its box, its power
+  and an orientation cone: the emitters' normals lie within `cosThetaO` of `axis`, and each emits
+  within `cosThetaE` (90 degrees for these one-sided triangles) beyond that. Every light stores the
+  bits of its path from the root (`treeTrailLow/High`, `treeDepth`); lights without power are not
+  in the tree. Built with the light list and uploaded with it in the same ring slot, so editing
+  emission rebuilds both.
+- **Sampling** (`SampleLightTree` in `Integrator.hlsli`): from the root, compute the importance of
+  both children (power x a bound of the emitter cosine / squared distance, times a bound of the
+  receiver cosine) and descend into one with probability proportional to it; the product of the
+  choices is the light's probability. Two exact tests give zero importance, so samples are not
+  spent where nothing can arrive: the whole box is below the receiver's tangent plane (the box's
+  support function), or the node's emitters all face one way (`cosThetaO` about 1, such as a group
+  of coplanar panels) and the whole box faces away from the point. When both children are zero no
+  light is chosen: a valid sample of zero.
+- **MIS**: a BSDF-sampled ray that hits an emitter needs the probability the tree would have given
+  that light at the previous vertex; `LightTreePmf` follows the light's trail from the root.
+- **Where**: `pathtracer.lightTreeBounces=N` uses the tree at the first N path vertices and the
+  alias table beyond. `aircli reference --light-tree-bounces N` does the same on the CPU.
+
+Measured (RTX 5070, idle VRAM). Noise is relMSE at 16 spp, 640x360, against an 8192 spp
+reference; time is the `PathTracer.Trace` pass at 1920x1080, 4 spp:
+
+| Scene | Power | Tree at vertex 1 | Tree everywhere |
+|---|---|---|---|
+| `many_lights` noise | 2.27 | 2.01 | 1.16 |
+| `many_lights` trace | 13.4 ms | 27.9 ms | 42.2 ms |
+| `sphere_field` noise | 0.082 | 0.077 | 0.111 |
+| `sphere_field` trace | 5.1 ms | 11.3 ms | 13.1 ms |
+
+The tree halves the noise per sample among many lights, but in `many_lights` (36k emissive
+triangles) each choice walks 16 to 19 levels of dependent loads in divergent warps, so in
+time-to-quality it loses to the O(1) alias table, and in
+`sphere_field`, where the sun dominates every point, it adds noise. That is why
+`lightTreeBounces` defaults to 0. Use it for offline references of many-light scenes, where samples
+are expensive anyway. The images are unbiased either way: means agree within 0.2% at 16 spp and
+0.01% at 8192 spp. `tests/LightTreeTests.cpp` checks that every light has a leaf, that the
+sampled frequencies match `LightTreePmf` and sum to at most 1, and that nearby lights win and lights
+behind the horizon get nothing.
 
 ---
 
