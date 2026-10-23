@@ -25,9 +25,17 @@ public:
     void BuildProfiler(bool* open);
     void BuildMemory(rhi::Device& device, bool* open);
 
-    double GetGpuFrameMs() const { return mLastGpu.frameMs; }
+    // Live values for the menu bar and viewport overlay; they keep updating while paused.
+    double GetGpuFrameMs() const { return mLiveGpuMs; }
     float GetFps() const;
-    float GetSamplesPerSecond() const { return mSamplesPerSecond.Last(); }
+    float GetSamplesPerSecond() const { return mLiveSamplesPerSecond; }
+
+    // Paused, the profiler and memory windows keep showing the frame they were paused on (graphs,
+    // timelines, tables, resource list) so it can be inspected; StepFrame() captures one more.
+    bool IsPaused() const { return mPaused; }
+    void SetPaused(bool paused);
+    void StepFrame() { mStepFrames = 1; }
+    u64 GetCapturedFrame() const { return mCapturedUpdate; } // Update() count of the shown data
 
 private:
     struct ScopeStats
@@ -39,12 +47,17 @@ private:
         u64 lastSeen = 0;
     };
 
+    void BuildPauseControls();
     void BuildGpuSection();
     void BuildCpuSection();
     void DrawGpuTimeline(float height);
     void DrawCpuTimeline();
 
     u64 mUpdateCount = 0;
+    u64 mCapturedUpdate = 0;
+    History mLiveWallMs;
+    double mLiveGpuMs = 0.0;
+    float mLiveSamplesPerSecond = 0.0f;
     History mWallMs;
     History mCpuMs;
     History mGpuMs;
@@ -55,7 +68,8 @@ private:
     CpuFrame mLastCpu;
     std::vector<rdg::RenderGraph::PassTiming> mPassCpu;
     std::map<std::string, ScopeStats> mGpuScopes;
-    bool mPauseCapture = false;
+    bool mPaused = false;
+    u32 mStepFrames = 0;
 
     // Memory window.
     rhi::MemoryStats mMemory;

@@ -23,6 +23,8 @@ namespace
 
 constexpr size_t kMaxLogLines = 2000;
 constexpr float kResizeDelaySeconds = 0.25f;
+constexpr float kMaxResizeTimerStep = 1.0f / 30.0f; // a slow frame counts as at most this
+constexpr u32 kResizeSettleFrames = 5;
 
 std::string ParameterText(const renderer::ParameterSet::Entry& entry)
 {
@@ -128,6 +130,8 @@ void EditorApp::CreateRunner(u32 width, u32 height)
     renderer::FrameRunnerDesc desc;
     desc.width = width;
     desc.height = height;
+    // With DLSS the path tracer renders below the output size and Ray Reconstruction upscales.
+    desc.renderScale = IsDlssEnabled() ? kDlssModes[mOptions.dlssMode].renderScale : 1.0f;
     desc.shaderRoot = mOptions.shaderRoot;
     desc.profile = true;
     mRunner = std::make_unique<renderer::FrameRunner>(mDevice, mTasks, desc);
@@ -153,7 +157,8 @@ void EditorApp::CreateRunner(u32 width, u32 height)
     }
     mPendingWidth = width;
     mPendingHeight = height;
-    AIR_LOG(Info, "Editor", "rendering at {}x{} with {}", width, height,
+    AIR_LOG(Info, "Editor", "rendering at {}x{} (scene {}x{}) with {}", width, height, mRunner->GetRenderWidth(),
+            mRunner->GetRenderHeight(),
             [&]
             {
                 std::string list;
@@ -182,6 +187,74 @@ std::string EditorApp::SetParameter(const std::string& qualified, const std::str
         return error;
     }
     return {};
+}
+
+std::string EditorApp::GetParameter(std::string_view feature, std::string_view name) const
+{
+    if (renderer::RenderFeature* f = mRunner->FindFeature(std::string(feature)))
+    {
+        for (const auto& entry : f->Parameters().Entries())
+        {
+            if (entry.name == name)
+            {
+                return ParameterText(entry);
+            }
+        }
+    }
+    return {};
+}
+
+void EditorApp::SetDlssMode(u32 mode)
+{
+    mode = std::min<u32>(mode, u32(std::size(kDlssModes)) - 1);
+    if (mode == mOptions.dlssMode)
+    {
+        return;
+    }
+    mOptions.dlssMode = mode;
+    if (IsDlssEnabled())
+    {
+        const auto& desc = mRunner->GetDesc();
+        CreateRunner(desc.width, desc.height);
+    }
+}
+
+bool EditorApp::IsDlssEnabled() const
+{
+    return std::find(mOptions.features.begin(), mOptions.features.end(), "dlss") != mOptions.features.end();
+}
+
+void EditorApp::SetDlssEnabled(bool enabled)
+{
+    if (enabled == IsDlssEnabled())
+    {
+        return;
+    }
+    std::erase(mOptions.features, std::string("dlss"));
+    if (enabled)
+    {
+        // RR denoises single jittered frames. Remember the accumulation settings to restore them:
+        // without a denoiser those frames would shimmer.
+        mPreDlssAccumulate = GetParameter("pathtracer", "accumulate");
+        mPreDlssSpp = GetParameter("pathtracer", "spp");
+        const auto pt = std::find(mOptions.features.begin(), mOptions.features.end(), "pathtracer");
+        mOptions.features.insert(pt == mOptions.features.end() ? mOptions.features.begin() : pt + 1, "dlss");
+    }
+    const auto& desc = mRunner->GetDesc();
+    CreateRunner(desc.width, desc.height);
+    if (enabled)
+    {
+        SetParameter("pathtracer.accumulate", "false");
+        SetParameter("pathtracer.spp", "1");
+    }
+    else
+    {
+        SetParameter("pathtracer.accumulate", mPreDlssAccumulate.empty() ? "true" : mPreDlssAccumulate);
+        if (!mPreDlssSpp.empty())
+        {
+            SetParameter("pathtracer.spp", mPreDlssSpp);
+        }
+    }
 }
 
 // --- Frame ---------------------------------------------------------------------------------------
@@ -242,21 +315,34 @@ bool EditorApp::SaveScreenshot(const std::filesystem::path& path)
 
 void EditorApp::BuildUi(float deltaSeconds)
 {
-    // Apply a viewport resize once the size stopped changing. Done before any window is built so
-    // this frame's draw data only references the new output texture.
+    // Apply a viewport resize once the size stopped changing, for both a while and a few frames: one
+    // slow frame (pipelines compiling at startup) must not commit a transient layout size such as
+    // 1328x20. Done before any window is built so this frame's draw data only references the new
+    // output texture.
     const auto& desc = mRunner->GetDesc();
+    if (mPendingWidth != mSettlingWidth || mPendingHeight != mSettlingHeight)
+    {
+        mSettlingWidth = mPendingWidth;
+        mSettlingHeight = mPendingHeight;
+        mResizeTimer = 0.0f;
+        mSettledFrames = 0;
+    }
     if (!mLockResolution && (mPendingWidth != desc.width || mPendingHeight != desc.height))
     {
-        mResizeTimer += deltaSeconds;
-        if (mResizeTimer >= kResizeDelaySeconds && !ImGui::IsMouseDown(ImGuiMouseButton_Left))
+        mResizeTimer += std::min(deltaSeconds, kMaxResizeTimerStep);
+        ++mSettledFrames;
+        if (mResizeTimer >= kResizeDelaySeconds && mSettledFrames >= kResizeSettleFrames &&
+            !ImGui::IsMouseDown(ImGuiMouseButton_Left))
         {
             CreateRunner(mPendingWidth, mPendingHeight);
             mResizeTimer = 0.0f;
+            mSettledFrames = 0;
         }
     }
     else
     {
         mResizeTimer = 0.0f;
+        mSettledFrames = 0;
     }
     BuildMenuBar();
     const ImGuiID dockspace = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
@@ -354,14 +440,22 @@ void EditorApp::BuildMenuBar()
         ImGui::MenuItem("ImGui demo", nullptr, &mShowImGuiDemo);
         ImGui::EndMenu();
     }
-    const std::string stats = std::format("{} | {:.1f} fps | GPU {} ", mDevice.GetCapabilities().adapterName,
-                                          mDiagnostics.GetFps(), FormatMs(mDiagnostics.GetGpuFrameMs()));
+    const std::string stats =
+        std::format("{}{} | {:.1f} fps{} | GPU {} ", mDiagnostics.IsPaused() ? "PROFILER PAUSED | " : "",
+                    mDevice.GetCapabilities().adapterName, mDiagnostics.GetFps(), mOptions.vsync ? "" : " (uncapped)",
+                    FormatMs(mDiagnostics.GetGpuFrameMs()));
     ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(stats.c_str()).x - 12.0f);
     ImGui::TextDisabled("%s", stats.c_str());
     ImGui::EndMainMenuBar();
     if (ImGui::IsKeyPressed(ImGuiKey_F12, false))
     {
         SaveScreenshot(std::format("airender_{:03}", mScreenshotCounter++));
+    }
+    // P is a plain letter: ignore it while a text field has focus.
+    if (ImGui::IsKeyPressed(ImGuiKey_Pause, false) ||
+        (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_P, false)))
+    {
+        mDiagnostics.SetPaused(!mDiagnostics.IsPaused());
     }
 }
 
@@ -400,6 +494,10 @@ void EditorApp::BuildViewport(float deltaSeconds)
 
     // Overlay: progress and the controls hint.
     std::string overlay = std::format("{}x{}", desc.width, desc.height);
+    if (mRunner->GetRenderWidth() != desc.width || mRunner->GetRenderHeight() != desc.height)
+    {
+        overlay = std::format("scene {}x{} -> {}", mRunner->GetRenderWidth(), mRunner->GetRenderHeight(), overlay);
+    }
     if (renderer::RenderFeature* pt = mRunner->FindFeature("pathtracer"))
     {
         overlay += "  " + pt->GetStatus().Dump(0);
@@ -557,6 +655,8 @@ void EditorApp::BuildRenderPanel()
     const auto& desc = mRunner->GetDesc();
     ImGui::Text("Backend %s on %s", rhi::ToString(mDevice.GetBackend()), mDevice.GetCapabilities().adapterName.c_str());
     ImGui::Text("Resolution %ux%u", desc.width, desc.height);
+    ImGui::Checkbox("VSync", &mOptions.vsync);
+    ImGui::SetItemTooltip("Off: frames are presented as fast as the GPU renders them (uncapped frame rate).");
     ImGui::Checkbox("Lock resolution", &mLockResolution);
     ImGui::SetItemTooltip("Unlocked, the render resolution follows the viewport size.");
     ImGui::SliderFloat("Resolution scale", &mResolutionScale, 0.25f, 2.0f, "%.2f");
@@ -568,19 +668,25 @@ void EditorApp::BuildRenderPanel()
         bool dlss = std::find(mOptions.features.begin(), mOptions.features.end(), "dlss") != mOptions.features.end();
         if (ImGui::Checkbox("DLSS Ray Reconstruction", &dlss))
         {
-            std::erase(mOptions.features, std::string("dlss"));
-            if (dlss)
+            SetDlssEnabled(dlss);
+        }
+        if (dlss)
+        {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            if (ImGui::BeginCombo("DLSS mode", kDlssModes[mOptions.dlssMode].name))
             {
-                const auto pt = std::find(mOptions.features.begin(), mOptions.features.end(), "pathtracer");
-                mOptions.features.insert(pt == mOptions.features.end() ? mOptions.features.begin() : pt + 1, "dlss");
-                SetParameter("pathtracer.accumulate", "false");
+                for (u32 i = 0; i < std::size(kDlssModes); ++i)
+                {
+                    if (ImGui::Selectable(kDlssModes[i].name, i == mOptions.dlssMode))
+                    {
+                        SetDlssMode(i);
+                    }
+                }
+                ImGui::EndCombo();
             }
-            CreateRunner(desc.width, desc.height);
-            if (dlss)
-            {
-                SetParameter("pathtracer.accumulate", "false"); // RR denoises single noisy frames
-                SetParameter("pathtracer.spp", "1");
-            }
+            ImGui::SetItemTooltip("The path tracer renders at the mode's fraction of the viewport and Ray\n"
+                                  "Reconstruction denoises and upscales. DLAA renders at full size: best quality,\n"
+                                  "highest cost. Quality traces 44%% of the pixels with nearly the same image.");
         }
     }
 
@@ -635,11 +741,20 @@ void EditorApp::BuildDebugPanel()
             }
         }
         bool changed = false;
+        // Two columns, the second placed after the widest label so nothing is clipped at any DPI.
+        float widest = 0.0f;
+        for (const char* name : kViews)
+        {
+            widest = std::max(widest, ImGui::CalcTextSize(name).x);
+        }
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const float secondColumn = style.WindowPadding.x + ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + widest +
+                                   style.ItemSpacing.x * 2.0f;
         for (u32 i = 0; view && i < std::size(kViews); ++i)
         {
             if (i % 2 == 1)
             {
-                ImGui::SameLine(160.0f);
+                ImGui::SameLine(secondColumn);
             }
             if (ImGui::RadioButton(kViews[i], *view == i))
             {

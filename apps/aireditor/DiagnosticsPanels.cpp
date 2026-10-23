@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <format>
+#include <tuple>
 
 namespace air::editor
 {
@@ -43,15 +44,30 @@ void TimelineBar(ImDrawList* draw, ImVec2 min, ImVec2 max, const std::string& na
 void DiagnosticsPanels::Update(const renderer::FrameResult& frame, double wallMs, u32 samplesThisFrame)
 {
     ++mUpdateCount;
+    const float samplesPerSecond = wallMs > 0.0 ? float(double(samplesThisFrame) * 1000.0 / wallMs) : 0.0f;
+    mLiveWallMs.Push(float(wallMs));
+    if (wallMs > 0.0)
+    {
+        mLiveSamplesPerSecond = samplesPerSecond;
+    }
+    if (frame.gpu.frameIndex != ~0ull)
+    {
+        mLiveGpuMs = frame.gpu.frameMs;
+    }
+    if (mPaused)
+    {
+        if (mStepFrames == 0)
+        {
+            return;
+        }
+        --mStepFrames;
+    }
+    mCapturedUpdate = mUpdateCount;
     mWallMs.Push(float(wallMs));
     mCpuMs.Push(float(frame.cpuMilliseconds));
     if (wallMs > 0.0)
     {
-        mSamplesPerSecond.Push(float(double(samplesThisFrame) * 1000.0 / wallMs));
-    }
-    if (mPauseCapture)
-    {
-        return;
+        mSamplesPerSecond.Push(samplesPerSecond);
     }
     if (frame.gpu.frameIndex != ~0ull)
     {
@@ -77,8 +93,40 @@ void DiagnosticsPanels::Update(const renderer::FrameResult& frame, double wallMs
 
 float DiagnosticsPanels::GetFps() const
 {
-    const float ms = mWallMs.Average();
+    const float ms = mLiveWallMs.Average();
     return ms > 0.0f ? 1000.0f / ms : 0.0f;
+}
+
+void DiagnosticsPanels::SetPaused(bool paused)
+{
+    mPaused = paused;
+    mStepFrames = 0;
+}
+
+// Pause / step controls shared by the profiler and memory windows.
+void DiagnosticsPanels::BuildPauseControls()
+{
+    bool paused = mPaused;
+    if (ImGui::Checkbox("Pause", &paused))
+    {
+        SetPaused(paused);
+    }
+    ImGui::SetItemTooltip("Freeze the profiler and memory windows on the current frame (P or Pause key).");
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!mPaused);
+    if (ImGui::Button("Step"))
+    {
+        StepFrame();
+    }
+    ImGui::EndDisabled();
+    ImGui::SetItemTooltip("Capture the next frame and stay paused.");
+    if (mPaused)
+    {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "PAUSED at frame %llu (%llu behind)",
+                           static_cast<unsigned long long>(mCapturedUpdate),
+                           static_cast<unsigned long long>(mUpdateCount - mCapturedUpdate));
+    }
 }
 
 // --- Profiler ------------------------------------------------------------------------------------
@@ -90,10 +138,10 @@ void DiagnosticsPanels::BuildProfiler(bool* open)
         ImGui::End();
         return;
     }
-    ImGui::Checkbox("Pause", &mPauseCapture);
-    ImGui::SameLine();
-    ImGui::Text("%.1f fps   frame %s   GPU %s   CPU record %s", GetFps(), FormatMs(mWallMs.Last()).c_str(),
-                FormatMs(mLastGpu.frameMs).c_str(), FormatMs(mCpuMs.Last()).c_str());
+    BuildPauseControls();
+    const float averageMs = mWallMs.Average(); // of the captured frames, not the live ones
+    ImGui::Text("%.1f fps   frame %s   GPU %s   CPU record %s", averageMs > 0.0f ? 1000.0f / averageMs : 0.0f,
+                FormatMs(mWallMs.Last()).c_str(), FormatMs(mLastGpu.frameMs).c_str(), FormatMs(mCpuMs.Last()).c_str());
     PlotHistory("Frame", mWallMs, "ms", kGraphHeight);
     PlotHistory("GPU", mGpuMs, "ms", kGraphHeight);
     PlotHistory("CPU", mCpuMs, "ms", kGraphHeight);
@@ -255,6 +303,7 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open)
         ImGui::End();
         return;
     }
+    BuildPauseControls();
     const rhi::MemoryStats& m = mMemory;
 
     ImGui::SeparatorText("Video memory (OS budget)");
@@ -321,12 +370,26 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open)
     }
 
     ImGui::SeparatorText("Resources");
-    // The list walks every live object: refresh twice a second, not every frame.
-    if (mResourcesFrame == ~0ull || mUpdateCount - mResourcesFrame > 30 || ImGui::Button("Refresh"))
+    // The list walks every live object: refresh twice a second, not every frame. The button is
+    // drawn every frame (not short-circuited away) so the row below does not shift on refreshes.
+    const bool refresh = ImGui::Button("Refresh");
+    // Paused, the list stays on the paused frame unless refreshed by hand.
+    const bool due = mResourcesFrame == ~0ull || (!mPaused && mUpdateCount - mResourcesFrame > 30) ||
+                     (mPaused && mResourcesFrame < mCapturedUpdate);
+    if (refresh || due)
     {
         mResources = device.GetResourceList();
+        // Total order: equal sizes are common (render targets), and handle order changes between frames.
         std::sort(mResources.begin(), mResources.end(),
-                  [](const rhi::ResourceInfo& a, const rhi::ResourceInfo& b) { return a.sizeBytes > b.sizeBytes; });
+                  [](const rhi::ResourceInfo& a, const rhi::ResourceInfo& b)
+                  {
+                      if (a.sizeBytes != b.sizeBytes)
+                      {
+                          return a.sizeBytes > b.sizeBytes;
+                      }
+                      return std::tie(a.name, a.kind, a.location, a.placedInHeap) <
+                             std::tie(b.name, b.kind, b.location, b.placedInHeap);
+                  });
         mResourcesFrame = mUpdateCount;
     }
     ImGui::SameLine();

@@ -1,6 +1,8 @@
 // aireditor: Win32 window + DXGI swapchain + Dear ImGui (Win32 / DX12 backends) around EditorApp.
 //
-//   aireditor [--scene cornell_box|furnace] [--shaders DIR] [--gpu-validation] [--no-validation]
+//   aireditor [--scene NAME] [--shaders DIR] [--no-vsync] [--dlss] [--dlss-mode
+//   dlaa|quality|balanced|performance|ultra]
+//             [--gpu-validation] [--no-validation]
 //
 // The UI is drawn by one render graph pass at the end of every frame, into the swapchain back
 // buffer, reading the frame output as a shader resource. ImGui's textures (font atlas) and the
@@ -126,6 +128,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 {
     editor::EditorOptions options;
     rhi::DeviceDesc deviceDesc{.backend = rhi::Backend::D3D12};
+    bool dlss = false;
 #ifdef NDEBUG
     deviceDesc.enableValidation = false;
 #endif
@@ -142,6 +145,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             else if (arg == "--shaders" && i + 1 < argc)
             {
                 options.shaderRoot = Narrow(argv[++i]);
+            }
+            else if (arg == "--dlss")
+            {
+                dlss = true;
+            }
+            else if (arg == "--dlss-mode" && i + 1 < argc)
+            {
+                const std::string mode = Narrow(argv[++i]);
+                for (u32 m = 0; m < std::size(editor::kDlssModes); ++m)
+                {
+                    std::string name = editor::kDlssModes[m].name;
+                    std::erase(name, ' ');
+                    if (_stricmp(name.c_str(), mode.c_str()) == 0 ||
+                        (mode == "ultra" && m + 1 == std::size(editor::kDlssModes)))
+                    {
+                        options.dlssMode = m;
+                    }
+                }
+            }
+            else if (arg == "--no-vsync")
+            {
+                options.vsync = false;
             }
             else if (arg == "--gpu-validation")
             {
@@ -191,8 +216,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     GetClientRect(hwnd, &client);
     gWindow.width = u32(std::max<LONG>(client.right - client.left, 8));
     gWindow.height = u32(std::max<LONG>(client.bottom - client.top, 8));
-    auto swapchain =
-        device->CreateSwapchain({.window = hwnd, .width = gWindow.width, .height = gWindow.height, .vsync = true});
+    auto swapchain = device->CreateSwapchain(
+        {.window = hwnd, .width = gWindow.width, .height = gWindow.height, .vsync = options.vsync});
     if (!swapchain)
     {
         return 1;
@@ -222,6 +247,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     TaskSystem tasks;
     {
         editor::EditorApp app(*device, tasks, options);
+        if (dlss)
+        {
+            app.SetDlssEnabled(true);
+        }
         auto last = std::chrono::steady_clock::now();
         bool running = true;
         while (running && !app.WantsQuit())
@@ -241,6 +270,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             {
                 Sleep(16);
                 continue;
+            }
+            if (swapchain->GetDesc().vsync != app.GetVsync())
+            {
+                swapchain->SetVsync(app.GetVsync());
             }
             if (gWindow.resized)
             {
