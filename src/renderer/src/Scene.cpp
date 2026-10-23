@@ -58,25 +58,42 @@ float3 TransformPoint(const float m[3][4], float3 p)
             m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3]};
 }
 
+namespace
+{
+
+float EmittedLuminance(const SceneDesc& desc, const Instance& instance)
+{
+    return hlsl::dot(desc.materials[instance.material].ToGpu().emission, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+} // namespace
+
 std::vector<u32> FirstLightIndices(const SceneDesc& desc)
 {
     std::vector<u32> first;
     u32 next = 0;
     for (const Instance& instance : desc.instances)
     {
-        first.push_back(next);
-        next += u32(desc.meshes[instance.mesh].indices.size() / 3);
+        if (EmittedLuminance(desc, instance) > 0.0f)
+        {
+            first.push_back(next);
+            next += u32(desc.meshes[instance.mesh].indices.size() / 3);
+        }
+        else
+        {
+            first.push_back(gpu::kInvalidIndex);
+        }
     }
     return first;
 }
 
-gpu::InstanceData MakeInstanceData(const Instance& in, u32 firstLight, u32 vertexBuffer, u32 indexBuffer)
+gpu::InstanceData MakeInstanceData(const Instance& in, u32 vertexBuffer, u32 indexBuffer)
 {
     gpu::InstanceData data;
     data.vertexBuffer = vertexBuffer;
     data.indexBuffer = indexBuffer;
     data.materialIndex = in.material;
-    data.firstLight = firstLight;
+    data.reserved = gpu::kInvalidIndex;
     data.objectToWorld0 = Row(in.transform, 0);
     data.objectToWorld1 = Row(in.transform, 1);
     data.objectToWorld2 = Row(in.transform, 2);
@@ -98,7 +115,11 @@ std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, doubl
         const Instance& in = desc.instances[i];
         const Mesh& mesh = desc.meshes[in.mesh];
         const gpu::MaterialData material = desc.materials[in.material].ToGpu();
-        const float luminance = hlsl::dot(material.emission, float3(0.2126f, 0.7152f, 0.0722f));
+        const float luminance = EmittedLuminance(desc, in);
+        if (luminance <= 0.0f)
+        {
+            continue; // not in the list (FirstLightIndices maps it to kInvalidIndex)
+        }
         for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3)
         {
             gpu::LightTriangle light;
@@ -151,6 +172,15 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
     }
     mLightRing.assign(slots, {});
     mLightRingCapacity.assign(slots, 0);
+    for (u32 i = 0; i < slots; ++i)
+    {
+        mInstanceLightRing.push_back(
+            mDevice.CreateBuffer({.size = mDesc.instances.size() * sizeof(u32),
+                                  .stride = sizeof(u32),
+                                  .usage = BufferUsage::ShaderResource,
+                                  .memory = MemoryLocation::Upload,
+                                  .debugName = std::format("{}.InstanceLights[{}]", mDesc.name, i)}));
+    }
     mGpu.environment = mDesc.environment;
     Update();
 }
@@ -173,6 +203,10 @@ Scene::~Scene()
         {
             mDevice.DestroyBuffer(buffer);
         }
+    }
+    for (rhi::BufferHandle buffer : mInstanceLightRing)
+    {
+        mDevice.DestroyBuffer(buffer);
     }
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
@@ -239,11 +273,10 @@ void Scene::Upload()
 
     std::vector<gpu::InstanceData> instances;
     std::vector<rhi::TlasInstance> tlasInstances;
-    const std::vector<u32> firstLights = FirstLightIndices(mDesc);
     for (size_t i = 0; i < mDesc.instances.size(); ++i)
     {
         const Instance& in = mDesc.instances[i];
-        instances.push_back(MakeInstanceData(in, firstLights[i], mDevice.GetBindlessSRV(mMeshes[in.mesh].vertices),
+        instances.push_back(MakeInstanceData(in, mDevice.GetBindlessSRV(mMeshes[in.mesh].vertices),
                                              mDevice.GetBindlessSRV(mMeshes[in.mesh].indices)));
         rhi::TlasInstance tlas;
         std::memcpy(tlas.transform, in.transform, sizeof(tlas.transform));
@@ -348,6 +381,9 @@ void Scene::WriteDynamicData()
     }
     WriteBuffer(mDevice, mLightRing[mRingSlot], lights.data(), bytes);
     mGpu.lights = mLightRing[mRingSlot];
+    const std::vector<u32> firstLights = FirstLightIndices(mDesc);
+    WriteBuffer(mDevice, mInstanceLightRing[mRingSlot], firstLights.data(), firstLights.size() * sizeof(u32));
+    mGpu.instanceLights = mInstanceLightRing[mRingSlot];
     mGpu.lightCount = totalPower > 0.0 ? u32(lights.size()) : 0u;
     mGpu.lightPower = float(totalPower);
 }

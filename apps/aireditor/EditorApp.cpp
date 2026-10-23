@@ -677,7 +677,7 @@ void EditorApp::BuildScenePanel()
         ImGui::EndCombo();
     }
     ImGui::Text("%u triangles, %zu instances", mScene->GetTriangleCount(), mScene->Desc().instances.size());
-    ImGui::Text("Geometry %s, %u emissive-capable triangles, light power %.1f",
+    ImGui::Text("Geometry %s, %u emissive triangles, light power %.1f",
                 renderer::FormatBytes(mScene->GetGeometryBytes()).c_str(), mScene->Get().lightCount,
                 mScene->Get().lightPower);
 

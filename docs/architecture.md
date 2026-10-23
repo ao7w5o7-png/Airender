@@ -319,9 +319,14 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
 - Camera exposure follows photographic EV100: `exposure = 1 / (1.2 * 2^EV100)`. The Cornell box
   (3000 nit light) uses EV100 8.
 - `renderer::Scene` uploads a `SceneDesc` (meshes, instances, materials, camera, environment):
-  device-local vertex/index buffers, one BLAS per mesh and a TLAS. Materials and the emissive
-  triangle light list live in per-frame upload rings so they can be edited live; `GpuScene::version`
-  changes whenever a frame's data must be re-accumulated.
+  device-local vertex/index buffers, one BLAS per mesh and a TLAS. Materials, the light list and
+  the per-instance light offsets live in per-frame upload rings so they can be edited live;
+  `GpuScene::version` changes whenever a frame's data must be re-accumulated.
+- The light list holds the triangles of emissive instances only (all of an instance's triangles,
+  in order), so it costs nothing for the non-emissive bulk of a large scene. `instanceLights[i]`
+  is instance i's first entry or `kInvalidIndex`; the integrator looks up a hit emitter's entry
+  (for its MIS light pdf) as `instanceLights[instance] + primitive`. Making a material emissive in
+  the editor rebuilds both in the next ring slot.
 - Built-in scenes (`MakeBuiltinScene`): `cornell_box` and `furnace` (spheres of roughness 0..1 in a
   uniform environment, used to verify energy conservation).
 

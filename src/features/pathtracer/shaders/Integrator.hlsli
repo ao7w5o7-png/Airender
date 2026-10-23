@@ -6,6 +6,7 @@
 //   HitInfo       TraceClosest(float3 origin, float3 direction)
 //   bool          TraceVisible(float3 origin, float3 direction, float tMax)
 //   InstanceData  LoadInstance(uint instance)
+//   uint          LoadInstanceLight(uint instance)   first light-list entry, kInvalidIndex if none
 //   uint          LoadIndex(InstanceData instance, uint index)
 //   Vertex        LoadVertex(InstanceData instance, uint index)
 //   MaterialData  LoadMaterial(uint material)
@@ -37,7 +38,7 @@ struct Surface
     float3 geometricNormal; // unit, facing the incoming ray
     float3 shadingNormal;   // unit, same side as geometricNormal
     float3 emission;        // radiance towards the incoming ray (0 when hit from the back)
-    uint lightIndex;        // this triangle in the light list
+    uint lightIndex;        // this triangle in the light list; kInvalidIndex when it does not emit
     BsdfMaterial material;
 };
 
@@ -165,7 +166,7 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
         s.material.baseColor = float3(1.0f, 1.0f, 1.0f);
         s.emission = float3(0.0f, 0.0f, 0.0f);
     }
-    s.lightIndex = instance.firstLight + hit.primitive;
+    s.lightIndex = any(s.emission) ? LoadInstanceLight(hit.instance) + hit.primitive : kInvalidIndex;
     return s;
 }
 

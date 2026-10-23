@@ -30,6 +30,12 @@ InstanceData LoadInstance(uint instance)
     return instances[instance];
 }
 
+uint LoadInstanceLight(uint instance)
+{
+    StructuredBuffer<uint> instanceLights = ResourceDescriptorHeap[g.instanceLights];
+    return instanceLights[instance];
+}
+
 uint LoadIndex(InstanceData instance, uint index)
 {
     StructuredBuffer<uint> indices = ResourceDescriptorHeap[NonUniformResourceIndex(instance.indexBuffer)];

@@ -37,7 +37,7 @@ struct InstanceData
     uint vertexBuffer; // bindless StructuredBuffer<Vertex>
     uint indexBuffer;  // bindless StructuredBuffer<uint>
     uint materialIndex;
-    uint firstLight; // index of triangle 0 in the light list, kInvalidIndex when not emissive
+    uint reserved; // the light-list offset changes with materials: GpuScene::instanceLights
     // Row-major 3x4 object-to-world transform and the 3x3 inverse transpose for normals.
     float4 objectToWorld0;
     float4 objectToWorld1;

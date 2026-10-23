@@ -96,11 +96,13 @@ std::optional<SceneDesc> MakeBuiltinScene(std::string_view name);
 std::string Validate(const SceneDesc& desc);
 
 // The tables a GpuScene is made of, also used by the CPU reference renderer.
-// Every triangle of every instance has a light-list slot (instance i starts at FirstLightIndices()[i]),
-// so emission can change without touching instance data; non-emissive slots have probability 0.
+// The light list holds the triangles of emissive instances only (an instance is emissive when its
+// material emits), all of an instance's triangles in order, so triangle t of instance i is entry
+// FirstLightIndices()[i] + t; non-emissive instances map to gpu::kInvalidIndex. Both change with
+// the materials, which is why they live in per-frame buffers rather than in the instance data.
 std::vector<u32> FirstLightIndices(const SceneDesc& desc);
 std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, double* totalPower = nullptr);
-gpu::InstanceData MakeInstanceData(const Instance& instance, u32 firstLight, u32 vertexBuffer, u32 indexBuffer);
+gpu::InstanceData MakeInstanceData(const Instance& instance, u32 vertexBuffer, u32 indexBuffer);
 float3 TransformPoint(const float transform[3][4], float3 p);
 
 struct GpuScene
@@ -109,6 +111,9 @@ struct GpuScene
     rhi::BufferHandle instances; // StructuredBuffer<gpu::InstanceData>, indexed by InstanceID()
     rhi::BufferHandle materials; // StructuredBuffer<gpu::MaterialData>
     rhi::BufferHandle lights;    // StructuredBuffer<gpu::LightTriangle>, at least one element
+    // StructuredBuffer<uint> per instance: its first entry in `lights`, gpu::kInvalidIndex if it does
+    // not emit. Written together with `materials` and `lights`, so the three always agree.
+    rhi::BufferHandle instanceLights;
     u32 lightCount = 0;
     float lightPower = 0.0f; // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
     float3 environment = {0.0f, 0.0f, 0.0f};
@@ -156,6 +161,7 @@ private:
     std::vector<rhi::BufferHandle> mMaterialRing;
     std::vector<rhi::BufferHandle> mLightRing;
     std::vector<u32> mLightRingCapacity;
+    std::vector<rhi::BufferHandle> mInstanceLightRing;
     u32 mRingSlot = 0;
     bool mDirty = true;
     u64 mGeometryBytes = 0;

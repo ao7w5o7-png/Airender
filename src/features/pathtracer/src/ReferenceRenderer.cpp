@@ -188,6 +188,7 @@ private:
 struct SceneTables
 {
     std::vector<InstanceData> instances; // vertexBuffer / indexBuffer = mesh index
+    std::vector<u32> instanceLights;     // first light-list entry per instance
     std::vector<std::span<const Vertex>> vertices;
     std::vector<std::span<const u32>> indices;
     std::vector<MaterialData> materials;
@@ -203,6 +204,7 @@ struct Kernel
 
     float BsdfLutLoad(uint index) const { return tables.lut[index]; }
     InstanceData LoadInstance(uint instance) const { return tables.instances[instance]; }
+    uint LoadInstanceLight(uint instance) const { return tables.instanceLights[instance]; }
     uint LoadIndex(InstanceData instance, uint index) const { return tables.indices[instance.indexBuffer][index]; }
     Vertex LoadVertex(InstanceData instance, uint index) const { return tables.vertices[instance.vertexBuffer][index]; }
     MaterialData LoadMaterial(uint material) const { return tables.materials[material]; }
@@ -243,12 +245,12 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     AIR_CHECK(problem.empty(), "reference renderer: {}", problem);
 
     SceneTables tables;
-    const std::vector<u32> firstLights = renderer::FirstLightIndices(scene);
+    tables.instanceLights = renderer::FirstLightIndices(scene);
     std::vector<Triangle> triangles;
     for (size_t i = 0; i < scene.instances.size(); ++i)
     {
         const renderer::Instance& in = scene.instances[i];
-        tables.instances.push_back(renderer::MakeInstanceData(in, firstLights[i], in.mesh, in.mesh));
+        tables.instances.push_back(renderer::MakeInstanceData(in, in.mesh, in.mesh));
         const renderer::Mesh& mesh = scene.meshes[in.mesh];
         for (u32 t = 0; t + 2 < mesh.indices.size(); t += 3)
         {

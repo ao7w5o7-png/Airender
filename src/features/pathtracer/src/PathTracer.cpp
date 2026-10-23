@@ -225,6 +225,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     constants.instances = mDevice.GetBindlessSRV(scene.instances);
     constants.materials = mDevice.GetBindlessSRV(scene.materials);
     constants.lights = mDevice.GetBindlessSRV(scene.lights);
+    constants.instanceLights = mDevice.GetBindlessSRV(scene.instanceLights);
     constants.bsdfLut = mDevice.GetBindlessSRV(mBsdfLut);
 
     if (spp > 0)

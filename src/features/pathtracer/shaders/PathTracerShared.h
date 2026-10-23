@@ -83,7 +83,7 @@ struct TraceConstants
     uint normalRoughness; // RWTexture2D<float4>
     uint viewDepth;       // RWTexture2D<float>
     uint motionVectors;   // RWTexture2D<float2>
-    uint pad0;
+    uint instanceLights;  // StructuredBuffer<uint>: first light-list entry per instance
     uint pad1;
     uint pad2;
 };
