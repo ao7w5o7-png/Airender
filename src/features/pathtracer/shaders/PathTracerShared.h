@@ -6,9 +6,15 @@
 #include "air/core/Types.h"
 namespace air::pt {
 using uint = air::u32;
-struct float2 { float x, y; };
-struct float3 { float x, y, z; };
-struct float4 { float x, y, z, w; };
+struct float2 {
+    float x, y;
+};
+struct float3 {
+    float x, y, z;
+};
+struct float4 {
+    float x, y, z, w;
+};
 #define AIR_PT_ALIGN alignas(16)
 #else
 #define AIR_PT_ALIGN
@@ -42,8 +48,8 @@ struct AIR_PT_ALIGN ResolveConstants {
 };
 
 struct AIR_PT_ALIGN InstanceData {
-    uint vertexBuffer;  // StructuredBuffer<Vertex>
-    uint indexBuffer;   // StructuredBuffer<uint>
+    uint vertexBuffer; // StructuredBuffer<Vertex>
+    uint indexBuffer;  // StructuredBuffer<uint>
     uint materialIndex;
     uint pad;
 };

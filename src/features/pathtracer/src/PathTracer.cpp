@@ -1,33 +1,19 @@
-#include "air/pathtracer/PathTracer.h"
+#include "air/features/pathtracer/PathTracer.h"
 
 #include "air/core/Assert.h"
 #include "air/core/Log.h"
 
-#include "pathtracer/PathTracerShared.h"
+#include "air/renderer/ShaderLoader.h"
+
+#include "PathTracerShared.h"
 
 #include <cmath>
-#include <cstring>
-#include <fstream>
 
 namespace air::pt {
 
 using rhi::Access;
 
 namespace {
-
-rhi::ShaderBlob LoadShader(const std::filesystem::path& path, std::string entry, bool required) {
-    rhi::ShaderBlob blob;
-    blob.entryPoint = std::move(entry);
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        if (required) {
-            AIR_LOG(Error, "PathTracer", "missing shader {}", path.string());
-        }
-        return blob;
-    }
-    blob.bytecode.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    return blob;
-}
 
 void Normalize(float v[3]) {
     const float len = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
@@ -67,11 +53,8 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir) {
                 mDevice.GetCapabilities().adapterName);
         return false;
     }
-    const bool required = mDevice.GetBackend() != rhi::Backend::Null;
-    const char* ext = mDevice.GetBackend() == rhi::Backend::Vulkan ? ".spv" : ".dxil";
-
     rhi::RayTracingPipelineDesc trace;
-    trace.library = LoadShader(shaderDir / (std::string("PathTracer.lib") + ext), "", required);
+    trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracer.lib", "");
     trace.rayGen = "RayGen";
     trace.missShaders = {"Miss"};
     trace.hitGroups = {{"HitGroup", "ClosestHit", ""}};
@@ -82,7 +65,7 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir) {
     mTracePipeline = mDevice.CreateRayTracingPipeline(trace);
 
     rhi::ComputePipelineDesc resolve;
-    resolve.shader = LoadShader(shaderDir / (std::string("Resolve.cs") + ext), "Main", required);
+    resolve.shader = renderer::LoadShader(mDevice, shaderDir, "Resolve.cs", "Main");
     resolve.pushConstantBytes = sizeof(ResolveConstants);
     resolve.debugName = "PathTracer.Resolve";
     mResolvePipeline = mDevice.CreateComputePipeline(resolve);
@@ -109,7 +92,7 @@ void PathTracer::ResetAccumulation() {
     mAccumulatedSamples = 0;
 }
 
-void PathTracer::AddPasses(rdg::RenderGraph& graph, const PathTracerScene& scene, rdg::TextureRef output) {
+void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& scene, rdg::TextureRef output) {
     AIR_CHECK(mAccumulation.IsValid(), "PathTracer::AddPasses before Initialize()");
 
     // The accumulation buffer persists across frames: import it and remember the state it ends in.
@@ -132,7 +115,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const PathTracerScene& scene
     Cross(forward, mCamera.up, right);
     Normalize(right);
     Cross(right, forward, up);
-    trace.cameraPositionFov = {mCamera.position[0], mCamera.position[1], mCamera.position[2], mCamera.verticalFovRadians};
+    trace.cameraPositionFov = {mCamera.position[0], mCamera.position[1], mCamera.position[2],
+                               mCamera.verticalFovRadians};
     trace.cameraForward = {forward[0], forward[1], forward[2], 0};
     trace.cameraRight = {right[0], right[1], right[2], 0};
     trace.cameraUp = {up[0], up[1], up[2], 0};

@@ -1,172 +1,320 @@
-// aircli: headless driver for the renderer. Meant to be run by humans and AI agents alike:
-// everything it does is printed as text (graph dump, captured commands, memory stats).
+// aircli: headless driver for the renderer, built for humans and AI agents alike.
+// Everything it does is available as text or JSON; exit codes are meaningful (0 ok, 1 failed check,
+// 2 usage / setup error).
 //
-//   aircli [--backend null|d3d12|vulkan] [--frames N] [--width W] [--height H]
-//          [--dump-graph out.dot] [--dump-commands] [--shaders DIR]
+//   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
+//                   [--frames N] [--width W] [--height H] [--shaders DIR]
+//                   [--dump-graph out.dot] [--dump-commands] [--report out.json]
+//   aircli features                         list available features and their parameters (JSON)
+//   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
+//
+// `render` fails (exit 1) if any frame produced a validation error.
 
+#include "air/core/Image.h"
+#include "air/core/Json.h"
 #include "air/core/Log.h"
 #include "air/core/TaskSystem.h"
-#include "air/pathtracer/PathTracer.h"
-#include "air/rdg/RenderGraph.h"
+#include "air/renderer/FrameRunner.h"
+#include "air/renderer/RenderFeature.h"
+#include "air/renderer/Scene.h"
 #include "air/rhi/RHIDevice.h"
 
+#include <algorithm>
 #include <cstdio>
-#include <cstdlib>
+#include <filesystem>
+#include <format>
 #include <fstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace air;
 
 namespace {
 
-struct Options {
-    rhi::Backend backend = rhi::Backend::Null;
-    u32 frames = 4;
-    u32 width = 1280;
-    u32 height = 720;
-    std::string dumpGraph;
-    bool dumpCommands = false;
-    std::string shaderDir = "shaders";
-};
+constexpr int kExitOk = 0;
+constexpr int kExitCheckFailed = 1;
+constexpr int kExitUsage = 2;
 
-[[noreturn]] void Usage() {
-    std::puts("usage: aircli [--backend null|d3d12|vulkan] [--frames N] [--width W] [--height H]\n"
-              "              [--dump-graph out.dot] [--dump-commands] [--shaders DIR]");
-    std::exit(1);
+int Usage() {
+    std::fputs("usage:\n"
+               "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
+               "                [--frames N] [--width W] [--height H] [--shaders DIR]\n"
+               "                [--dump-graph out.dot] [--dump-commands] [--report out.json]\n"
+               "  aircli features\n"
+               "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
+               stderr);
+    return kExitUsage;
 }
 
-Options Parse(int argc, char** argv) {
-    Options o;
-    for (int i = 1; i < argc; ++i) {
-        std::string_view arg = argv[i];
-        auto next = [&]() -> std::string_view {
-            if (i + 1 >= argc) {
-                Usage();
-            }
-            return argv[++i];
-        };
-        if (arg == "--backend") {
-            std::string_view b = next();
-            o.backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
-        } else if (arg == "--frames") {
-            o.frames = u32(std::stoul(std::string(next())));
-        } else if (arg == "--width") {
-            o.width = u32(std::stoul(std::string(next())));
-        } else if (arg == "--height") {
-            o.height = u32(std::stoul(std::string(next())));
-        } else if (arg == "--dump-graph") {
-            o.dumpGraph = next();
-        } else if (arg == "--dump-commands") {
-            o.dumpCommands = true;
-        } else if (arg == "--shaders") {
-            o.shaderDir = next();
+std::vector<std::string> Split(std::string_view text, char separator) {
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t end = std::min(text.find(separator, start), text.size());
+        if (end > start) {
+            parts.emplace_back(text.substr(start, end - start));
+        }
+        start = end + 1;
+    }
+    return parts;
+}
+
+// Small argument cursor: Next() returns the following argument or reports a usage error.
+struct Args {
+    std::vector<std::string_view> items;
+    size_t index = 0;
+    bool error = false;
+
+    bool Done() const { return index >= items.size(); }
+    std::string_view Peek() const { return items[index]; }
+    std::string_view Take() { return items[index++]; }
+    std::string_view Next() {
+        if (Done()) {
+            error = true;
+            return {};
+        }
+        return Take();
+    }
+};
+
+// ---------------------------------------------------------------------------
+// features
+// ---------------------------------------------------------------------------
+int CommandFeatures() {
+    renderer::FeatureRegistry registry;
+    renderer::RegisterBuiltinFeatures(registry);
+    json::Value out = json::Value::MakeArray();
+    for (const renderer::FeatureInfo& info : registry.List()) {
+        json::Value item = json::Value::MakeObject();
+        item["name"] = info.name;
+        item["description"] = info.description;
+        item["parameters"] = info.create()->Parameters().ToJson();
+        out.Push(std::move(item));
+    }
+    std::puts(out.Dump().c_str());
+    return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
+// compare
+// ---------------------------------------------------------------------------
+int CommandCompare(Args& args) {
+    std::vector<std::string> files;
+    std::string diffPath;
+    ImageCompareOptions options;
+    while (!args.Done()) {
+        const std::string_view arg = args.Take();
+        if (arg == "--diff") {
+            diffPath = args.Next();
+        } else if (arg == "--max-rmse") {
+            options.maxRmse = std::stof(std::string(args.Next()));
+        } else if (arg == "--threshold") {
+            options.pixelThreshold = std::stof(std::string(args.Next()));
+        } else if (arg == "--max-differing") {
+            options.maxDifferingFraction = std::stof(std::string(args.Next()));
         } else {
-            Usage();
+            files.emplace_back(arg);
         }
     }
-    return o;
+    if (args.error || files.size() != 2) {
+        return Usage();
+    }
+    const auto reference = ReadImage(files[0]);
+    const auto test = ReadImage(files[1]);
+    if (!reference || !test) {
+        AIR_LOG(Error, "aircli", "could not read '{}' (supported: .pfm, .ppm)", !reference ? files[0] : files[1]);
+        return kExitUsage;
+    }
+    const ImageCompareResult result = CompareImages(*reference, *test, options);
+    if (!diffPath.empty() && !result.sizeMismatch) {
+        WritePpm(diffPath, result.diff);
+    }
+    json::Value out = json::Value::MakeObject();
+    out["passed"] = result.passed;
+    out["sizeMismatch"] = result.sizeMismatch;
+    out["rmse"] = result.rmse;
+    out["psnr"] = result.psnr;
+    out["maxAbsDiff"] = result.maxAbsDiff;
+    out["differingPixels"] = result.differingPixels;
+    out["differingFraction"] = result.differingFraction;
+    out["summary"] = result.Summary();
+    std::puts(out.Dump().c_str());
+    return result.passed ? kExitOk : kExitCheckFailed;
 }
 
-// Placeholder scene: one BLAS/TLAS and empty instance/material buffers, enough to drive the passes.
-struct DemoScene {
-    pt::PathTracerScene gpu;
-    rhi::BufferHandle vertices, indices;
-    rhi::AccelStructHandle blas;
-};
+// ---------------------------------------------------------------------------
+// render
+// ---------------------------------------------------------------------------
+int CommandRender(Args& args) {
+    rhi::Backend backend = rhi::Backend::Null;
+    u32 frames = 4;
+    renderer::FrameRunnerDesc desc;
+    std::vector<std::string> featureNames = {"pathtracer"};
+    std::vector<std::string> sets;
+    std::string dumpGraph;
+    std::string reportPath;
+    bool dumpCommands = false;
 
-DemoScene CreateDemoScene(rhi::Device& device) {
-    DemoScene s;
-    rhi::BufferDesc vb{.size = 4 * 32, .stride = 32,
-                       .usage = rhi::BufferUsage::ShaderResource | rhi::BufferUsage::AccelStructBuildInput,
-                       .memory = rhi::MemoryLocation::Upload, .debugName = "Demo.Vertices"};
-    rhi::BufferDesc ib{.size = 6 * 4, .stride = 4,
-                       .usage = rhi::BufferUsage::ShaderResource | rhi::BufferUsage::AccelStructBuildInput,
-                       .memory = rhi::MemoryLocation::Upload, .debugName = "Demo.Indices"};
-    s.vertices = device.CreateBuffer(vb);
-    s.indices = device.CreateBuffer(ib);
+    while (!args.Done()) {
+        const std::string_view arg = args.Take();
+        if (arg == "--backend") {
+            const std::string_view b = args.Next();
+            backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
+        } else if (arg == "--features") {
+            featureNames = Split(args.Next(), ',');
+        } else if (arg == "--set") {
+            sets.emplace_back(args.Next());
+        } else if (arg == "--frames") {
+            frames = u32(std::stoul(std::string(args.Next())));
+        } else if (arg == "--width") {
+            desc.width = u32(std::stoul(std::string(args.Next())));
+        } else if (arg == "--height") {
+            desc.height = u32(std::stoul(std::string(args.Next())));
+        } else if (arg == "--shaders") {
+            desc.shaderRoot = std::string(args.Next());
+        } else if (arg == "--dump-graph") {
+            dumpGraph = args.Next();
+        } else if (arg == "--dump-commands") {
+            dumpCommands = true;
+        } else if (arg == "--report") {
+            reportPath = args.Next();
+        } else {
+            AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
+            return Usage();
+        }
+    }
+    if (args.error) {
+        return Usage();
+    }
+    desc.captureCommands = dumpCommands;
+    desc.captureGraph = true;
 
-    rhi::BlasDesc blas;
-    blas.geometries.push_back({.vertexBuffer = s.vertices, .vertexCount = 4, .vertexStride = 32,
-                               .indexBuffer = s.indices, .indexCount = 6});
-    blas.debugName = "Demo.Quad";
-    s.blas = device.CreateBlas(blas);
-    s.gpu.tlas = device.CreateTlas({.maxInstances = 1, .debugName = "Demo.TLAS"});
-    s.gpu.instances = device.CreateBuffer({.size = 16, .stride = 16, .usage = rhi::BufferUsage::ShaderResource,
-                                           .memory = rhi::MemoryLocation::Upload, .debugName = "Demo.Instances"});
-    s.gpu.materials = device.CreateBuffer({.size = 32, .stride = 32, .usage = rhi::BufferUsage::ShaderResource,
-                                           .memory = rhi::MemoryLocation::Upload, .debugName = "Demo.Materials"});
-    return s;
-}
+    auto device = rhi::CreateDevice({.backend = backend});
+    if (!device) {
+        return kExitUsage;
+    }
+    TaskSystem tasks;
+    AIR_LOG(Info, "aircli", "backend {} on '{}', {} worker threads", rhi::ToString(device->GetBackend()),
+            device->GetCapabilities().adapterName, tasks.GetWorkerCount());
 
-void DestroyDemoScene(rhi::Device& device, const DemoScene& s) {
-    device.DestroyBuffer(s.vertices);
-    device.DestroyBuffer(s.indices);
-    device.DestroyBuffer(s.gpu.instances);
-    device.DestroyBuffer(s.gpu.materials);
-    device.DestroyAccelStruct(s.blas);
-    device.DestroyAccelStruct(s.gpu.tlas);
+    json::Value report = json::Value::MakeObject();
+    report["backend"] = rhi::ToString(device->GetBackend());
+    report["adapter"] = device->GetCapabilities().adapterName;
+    report["width"] = desc.width;
+    report["height"] = desc.height;
+    json::Value errors = json::Value::MakeArray();
+    bool failed = false;
+
+    {
+        renderer::FeatureRegistry registry;
+        renderer::RegisterBuiltinFeatures(registry);
+        renderer::FrameRunner runner(*device, tasks, desc);
+        renderer::DemoScene scene(*device);
+
+        for (const std::string& name : featureNames) {
+            auto feature = registry.Create(name);
+            if (!feature) {
+                AIR_LOG(Error, "aircli", "unknown feature '{}' (see `aircli features`)", name);
+                return kExitUsage;
+            }
+            if (!runner.AddFeature(name, std::move(feature))) {
+                return kExitUsage;
+            }
+        }
+        for (const std::string& set : sets) {
+            const size_t eq = set.find('=');
+            std::string error;
+            if (eq == std::string::npos) {
+                error = "--set expects feature.param=value, got '" + set + "'";
+            } else if (runner.SetParameter(std::string_view(set).substr(0, eq), std::string_view(set).substr(eq + 1),
+                                           &error)) {
+                continue;
+            }
+            AIR_LOG(Error, "aircli", "{}", error);
+            return kExitUsage;
+        }
+
+        json::Value frameReports = json::Value::MakeArray();
+        json::Value commands = json::Value::MakeArray();
+        for (u32 frame = 0; frame < frames; ++frame) {
+            renderer::FrameResult result = runner.RenderFrame(scene.Get());
+            if (frame == 0) {
+                std::fputs(result.graphText.c_str(), stdout);
+                report["graph"] = result.graphText;
+                if (!dumpGraph.empty()) {
+                    std::ofstream(dumpGraph) << result.graphviz;
+                    AIR_LOG(Info, "aircli", "wrote {}", dumpGraph);
+                }
+            }
+            for (const std::string& line : result.commands) {
+                std::printf("frame %u: %s\n", frame, line.c_str());
+                commands.Push(std::string("frame ") + std::to_string(frame) + ": " + line);
+            }
+            for (const std::string& e : result.validationErrors) {
+                errors.Push(std::string("frame ") + std::to_string(frame) + ": " + e);
+                failed = true;
+            }
+            frameReports.Push(result.ToJson());
+        }
+        report["frames"] = std::move(frameReports);
+        report["features"] = runner.DescribeFeatures();
+        if (dumpCommands) {
+            report["commands"] = std::move(commands);
+        }
+    }
+    device->WaitIdle();
+
+    json::Value memory = json::Value::MakeObject();
+    const rhi::MemoryStats stats = device->GetMemoryStats();
+    for (u32 i = 0; i < u32(rhi::MemoryLocation::Count); ++i) {
+        const auto& s = stats.perLocation[i];
+        json::Value& m = memory[rhi::ToString(rhi::MemoryLocation(i))];
+        m["heaps"] = s.heapCount;
+        m["reservedBytes"] = s.reservedBytes;
+        m["usedBytes"] = s.usedBytes;
+        m["allocations"] = s.allocationCount;
+        if (s.allocationCount > 0) {
+            errors.Push(std::format("leak: {} live allocations in {} after shutdown", s.allocationCount,
+                                    rhi::ToString(rhi::MemoryLocation(i))));
+            failed = true;
+        }
+    }
+    report["memoryAfterShutdown"] = std::move(memory);
+    report["errors"] = std::move(errors);
+    report["passed"] = !failed;
+
+    if (!reportPath.empty()) {
+        const std::filesystem::path path(reportPath);
+        if (path.has_parent_path()) {
+            std::filesystem::create_directories(path.parent_path());
+        }
+        std::ofstream(path) << report.Dump() << '\n';
+        AIR_LOG(Info, "aircli", "wrote {}", reportPath);
+    }
+    AIR_LOG(Info, "aircli", "{}", failed ? "FAILED (see errors in report)" : "OK");
+    return failed ? kExitCheckFailed : kExitOk;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    const Options options = Parse(argc, argv);
-
-    auto device = rhi::CreateDevice({.backend = options.backend});
-    if (!device) {
-        return 2;
+    Args args;
+    for (int i = 1; i < argc; ++i) {
+        args.items.emplace_back(argv[i]);
     }
-    device->SetCommandCapture(options.dumpCommands);
-    TaskSystem tasks;
-    AIR_LOG(Info, "aircli", "backend {} on '{}', {} worker threads", rhi::ToString(device->GetBackend()),
-            device->GetCapabilities().adapterName, tasks.GetWorkerCount());
-
-    pt::PathTracer tracer(*device, {.width = options.width, .height = options.height});
-    if (!tracer.Initialize(options.shaderDir)) {
-        return 3;
+    if (args.Done()) {
+        return Usage();
     }
-    DemoScene scene = CreateDemoScene(*device);
-
-    rhi::TextureHandle output = device->CreateTexture(
-        {.format = rhi::Format::RGBA8_UNORM, .width = options.width, .height = options.height,
-         .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::CopySrc, .debugName = "Output"});
-    rhi::Access outputAccess = rhi::Access::None;
-
-    for (u32 frame = 0; frame < options.frames; ++frame) {
-        device->BeginFrame();
-        rdg::RenderGraph graph(*device, &tasks);
-        rdg::TextureRef out = graph.ImportTexture(output, outputAccess, rhi::Access::CopySrc);
-        outputAccess = rhi::Access::CopySrc;
-        tracer.AddPasses(graph, scene.gpu, out);
-        graph.Execute();
-
-        if (frame == 0) {
-            std::fputs(graph.DumpText().c_str(), stdout);
-            if (!options.dumpGraph.empty()) {
-                std::ofstream(options.dumpGraph) << graph.DumpGraphviz();
-                AIR_LOG(Info, "aircli", "wrote {}", options.dumpGraph);
-            }
-        }
-        if (options.dumpCommands) {
-            for (const std::string& line : device->TakeCapturedCommands()) {
-                std::printf("frame %u: %s\n", frame, line.c_str());
-            }
-        }
-        device->EndFrame();
+    const std::string_view command = args.Take();
+    if (command == "render") {
+        return CommandRender(args);
     }
-    AIR_LOG(Info, "aircli", "accumulated {} spp", tracer.GetAccumulatedSamples());
-
-    DestroyDemoScene(*device, scene);
-    device->DestroyTexture(output);
-    device->WaitIdle();
-
-    const rhi::MemoryStats stats = device->GetMemoryStats();
-    for (u32 i = 0; i < u32(rhi::MemoryLocation::Count); ++i) {
-        const auto& s = stats.perLocation[i];
-        AIR_LOG(Info, "aircli", "memory {}: {} heaps, {} KiB reserved, {} KiB used, {} allocations",
-                rhi::ToString(rhi::MemoryLocation(i)), s.heapCount, s.reservedBytes / 1024, s.usedBytes / 1024,
-                s.allocationCount);
+    if (command == "features") {
+        return CommandFeatures();
     }
-    return 0;
+    if (command == "compare") {
+        return CommandCompare(args);
+    }
+    return Usage();
 }

@@ -35,15 +35,15 @@ struct Registrar {
 #define AIR_TEST_CONCAT2(a, b) a##b
 #define AIR_TEST_CONCAT(a, b) AIR_TEST_CONCAT2(a, b)
 
-#define TEST(name)                                                                       \
-    static void AIR_TEST_CONCAT(Test_, name)();                                          \
-    static ::airtest::Registrar AIR_TEST_CONCAT(Registrar_, name)(#name, &AIR_TEST_CONCAT(Test_, name)); \
+#define TEST(name)                                                                                                     \
+    static void AIR_TEST_CONCAT(Test_, name)();                                                                        \
+    static ::airtest::Registrar AIR_TEST_CONCAT(Registrar_, name)(#name, &AIR_TEST_CONCAT(Test_, name));               \
     static void AIR_TEST_CONCAT(Test_, name)()
 
-#define EXPECT(cond)                                                                     \
-    do {                                                                                 \
-        if (!(cond)) {                                                                   \
-            std::fprintf(stderr, "  %s:%d: EXPECT failed: %s\n", __FILE__, __LINE__, #cond); \
-            ++::airtest::FailureCount();                                                 \
-        }                                                                                \
+#define EXPECT(cond)                                                                                                   \
+    do {                                                                                                               \
+        if (!(cond)) {                                                                                                 \
+            std::fprintf(stderr, "  %s:%d: EXPECT failed: %s\n", __FILE__, __LINE__, #cond);                           \
+            ++::airtest::FailureCount();                                                                               \
+        }                                                                                                              \
     } while (0)

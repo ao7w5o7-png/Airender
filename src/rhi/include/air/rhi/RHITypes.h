@@ -109,7 +109,9 @@ enum class Access : u32 {
 AIR_ENUM_FLAGS(Access)
 std::string ToString(Access access);
 
-inline bool IsWriteAccess(Access access) { return Any(access & Access::WritableMask); }
+inline bool IsWriteAccess(Access access) {
+    return Any(access & Access::WritableMask);
+}
 
 // ---------------------------------------------------------------------------
 // Handles
@@ -183,7 +185,7 @@ struct BlasDesc {
 
 struct TlasInstance {
     float transform[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}; // row-major 3x4
-    u32 instanceId = 0;   // InstanceID() in shaders, 24 bits
+    u32 instanceId = 0;                                                 // InstanceID() in shaders, 24 bits
     u32 mask = 0xFF;
     u32 hitGroupOffset = 0;
     AccelStructHandle blas;
@@ -258,10 +260,10 @@ struct Barrier {
 };
 
 struct DeviceCapabilities {
-    bool rayTracing = false;      // DXR 1.1 / VK_KHR_ray_tracing_pipeline + ray_query
+    bool rayTracing = false; // DXR 1.1 / VK_KHR_ray_tracing_pipeline + ray_query
     bool meshShaders = false;
-    bool bindless = false;        // SM 6.6 dynamic resources / descriptor indexing
-    bool rebar = false;           // DeviceLocalHost memory available
+    bool bindless = false; // SM 6.6 dynamic resources / descriptor indexing
+    bool rebar = false;    // DeviceLocalHost memory available
     u64 dedicatedVideoMemory = 0;
     std::string adapterName;
 };

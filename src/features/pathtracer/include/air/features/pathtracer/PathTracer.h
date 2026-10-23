@@ -9,6 +9,7 @@
 // GetAccumulatedSamples() >= targetSamples". Changing the camera or scene calls ResetAccumulation().
 
 #include "air/rdg/RenderGraph.h"
+#include "air/renderer/Scene.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <filesystem>
@@ -27,15 +28,8 @@ struct PathTracerSettings {
     u32 height = 1080;
     u32 samplesPerPixelPerFrame = 4; // raise for offline throughput, lower for interactive preview
     u32 maxBounces = 8;
-    u32 targetSamples = 1024;        // IsConverged() once reached
+    u32 targetSamples = 1024; // IsConverged() once reached
     float exposure = 1.0f;
-};
-
-// GPU scene data the path tracer reads. Built by the scene system (not part of this module).
-struct PathTracerScene {
-    rhi::AccelStructHandle tlas;
-    rhi::BufferHandle instances; // StructuredBuffer<InstanceData>, indexed by TLAS InstanceID
-    rhi::BufferHandle materials; // StructuredBuffer<MaterialData>
 };
 
 class PathTracer {
@@ -48,17 +42,20 @@ public:
 
     // Loads compiled shaders from shaderDir (PathTracer.lib.dxil|spv, Resolve.cs.dxil|spv).
     // The Null backend accepts missing files so the pipeline can run headless.
+    // Settings that size resources (width/height) are fixed after this call.
     bool Initialize(const std::filesystem::path& shaderDir);
 
     void SetCamera(const Camera& camera);
     void ResetAccumulation();
 
     // Adds this frame's passes. `output` must allow UnorderedAccess and be RGBA8/RGBA16F/RGBA32F.
-    void AddPasses(rdg::RenderGraph& graph, const PathTracerScene& scene, rdg::TextureRef output);
+    void AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& scene, rdg::TextureRef output);
 
     u32 GetAccumulatedSamples() const { return mAccumulatedSamples; }
     bool IsConverged() const { return mAccumulatedSamples >= mSettings.targetSamples; }
     const PathTracerSettings& GetSettings() const { return mSettings; }
+    // Settings that do not size resources (spp, bounces, exposure, target) may change between frames.
+    PathTracerSettings& MutableSettings() { return mSettings; }
 
 private:
     rhi::Device& mDevice;

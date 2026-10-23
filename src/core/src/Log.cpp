@@ -24,7 +24,9 @@ const char* LevelName(LogLevel level) {
 }
 } // namespace
 
-void SetMinLogLevel(LogLevel level) { gMinLevel.store(level, std::memory_order_relaxed); }
+void SetMinLogLevel(LogLevel level) {
+    gMinLevel.store(level, std::memory_order_relaxed);
+}
 
 void LogMessage(LogLevel level, std::string_view category, std::string_view message) {
     if (level < gMinLevel.load(std::memory_order_relaxed)) {

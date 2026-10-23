@@ -1,0 +1,49 @@
+=== frame 0 graph
+RenderGraph: 4 passes (0 culled), 7 barriers, transient heap 64 KiB (unaliased 64 KiB)
+Passes:
+  [0] PathTracer.Trace (RayTracing)
+      barrier PathTracer.Accumulation: None -> UAVCompute
+      write PathTracer.Accumulation as UAVCompute
+  [1] PathTracer.Resolve (Compute)
+      barrier PathTracer.Accumulation: UAVCompute -> SRVCompute
+      barrier FrameOutput: None -> UAVCompute
+      read  PathTracer.Accumulation as SRVCompute
+      write FrameOutput as UAVCompute
+  [2] Example.Generate (Compute)
+      barrier Example.Pattern: None -> UAVCompute (discard)
+      write Example.Pattern as UAVCompute
+  [3] Example.Composite (Compute)
+      barrier Example.Pattern: UAVCompute -> SRVCompute
+      barrier FrameOutput: UAVCompute -> UAVCompute
+      read  Example.Pattern as SRVCompute
+      write FrameOutput as UAVCompute
+Resources:
+  tex FrameOutput (imported) passes [1, 3] final SRVCompute
+  tex PathTracer.Accumulation (imported) passes [0, 1] final SRVCompute
+  tex Example.Pattern (transient) passes [2, 3] heap offset 0 size 65536
+=== frame 0 commands
+[Graphics] Barrier [tex 'PathTracer.Accumulation' None -> UAVCompute]
+[Graphics] BeginEvent 'PathTracer.Trace'
+[Graphics] SetPipeline pipeline 'PathTracer.Trace'
+[Graphics] PushConstants 96 bytes
+[Graphics] DispatchRays 64x32x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'PathTracer.Accumulation' UAVCompute -> SRVCompute] [tex 'FrameOutput' None -> UAVCompute]
+[Graphics] BeginEvent 'PathTracer.Resolve'
+[Graphics] SetPipeline pipeline 'PathTracer.Resolve'
+[Graphics] PushConstants 32 bytes
+[Graphics] Dispatch 8x4x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'Example.Pattern' None -> UAVCompute discard]
+[Graphics] BeginEvent 'Example.Generate'
+[Graphics] SetPipeline pipeline 'Example.Generate'
+[Graphics] PushConstants 32 bytes
+[Graphics] Dispatch 8x4x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'Example.Pattern' UAVCompute -> SRVCompute] [tex 'FrameOutput' UAVCompute -> UAVCompute]
+[Graphics] BeginEvent 'Example.Composite'
+[Graphics] SetPipeline pipeline 'Example.Composite'
+[Graphics] PushConstants 32 bytes
+[Graphics] Dispatch 8x4x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'FrameOutput' UAVCompute -> SRVCompute]

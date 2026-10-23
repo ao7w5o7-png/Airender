@@ -1,0 +1,56 @@
+=== frame 0 graph
+RenderGraph: 2 passes (0 culled), 4 barriers, transient heap 0 KiB (unaliased 0 KiB)
+Passes:
+  [0] PathTracer.Trace (RayTracing)
+      barrier PathTracer.Accumulation: None -> UAVCompute
+      write PathTracer.Accumulation as UAVCompute
+  [1] PathTracer.Resolve (Compute)
+      barrier PathTracer.Accumulation: UAVCompute -> SRVCompute
+      barrier FrameOutput: None -> UAVCompute
+      read  PathTracer.Accumulation as SRVCompute
+      write FrameOutput as UAVCompute
+Resources:
+  tex FrameOutput (imported) passes [1, 1] final SRVCompute
+  tex PathTracer.Accumulation (imported) passes [0, 1] final SRVCompute
+=== frame 0 commands
+[Graphics] Barrier [tex 'PathTracer.Accumulation' None -> UAVCompute]
+[Graphics] BeginEvent 'PathTracer.Trace'
+[Graphics] SetPipeline pipeline 'PathTracer.Trace'
+[Graphics] PushConstants 96 bytes
+[Graphics] DispatchRays 64x32x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'PathTracer.Accumulation' UAVCompute -> SRVCompute] [tex 'FrameOutput' None -> UAVCompute]
+[Graphics] BeginEvent 'PathTracer.Resolve'
+[Graphics] SetPipeline pipeline 'PathTracer.Resolve'
+[Graphics] PushConstants 32 bytes
+[Graphics] Dispatch 8x4x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'FrameOutput' UAVCompute -> SRVCompute]
+=== frame 1 graph
+RenderGraph: 2 passes (0 culled), 4 barriers, transient heap 0 KiB (unaliased 0 KiB)
+Passes:
+  [0] PathTracer.Trace (RayTracing)
+      barrier PathTracer.Accumulation: SRVCompute -> UAVCompute
+      write PathTracer.Accumulation as UAVCompute
+  [1] PathTracer.Resolve (Compute)
+      barrier PathTracer.Accumulation: UAVCompute -> SRVCompute
+      barrier FrameOutput: SRVCompute -> UAVCompute
+      read  PathTracer.Accumulation as SRVCompute
+      write FrameOutput as UAVCompute
+Resources:
+  tex FrameOutput (imported) passes [1, 1] final SRVCompute
+  tex PathTracer.Accumulation (imported) passes [0, 1] final SRVCompute
+=== frame 1 commands
+[Graphics] Barrier [tex 'PathTracer.Accumulation' SRVCompute -> UAVCompute]
+[Graphics] BeginEvent 'PathTracer.Trace'
+[Graphics] SetPipeline pipeline 'PathTracer.Trace'
+[Graphics] PushConstants 96 bytes
+[Graphics] DispatchRays 64x32x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'PathTracer.Accumulation' UAVCompute -> SRVCompute] [tex 'FrameOutput' SRVCompute -> UAVCompute]
+[Graphics] BeginEvent 'PathTracer.Resolve'
+[Graphics] SetPipeline pipeline 'PathTracer.Resolve'
+[Graphics] PushConstants 32 bytes
+[Graphics] Dispatch 8x4x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'FrameOutput' UAVCompute -> SRVCompute]

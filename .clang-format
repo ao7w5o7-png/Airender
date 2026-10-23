@@ -6,3 +6,7 @@ AllowShortFunctionsOnASingleLine: Inline
 AllowShortIfStatementsOnASingleLine: Never
 AccessModifierOffset: -4
 NamespaceIndentation: None
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive
+AllowShortLambdasOnASingleLine: All
+AllowShortCaseLabelsOnASingleLine: true

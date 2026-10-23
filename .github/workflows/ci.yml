@@ -6,6 +6,16 @@ on:
   pull_request:
 
 jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build clang-format-18 clang-tidy-18
+      - run: sudo ln -sf /usr/bin/clang-format-18 /usr/local/bin/clang-format && sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy && sudo ln -sf /usr/bin/run-clang-tidy-18 /usr/local/bin/run-clang-tidy
+      - run: python3 tools/air.py format --check
+      - run: python3 tools/air.py layers
+      - run: CXX=clang++ python3 tools/air.py tidy
+
   linux:
     runs-on: ubuntu-24.04
     strategy:
@@ -14,18 +24,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
-      - run: cmake --build build
-      - run: ctest --test-dir build --output-on-failure
+      - run: CXX=${{ matrix.compiler }} python3 tools/air.py test
+      - name: Headless render smoke test
+        run: python3 tools/air.py run -- render --features pathtracer,example --frames 3 --report out/report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report-${{ matrix.compiler }}
+          path: out/report.json
 
   linux-tsan:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y ninja-build
-      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAIR_ENABLE_TSAN=ON
-      - run: cmake --build build
-      - run: setarch -R ./build/tests/air_tests
+      - run: python3 tools/air.py test --preset tsan
 
   windows:
     runs-on: windows-latest

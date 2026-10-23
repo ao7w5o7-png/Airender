@@ -106,18 +106,18 @@ struct GpuAllocation {
 
 private:
     friend class GpuMemoryAllocator;
-    u32 heapIndex = 0;
-    u32 tlsfNode = ~0u;
-    bool dedicated = false;
+    u32 mHeapIndex = 0;
+    u32 mTlsfNode = ~0u;
+    bool mDedicated = false;
 };
 
 class GpuMemoryAllocator {
 public:
     struct Config {
-        u64 defaultHeapSize = 256ull << 20;       // 256 MiB blocks
-        u64 dedicatedThreshold = 64ull << 20;     // >= 64 MiB gets its own heap
-        u64 hostVisibleHeapSize = 64ull << 20;    // smaller blocks for Upload / Readback
-        bool freeEmptyHeaps = true;               // keep at most one empty heap per pool
+        u64 defaultHeapSize = 256ull << 20;    // 256 MiB blocks
+        u64 dedicatedThreshold = 64ull << 20;  // >= 64 MiB gets its own heap
+        u64 hostVisibleHeapSize = 64ull << 20; // smaller blocks for Upload / Readback
+        bool freeEmptyHeaps = true;            // keep at most one empty heap per pool
     };
 
     struct Request {
@@ -129,8 +129,8 @@ public:
     };
 
     struct Stats {
-        u64 reservedBytes = 0;  // sum of heap sizes
-        u64 usedBytes = 0;      // sum of live allocation sizes
+        u64 reservedBytes = 0; // sum of heap sizes
+        u64 usedBytes = 0;     // sum of live allocation sizes
         u32 heapCount = 0;
         u32 allocationCount = 0;
         u32 dedicatedCount = 0;

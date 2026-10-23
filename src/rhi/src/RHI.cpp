@@ -38,7 +38,7 @@ u32 FormatBytesPerPixel(Format format) {
     switch (format) {
     case Format::Unknown: return 0;
     case Format::R8_UNORM: return 1;
-    case Format::RG8_UNORM: return 2;
+    case Format::RG8_UNORM:
     case Format::R16_FLOAT: return 2;
     case Format::RGBA8_UNORM:
     case Format::RGBA8_SRGB:
@@ -59,11 +59,13 @@ u32 FormatBytesPerPixel(Format format) {
     return 0;
 }
 
-bool IsDepthFormat(Format format) { return format == Format::D32_FLOAT || format == Format::D24_UNORM_S8_UINT; }
+bool IsDepthFormat(Format format) {
+    return format == Format::D32_FLOAT || format == Format::D24_UNORM_S8_UINT;
+}
 
 const char* ToString(Format format) {
     switch (format) {
-#define AIR_FORMAT_CASE(f) \
+#define AIR_FORMAT_CASE(f)                                                                                             \
     case Format::f: return #f;
         AIR_FORMAT_CASE(Unknown)
         AIR_FORMAT_CASE(R8_UNORM)
@@ -104,10 +106,10 @@ std::string ToString(Access access) {
     if (access == Access::None) {
         return "None";
     }
-    static constexpr const char* kNames[] = {"CopySrc",     "CopyDst",     "VertexOrIndex", "Constant",
-                                             "SRVGraphics", "SRVCompute",  "UAVGraphics",   "UAVCompute",
-                                             "RenderTarget", "DepthRead",  "DepthWrite",    "IndirectArgs",
-                                             "AccelStructRead", "AccelStructWrite", "Present", "HostRead"};
+    static constexpr const char* kNames[] = {"CopySrc",         "CopyDst",          "VertexOrIndex", "Constant",
+                                             "SRVGraphics",     "SRVCompute",       "UAVGraphics",   "UAVCompute",
+                                             "RenderTarget",    "DepthRead",        "DepthWrite",    "IndirectArgs",
+                                             "AccelStructRead", "AccelStructWrite", "Present",       "HostRead"};
     std::string result;
     for (u32 bit = 0; bit < std::size(kNames); ++bit) {
         if (u32(access) & (1u << bit)) {

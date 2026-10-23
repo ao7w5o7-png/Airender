@@ -114,8 +114,8 @@ TEST(Tlsf_RandomStress) {
 TEST(GpuAllocator_PoolsDedicatedAndMapping) {
     CountingProvider provider;
     {
-        GpuMemoryAllocator allocator(provider, {.defaultHeapSize = 1 << 20, .dedicatedThreshold = 512 << 10,
-                                                .hostVisibleHeapSize = 1 << 20});
+        GpuMemoryAllocator allocator(
+            provider, {.defaultHeapSize = 1 << 20, .dedicatedThreshold = 512 << 10, .hostVisibleHeapSize = 1 << 20});
         auto a = allocator.Allocate({.memoryTypeKey = 0, .location = MemoryLocation::DeviceLocal, .size = 1000});
         auto b = allocator.Allocate({.memoryTypeKey = 0, .location = MemoryLocation::DeviceLocal, .size = 1000});
         EXPECT(a && b && a->nativeHeap == b->nativeHeap); // same block
@@ -125,8 +125,10 @@ TEST(GpuAllocator_PoolsDedicatedAndMapping) {
         EXPECT(big && big->nativeHeap != a->nativeHeap && big->offset == 0); // dedicated
         EXPECT(allocator.GetStats(MemoryLocation::DeviceLocal).dedicatedCount == 1);
 
-        auto up = allocator.Allocate({.memoryTypeKey = 4, .location = MemoryLocation::Upload, .size = 300, .alignment = 256});
-        auto up2 = allocator.Allocate({.memoryTypeKey = 4, .location = MemoryLocation::Upload, .size = 300, .alignment = 256});
+        auto up =
+            allocator.Allocate({.memoryTypeKey = 4, .location = MemoryLocation::Upload, .size = 300, .alignment = 256});
+        auto up2 =
+            allocator.Allocate({.memoryTypeKey = 4, .location = MemoryLocation::Upload, .size = 300, .alignment = 256});
         EXPECT(up && up2 && up->mapped && up2->mapped);
         EXPECT(up2->mapped - up->mapped == std::ptrdiff_t(up2->offset) - std::ptrdiff_t(up->offset));
 
@@ -144,8 +146,8 @@ TEST(GpuAllocator_PoolsDedicatedAndMapping) {
 
 TEST(GpuAllocator_ThreadSafeConcurrentUse) {
     CountingProvider provider;
-    GpuMemoryAllocator allocator(provider, {.defaultHeapSize = 4 << 20, .dedicatedThreshold = 1 << 20,
-                                            .hostVisibleHeapSize = 1 << 20});
+    GpuMemoryAllocator allocator(
+        provider, {.defaultHeapSize = 4 << 20, .dedicatedThreshold = 1 << 20, .hostVisibleHeapSize = 1 << 20});
     std::vector<std::thread> threads;
     std::atomic<int> failures{0};
     for (int t = 0; t < 8; ++t) {
@@ -155,7 +157,8 @@ TEST(GpuAllocator_ThreadSafeConcurrentUse) {
             for (int i = 0; i < 2000; ++i) {
                 if (live.size() < 32 && rng() % 2) {
                     const u32 key = rng() % 3;
-                    auto a = allocator.Allocate({.memoryTypeKey = key, .location = MemoryLocation::DeviceLocal,
+                    auto a = allocator.Allocate({.memoryTypeKey = key,
+                                                 .location = MemoryLocation::DeviceLocal,
                                                  .size = 256 + rng() % (256 << 10)});
                     if (a) {
                         live.push_back(*a);

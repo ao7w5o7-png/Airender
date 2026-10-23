@@ -15,8 +15,7 @@
 
 namespace air {
 
-template <typename Tag>
-struct Handle {
+template <typename Tag> struct Handle {
     u32 index = 0;
     u32 generation = 0; // 0 == invalid
 
@@ -25,13 +24,11 @@ struct Handle {
     friend bool operator==(Handle, Handle) = default;
 };
 
-template <typename Tag, typename T>
-class HandlePool {
+template <typename Tag, typename T> class HandlePool {
 public:
     using HandleType = Handle<Tag>;
 
-    template <typename... Args>
-    HandleType Allocate(Args&&... args) {
+    template <typename... Args> HandleType Allocate(Args&&... args) {
         std::lock_guard lock(mMutex);
         u32 index;
         if (!mFreeList.empty()) {
@@ -60,7 +57,7 @@ public:
     T* Get(HandleType handle) {
         std::lock_guard lock(mMutex);
         Slot* slot = Lookup(handle);
-        return slot ? &*slot->value : nullptr;
+        return slot && slot->value.has_value() ? &slot->value.value() : nullptr;
     }
 
     u32 LiveCount() const {

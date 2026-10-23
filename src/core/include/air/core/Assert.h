@@ -5,14 +5,14 @@
 #include <cstdlib>
 
 // AIR_CHECK is always on: use it for invariants whose violation would corrupt GPU state.
-#define AIR_CHECK(cond, ...)                                                                              \
-    do {                                                                                                  \
-        if (!(cond)) [[unlikely]] {                                                                       \
-            ::air::LogMessage(::air::LogLevel::Fatal, "Check",                                            \
-                              std::format("{}:{}: check failed: {} {}", __FILE__, __LINE__, #cond,         \
-                                          std::format("" __VA_ARGS__)));                                  \
-            std::abort();                                                                                 \
-        }                                                                                                 \
+#define AIR_CHECK(cond, ...)                                                                                           \
+    do {                                                                                                               \
+        if (!(cond)) [[unlikely]] {                                                                                    \
+            ::air::LogMessage(                                                                                         \
+                ::air::LogLevel::Fatal, "Check",                                                                       \
+                std::format("{}:{}: check failed: {} {}", __FILE__, __LINE__, #cond, std::format("" __VA_ARGS__)));    \
+            std::abort();                                                                                              \
+        }                                                                                                              \
     } while (0)
 
 #ifndef NDEBUG

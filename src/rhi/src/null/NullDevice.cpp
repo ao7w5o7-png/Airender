@@ -9,10 +9,10 @@
 
 #include <algorithm>
 #include <atomic>
-#include <functional>
-#include <utility>
 #include <format>
+#include <functional>
 #include <unordered_map>
+#include <utility>
 
 namespace air::rhi {
 namespace {
@@ -20,7 +20,9 @@ namespace {
 enum class HeapCategory : u32 { Buffer = 0, RenderTargetTexture = 1, Texture = 2 };
 
 // Same encoding the D3D12 backend uses: heap tier 1 separates these categories.
-u32 MemoryTypeKey(MemoryLocation location, HeapCategory category) { return u32(location) * 4 + u32(category); }
+u32 MemoryTypeKey(MemoryLocation location, HeapCategory category) {
+    return u32(location) * 4 + u32(category);
+}
 
 class NullHeapProvider final : public IGpuHeapProvider {
 public:
@@ -181,8 +183,8 @@ public:
         NullBuffer buffer;
         buffer.desc = desc;
         const AllocationInfo info = GetBufferAllocationInfo(desc);
-        auto allocation = mAllocator.Allocate({MemoryTypeKey(desc.memory, HeapCategory::Buffer), desc.memory,
-                                               info.size, info.alignment});
+        auto allocation = mAllocator.Allocate(
+            {MemoryTypeKey(desc.memory, HeapCategory::Buffer), desc.memory, info.size, info.alignment});
         if (!allocation) {
             return {};
         }
@@ -194,9 +196,8 @@ public:
         NullTexture texture;
         texture.desc = desc;
         const AllocationInfo info = GetTextureAllocationInfo(desc);
-        auto allocation = mAllocator.Allocate(
-            {MemoryTypeKey(MemoryLocation::DeviceLocal, TextureCategory(desc)), MemoryLocation::DeviceLocal,
-             info.size, info.alignment});
+        auto allocation = mAllocator.Allocate({MemoryTypeKey(MemoryLocation::DeviceLocal, TextureCategory(desc)),
+                                               MemoryLocation::DeviceLocal, info.size, info.alignment});
         if (!allocation) {
             return {};
         }
@@ -248,7 +249,8 @@ public:
     AllocationInfo GetTextureAllocationInfo(const TextureDesc& desc) override {
         u64 size = 0;
         u32 w = desc.width, h = desc.height;
-        const u32 layers = desc.dimension == TextureDimension::TexCube ? 6 * desc.depthOrArraySize : desc.depthOrArraySize;
+        const u32 layers =
+            desc.dimension == TextureDimension::TexCube ? 6 * desc.depthOrArraySize : desc.depthOrArraySize;
         for (u32 mip = 0; mip < desc.mipLevels; ++mip) {
             size += u64(w) * h * FormatBytesPerPixel(desc.format);
             w = std::max(1u, w / 2);
@@ -257,10 +259,7 @@ public:
         size *= u64(layers) * desc.sampleCount;
         return {AlignUp(std::max<u64>(size, 1), 64 * 1024), 64 * 1024}; // D3D12 default placement alignment
     }
-    AllocationInfo GetBufferAllocationInfo(const BufferDesc& desc) override {
-        const bool accel = Any(desc.usage & BufferUsage::AccelStructStorage);
-        return {AlignUp(desc.size, 256), accel ? 256u : 256u};
-    }
+    AllocationInfo GetBufferAllocationInfo(const BufferDesc& desc) override { return {AlignUp(desc.size, 256), 256}; }
 
     HeapHandle CreateHeap(u64 size, MemoryLocation location, std::string_view debugName) override {
         NullHeap heap;
@@ -268,8 +267,8 @@ public:
         heap.location = location;
         heap.name = std::string(debugName);
         // Transient heaps hold every resource category (D3D12 heap tier 2 / Vulkan).
-        auto allocation = mAllocator.Allocate({MemoryTypeKey(location, HeapCategory::Texture) + 100, location, size,
-                                               64 * 1024, /*forceDedicated*/ true});
+        auto allocation = mAllocator.Allocate(
+            {MemoryTypeKey(location, HeapCategory::Texture) + 100, location, size, 64 * 1024, /*forceDedicated*/ true});
         if (!allocation) {
             return {};
         }
@@ -592,8 +591,8 @@ void NullCommandList::Barriers(std::span<const Barrier> barriers) {
             text += std::format(" [{} {} -> {}]", mDevice.Describe(b.buffer), ToString(b.before), ToString(b.after));
             break;
         case Barrier::Type::AccelStruct:
-            text += std::format(" [{} {} -> {}]", mDevice.Describe(b.accelStruct), ToString(b.before),
-                                ToString(b.after));
+            text +=
+                std::format(" [{} {} -> {}]", mDevice.Describe(b.accelStruct), ToString(b.before), ToString(b.after));
             break;
         case Barrier::Type::Aliasing: text += " [aliasing]"; break;
         }
@@ -602,8 +601,8 @@ void NullCommandList::Barriers(std::span<const Barrier> barriers) {
 }
 
 void NullCommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size) {
-    Record(std::format("CopyBuffer {}+{} <- {}+{} ({} bytes)", mDevice.Describe(dst), dstOffset,
-                       mDevice.Describe(src), srcOffset, size));
+    Record(std::format("CopyBuffer {}+{} <- {}+{} ({} bytes)", mDevice.Describe(dst), dstOffset, mDevice.Describe(src),
+                       srcOffset, size));
 }
 void NullCommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) {
     Record(std::format("CopyBufferToTexture {} mip {} <- {}+{}", mDevice.Describe(dst), mip, mDevice.Describe(src),
@@ -622,14 +621,15 @@ void NullCommandList::SetPipeline(PipelineHandle pipeline) {
 void NullCommandList::BuildBlas(AccelStructHandle blas, BufferHandle scratch) {
     Record(std::format("BuildBlas {} scratch {}", mDevice.Describe(blas), mDevice.Describe(scratch)));
 }
-void NullCommandList::BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances,
-                                BufferHandle scratch) {
+void NullCommandList::BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) {
     Record(std::format("BuildTlas {} instances {} scratch {}", mDevice.Describe(tlas), instances.size(),
                        mDevice.Describe(scratch)));
 }
 
 } // namespace
 
-std::unique_ptr<Device> CreateNullDevice(const DeviceDesc& desc) { return std::make_unique<NullDevice>(desc); }
+std::unique_ptr<Device> CreateNullDevice(const DeviceDesc& desc) {
+    return std::make_unique<NullDevice>(desc);
+}
 
 } // namespace air::rhi

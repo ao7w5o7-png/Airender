@@ -325,8 +325,8 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
             AIR_LOG(Error, "GpuMemory", "out of memory: dedicated {} bytes in {}", size, ToString(request.location));
             return std::nullopt;
         }
-        result.heapIndex = AddBlock(pool, Block{*heap, nullptr});
-        result.dedicated = true;
+        result.mHeapIndex = AddBlock(pool, Block{*heap, nullptr});
+        result.mDedicated = true;
         result.nativeHeap = heap->native;
         result.mapped = heap->mapped;
         result.offset = 0;
@@ -339,8 +339,8 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
 
     auto fill = [&](u32 blockIndex, const TlsfAllocator::Allocation& a) {
         const Block& block = pool.blocks[blockIndex];
-        result.heapIndex = blockIndex;
-        result.tlsfNode = a.node;
+        result.mHeapIndex = blockIndex;
+        result.mTlsfNode = a.node;
         result.nativeHeap = block.heap.native;
         result.mapped = block.heap.mapped ? block.heap.mapped + a.offset : nullptr;
         result.offset = a.offset;
@@ -383,9 +383,9 @@ void GpuMemoryAllocator::Free(const GpuAllocation& allocation) {
     AIR_CHECK(pool, "freeing allocation from unknown memory type {}", allocation.memoryTypeKey);
 
     std::lock_guard lock(pool->mutex);
-    AIR_CHECK(allocation.heapIndex < pool->blocks.size() && pool->blocks[allocation.heapIndex].alive,
+    AIR_CHECK(allocation.mHeapIndex < pool->blocks.size() && pool->blocks[allocation.mHeapIndex].alive,
               "freeing allocation from dead heap");
-    Block& block = pool->blocks[allocation.heapIndex];
+    Block& block = pool->blocks[allocation.mHeapIndex];
     pool->usedBytes -= allocation.size;
     --pool->allocationCount;
 
@@ -395,19 +395,19 @@ void GpuMemoryAllocator::Free(const GpuAllocation& allocation) {
         pool->freeBlockSlots.push_back(index);
     };
 
-    if (allocation.dedicated) {
+    if (allocation.mDedicated) {
         --pool->dedicatedCount;
-        destroyBlock(allocation.heapIndex);
+        destroyBlock(allocation.mHeapIndex);
         return;
     }
 
-    block.tlsf->Free(allocation.tlsfNode);
+    block.tlsf->Free(allocation.mTlsfNode);
     if (mConfig.freeEmptyHeaps && block.tlsf->IsEmpty()) {
         // Keep one empty heap around to avoid create/destroy thrashing.
         for (u32 i = 0; i < pool->blocks.size(); ++i) {
             const Block& other = pool->blocks[i];
-            if (i != allocation.heapIndex && other.alive && other.tlsf && other.tlsf->IsEmpty()) {
-                destroyBlock(allocation.heapIndex);
+            if (i != allocation.mHeapIndex && other.alive && other.tlsf && other.tlsf->IsEmpty()) {
+                destroyBlock(allocation.mHeapIndex);
                 return;
             }
         }

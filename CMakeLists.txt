@@ -27,11 +27,13 @@ if(AIR_RHI_D3D12 AND NOT WIN32)
 endif()
 
 include(cmake/AirCompileOptions.cmake)
+include(cmake/AirFeatures.cmake)
 
 add_subdirectory(src/core)
 add_subdirectory(src/rhi)
 add_subdirectory(src/rdg)
-add_subdirectory(src/pathtracer)
+add_subdirectory(src/renderer)
+add_subdirectory(src/features)
 
 if(AIR_BUILD_APPS)
     add_subdirectory(apps/aircli)

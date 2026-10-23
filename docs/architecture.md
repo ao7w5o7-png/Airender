@@ -11,9 +11,12 @@
 ## 1. 分层总览
 
 ```
- apps/aircli            命令行驱动：跑帧、打印 RenderGraph、导出命令流、内存统计
+ apps/aircli            命令行驱动：render / features / compare，JSON 报告
+ tools/air.py           开发 harness：check / test / run / golden-update / new-feature / layers
       │
- pathtracer             GPU 路径追踪（硬件光追），渐进累积，离线/预览共用
+ features/<name>        渲染特性插件：pathtracer（GPU 路径追踪）、example（新算法模板）……
+      │                 互不依赖，CMake 自动发现，按名字注册
+ renderer               扩展点：RenderFeature 接口、FeatureRegistry、ParameterSet、FrameRunner、GpuScene
       │
  rdg (RenderGraph)      声明式 pass：自动裁剪、自动 barrier、瞬态资源显存复用、并行录制
       │
@@ -22,7 +25,8 @@
  core                   任务系统（Task / Pipe / ParallelFor）、句柄池、日志、断言
 ```
 
-依赖严格单向：上层只依赖下层，`core` 不依赖任何图形 API。
+依赖严格单向：上层只依赖下层，`core` 不依赖任何图形 API，特性之间互不依赖。
+`python3 tools/air.py layers` 检查每一个 `#include "air/..."` 是否越层，CI 会跑。
 
 | 模块 | 目录 | 对应 UE 概念 |
 |---|---|---|
@@ -30,7 +34,8 @@
 | RHI | `src/rhi` | `FDynamicRHI` / `FRHICommandList` / `ERHIAccess` |
 | 显存管理 | `src/rhi/GpuMemoryAllocator` | D3D12 的 `FD3D12PoolAllocator`、Vulkan 的 `FVulkanResourceHeap` |
 | RenderGraph | `src/rdg` | `FRDGBuilder`、transient allocator |
-| 路径追踪 | `src/pathtracer` | UE Path Tracer（`PathTracing.cpp`） |
+| 渲染特性框架 | `src/renderer` | UE 的 `FSceneViewExtension` / 渲染模块插件 |
+| 路径追踪 | `src/features/pathtracer` | UE Path Tracer（`PathTracing.cpp`） |
 
 ---
 
@@ -62,6 +67,7 @@
 | `rdg::RenderGraph` 构建 | 单线程（构造它的线程），有运行时检查 |
 | RDG pass 的 execute lambda | 可能在 worker 上与其他 pass 并发执行：只能用 `PassContext` 和按值捕获/只读的数据 |
 | `GpuMemoryAllocator` | 线程安全，每个内存池一把锁 |
+| `FrameRunner` / `RenderFeature` / `ParameterSet` | 在驱动帧循环的线程上调用；参数只在帧之间修改 |
 | `HandlePool` | 线程安全；句柄带 generation，用到已释放的句柄会被检测出来而不是野指针 |
 
 ### 2.3 后续计划
@@ -211,11 +217,74 @@ UE 用 shader parameter struct 让 RDG 反射出资源依赖；这里用显式 `
 
 ---
 
-## 6. GPU 路径追踪（离线也要快）
+## 6. 扩展性：渲染特性（RenderFeature）
 
-文件：`src/pathtracer/`，着色器 `shaders/pathtracer/`
+文件：`src/renderer/include/air/renderer/`
 
-### 6.1 当前实现
+作为图形算法试验场，最常见的改动是"加一个新效果"。这件事被设计成**不碰核心代码**：
+
+```cpp
+class MyFeature final : public renderer::RenderFeature {
+public:
+    MyFeature() { mParameters.Add("strength", &mStrength, "Effect strength", 0.0f, 10.0f); }
+    bool Initialize(const renderer::FeatureInitContext& ctx) override;  // 建管线、持久资源
+    void AddPasses(renderer::FrameContext& ctx) override;               // 每帧往 RenderGraph 加 pass
+    json::Value GetStatus() const override;                             // 可选：报告里的状态
+};
+namespace air::features {
+void Register_my_feature(renderer::FeatureRegistry& r) { r.Register({"my_feature", "...", [] { ... }}); }
+}
+```
+
+| 组件 | 作用 |
+|---|---|
+| `RenderFeature` | 一个自包含的渲染技术：自己的 C++、着色器、测试都在 `src/features/<name>/` |
+| `FeatureRegistry` + `air_add_feature()` | CMake 扫描 `src/features/*`，生成 `RegisterBuiltinFeatures()`；新目录即新特性 |
+| `ParameterSet` | 有类型、有范围、有说明的参数；CLI `--set feature.param=value`，报告里自动列出 |
+| `FrameRunner` | 每帧：建 RenderGraph → 导入输出纹理 → 依次调用特性 → 执行 → 收集统计/命令流/校验错误。app、测试、harness 共用这一条路径 |
+| `GpuScene` | 特性读取的场景数据（TLAS、实例、材质）；特性不拥有场景资源 |
+
+特性按添加顺序执行并写同一张输出纹理，后面的特性可以做前面结果的后处理
+（例如 `--features pathtracer,example`）。
+
+新建特性：`python3 tools/air.py new-feature <name>` 从 `src/features/example` 生成完整骨架（含测试），立即可编译可运行。
+
+---
+
+## 7. AI 迭代 harness
+
+目标：AI（或人）改一行代码后，**一条命令**就能知道"对不对、哪里不对"，不需要显卡、不需要看屏幕。
+
+| 工具 | 命令 | 输出 |
+|---|---|---|
+| 门禁 | `python3 tools/air.py check [--full]` | 每步 `ok/FAIL`，失败时附最后几十行输出；`--json` 给机器可读汇总；退出码 |
+| 单测 | `python3 tools/air.py test [filter]` | core / rhi / rdg / renderer / 各特性的测试，全部跑在 Null 后端 |
+| 渲染 | `python3 tools/air.py run -- render ... --report r.json` | JSON 报告：每帧 pass/barrier/显存复用统计、特性参数与状态、校验错误、关闭后的显存泄漏 |
+| 命令流 | `aircli render --dump-commands` | 一帧的每条 GPU 命令（barrier、dispatch、事件），带资源名 |
+| 快照 | `tests/golden/*.txt` + `air.py golden-update` | 参考场景的 RenderGraph 和命令流；任何行为变化都是可审阅的文本 diff |
+| 图像对比 | `aircli compare ref.pfm test.pfm --diff d.ppm` | rmse / psnr / 最大误差 / 差异像素比例（JSON），差异热力图 |
+| 脚手架 | `air.py new-feature <name>` | 新特性骨架 |
+| 规范 | `air.py format` / `tidy` / `layers` | 格式、静态检查（命名 + bug 类）、模块分层 |
+
+设计原则：
+
+1. **一切可文本化**：句柄可打印、命令可捕获、RenderGraph 可 dump、显存可统计、报告是 JSON。
+2. **Null 后端 + 校验**：barrier 状态错误、未声明的资源访问、usage 缺失、参数越界都会带着 pass/资源/参数名报错。
+3. **确定性**：并行录制与串行录制产生完全相同的命令流；golden 快照不含时间、线程等不稳定信息。
+4. **退出码有意义**：0 通过，1 检查失败（校验错误、泄漏、图像差异超阈值），2 用法或环境错误。
+5. **CI 跑同一套命令**：`.github/workflows/ci.yml` 调用的就是 `tools/air.py`，本地通过即 CI 通过。
+
+图像 golden 测试：`Image` 支持 PFM（线性 HDR，精确）和 PPM（8-bit 预览）。真机后端加上回读后，
+`render --screenshot` 输出 PFM，与 `tests/golden/images/` 比对；比对工具和指标已经就位。
+
+---
+
+## 8. GPU 路径追踪（离线也要快）
+
+文件：`src/features/pathtracer/`（含着色器 `shaders/` 与测试 `tests/`）。
+作为特性注册为 `pathtracer`，参数：`spp`、`maxBounces`、`targetSamples`、`exposure`。
+
+### 8.1 当前实现
 
 - 硬件光追：DXR 1.1 / `VK_KHR_ray_tracing_pipeline`，一个 raygen + miss + closest-hit。
 - **弹射循环写在 raygen 里**，`maxRecursionDepth = 1`：栈小、调度友好，是 UE Path Tracer 和大多数 GPU 离线渲染器的做法。
@@ -225,7 +294,7 @@ UE 用 shader parameter struct 让 RDG 反射出资源依赖；这里用显式 `
 - 材质：目前只有 Lambert + 自发光，天空为简单渐变；Russian roulette 从第 3 次弹射开始。
 - 着色器与 C++ 共享 `PathTracerShared.h`，push constant / 结构体布局一处定义，`static_assert` 检查大小。
 
-### 6.2 "离线也要快" 的路线图
+### 8.2 "离线也要快" 的路线图
 
 | 优先级 | 项目 | 收益 |
 |---|---|---|
@@ -239,35 +308,20 @@ UE 用 shader parameter struct 让 RDG 反射出资源依赖；这里用显式 `
 | P2 | 分块渲染（tile）避免 TDR，支持超大分辨率 | 稳定性 |
 | P2 | 运动模糊、景深、体积 | 影视化效果 |
 
-### 6.3 输出影视化视频
+### 8.3 输出影视化视频
 
 离线渲染一帧 = 循环跑帧直到收敛 → `Readback` 回读 → 写 EXR/PNG 序列 → ffmpeg 合成。
 相机路径/动画由上层脚本（后续可由 AI 生成）驱动。
 
 ---
 
-## 7. 让 AI 能写、能调、能调试
-
-这是本项目和普通渲染器最大的区别，贯穿各层设计：
-
-1. **一切可文本化**：句柄可打印、命令可捕获、RenderGraph 可 dump、显存可统计。
-   `aircli --dump-commands` 不需要显卡就能看到一帧的完整命令流。
-2. **Null 后端 + 校验**：barrier 状态错误、未声明的资源访问、usage 缺失都会带着 pass/资源名报错。
-   AI 写的 pass 先在 Null 后端跑通单元测试，再上真卡。
-3. **最少样板**：bindless + push constants + RDG 声明，新 pass 通常 20 行以内。
-4. **确定性**：并行录制与串行录制产生完全相同的命令流（有测试保证），方便比对。
-5. **后续**：截帧导出（资源内容 dump 成图片供 AI 查看）、PIX/RenderDoc 程序化抓帧、
-   以及一个 MCP/CLI 接口，让 AI 直接调用 "加载场景 → 渲染 → 回读图片 → 对比参考图"。
-
----
-
-## 8. 构建
+## 9. 构建
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build            # 或 ./build/tests/air_tests
-./build/apps/aircli/aircli --frames 2 --dump-commands
+python3 tools/air.py check                     # 配置 + 构建 + 全部检查
+python3 tools/air.py run -- render --frames 2 --dump-commands
+# 或直接用 CMake：
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build build && ctest --test-dir build
 ```
 
 | 选项 | 默认 | 说明 |
@@ -277,15 +331,15 @@ ctest --test-dir build            # 或 ./build/tests/air_tests
 | `AIR_BUILD_TESTS` | ON | 单元测试 |
 | `AIR_ENABLE_ASAN` / `AIR_ENABLE_TSAN` | OFF | 内存 / 线程错误检测 |
 
-着色器：安装 DXC 后可编译 `shaders/`（`-T lib_6_6` 出 DXIL，加 `-spirv` 出 SPIR-V），构建集成会在 D3D12 后端落地时加入。
+着色器：安装 DXC 后可编译各特性的 `shaders/`（`-T lib_6_6` 出 DXIL，加 `-spirv` 出 SPIR-V），构建集成会在 D3D12 后端落地时加入。
 
 ---
 
-## 9. 下一步
+## 10. 下一步
 
 1. D3D12 后端：设备、队列/fence、堆提供者、bindless 描述符堆、Enhanced Barriers、DXR 管线与 shader table。
 2. 着色器编译集成（DXC，CMake 自动编译 + 运行时热重载）。
 3. 场景系统：glTF 加载 → 顶点/索引 buffer → BLAS/TLAS → 实例/材质 buffer。
 4. 路径追踪 P0 项（NEE+MIS、GGX、离线模式）。
-5. 图片回读 + EXR 输出 + 序列帧渲染。
+5. 图片回读 + `render --screenshot`（PFM/EXR）+ 图像 golden 测试 + 序列帧渲染。
 6. Vulkan 后端。

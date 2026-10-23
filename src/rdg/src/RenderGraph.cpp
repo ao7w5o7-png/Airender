@@ -21,7 +21,8 @@ namespace {
 bool TextureSupports(const rhi::TextureDesc& desc, Access access) {
     auto need = [&](Access mask, TextureUsage usage) { return !Any(access & mask) || Any(desc.usage & usage); };
     return need(Access::SRVGraphics | Access::SRVCompute, TextureUsage::ShaderResource) &&
-           need(Access::UAVMask, TextureUsage::UnorderedAccess) && need(Access::RenderTarget, TextureUsage::RenderTarget) &&
+           need(Access::UAVMask, TextureUsage::UnorderedAccess) &&
+           need(Access::RenderTarget, TextureUsage::RenderTarget) &&
            need(Access::DepthRead | Access::DepthWrite, TextureUsage::DepthStencil) &&
            need(Access::CopySrc, TextureUsage::CopySrc) && need(Access::CopyDst, TextureUsage::CopyDst);
 }
@@ -55,10 +56,18 @@ std::string FlagsToString(PassFlags flags) {
 // PassBuilder / PassContext
 // ===========================================================================
 
-void PassBuilder::Read(TextureRef t, Access a) { mGraph.AddAccess(mPass, t.id, RenderGraph::ResourceKind::Texture, a, false); }
-void PassBuilder::Write(TextureRef t, Access a) { mGraph.AddAccess(mPass, t.id, RenderGraph::ResourceKind::Texture, a, true); }
-void PassBuilder::Read(BufferRef b, Access a) { mGraph.AddAccess(mPass, b.id, RenderGraph::ResourceKind::Buffer, a, false); }
-void PassBuilder::Write(BufferRef b, Access a) { mGraph.AddAccess(mPass, b.id, RenderGraph::ResourceKind::Buffer, a, true); }
+void PassBuilder::Read(TextureRef t, Access a) {
+    mGraph.AddAccess(mPass, t.id, RenderGraph::ResourceKind::Texture, a, false);
+}
+void PassBuilder::Write(TextureRef t, Access a) {
+    mGraph.AddAccess(mPass, t.id, RenderGraph::ResourceKind::Texture, a, true);
+}
+void PassBuilder::Read(BufferRef b, Access a) {
+    mGraph.AddAccess(mPass, b.id, RenderGraph::ResourceKind::Buffer, a, false);
+}
+void PassBuilder::Write(BufferRef b, Access a) {
+    mGraph.AddAccess(mPass, b.id, RenderGraph::ResourceKind::Buffer, a, true);
+}
 
 rhi::TextureHandle PassContext::Get(TextureRef texture) const {
     return mGraph.ResourceFor(mPass, texture.id, RenderGraph::ResourceKind::Texture).texture;
@@ -219,8 +228,8 @@ const RenderGraph::Resource& RenderGraph::ResourceFor(u32 passIndex, u32 id, Res
     const Pass& pass = mPasses[passIndex];
     const bool declared = std::any_of(pass.accesses.begin(), pass.accesses.end(),
                                       [&](const ResourceAccess& a) { return a.resource == id; });
-    AIR_CHECK(declared && mResources[id].kind == kind, "pass '{}' uses '{}' without declaring it in setup",
-              pass.name, id < mResources.size() ? mResources[id].name : "<invalid>");
+    AIR_CHECK(declared && mResources[id].kind == kind, "pass '{}' uses '{}' without declaring it in setup", pass.name,
+              id < mResources.size() ? mResources[id].name : "<invalid>");
     return mResources[id];
 }
 
@@ -302,9 +311,8 @@ void RenderGraph::AllocateTransientMemory() {
         order.push_back(i);
     }
     // Big resources first packs better; ties broken by first use for determinism.
-    std::stable_sort(order.begin(), order.end(), [&](u32 a, u32 b) {
-        return mResources[a].allocation.size > mResources[b].allocation.size;
-    });
+    std::stable_sort(order.begin(), order.end(),
+                     [&](u32 a, u32 b) { return mResources[a].allocation.size > mResources[b].allocation.size; });
 
     std::vector<Placed> placed;
     u64 heapSize = 0;
@@ -366,11 +374,10 @@ void RenderGraph::BuildBarriers() {
             const Access before = state[a.resource];
             if (!touched[a.resource] && !r.imported) {
                 // First use of a graph-created resource: contents are undefined (and possibly aliased).
-                add(pass.barriersBefore, pass.barrierResources, MakeBarrier(r, Access::None, a.access, true), a.resource);
-            } else if (before != a.access) {
-                add(pass.barriersBefore, pass.barrierResources, MakeBarrier(r, before, a.access, false), a.resource);
-            } else if (Any(a.access & Access::UAVMask)) {
-                // UAV -> UAV: order the writes of consecutive passes.
+                add(pass.barriersBefore, pass.barrierResources, MakeBarrier(r, Access::None, a.access, true),
+                    a.resource);
+            } else if (before != a.access || Any(a.access & Access::UAVMask)) {
+                // A state change, or UAV -> UAV to order the writes of consecutive passes.
                 add(pass.barriersBefore, pass.barrierResources, MakeBarrier(r, before, a.access, false), a.resource);
             }
             touched[a.resource] = true;
@@ -420,7 +427,8 @@ u64 RenderGraph::Execute() {
 
     // 1. Memory: one placed heap for all transient resources, committed memory for extracted ones.
     if (mStats.transientHeapSize > 0) {
-        mTransientHeap = mDevice.CreateHeap(mStats.transientHeapSize, rhi::MemoryLocation::DeviceLocal, "RDG Transient");
+        mTransientHeap =
+            mDevice.CreateHeap(mStats.transientHeapSize, rhi::MemoryLocation::DeviceLocal, "RDG Transient");
         AIR_CHECK(mTransientHeap.IsValid(), "failed to allocate {} byte transient heap", mStats.transientHeapSize);
     }
     for (Resource& r : mResources) {
@@ -476,6 +484,7 @@ u64 RenderGraph::Execute() {
     mStats.commandListCount = chunkCount;
 
     std::vector<rhi::CommandList*> raw;
+    raw.reserve(lists.size());
     for (auto& list : lists) {
         raw.push_back(list.get());
     }

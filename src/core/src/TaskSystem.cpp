@@ -56,7 +56,9 @@ thread_local const TaskSystem* tlsWorkerOwner = nullptr;
 // TaskHandle
 // ---------------------------------------------------------------------------
 
-bool TaskHandle::IsCompleted() const { return !mState || mState->done.load(std::memory_order_acquire); }
+bool TaskHandle::IsCompleted() const {
+    return !mState || mState->done.load(std::memory_order_acquire);
+}
 
 void TaskHandle::Wait() const {
     if (!mState || mState->done.load(std::memory_order_acquire)) {
@@ -90,7 +92,9 @@ TaskSystem::~TaskSystem() {
     }
 }
 
-bool TaskSystem::IsWorkerThread() const { return tlsWorkerOwner == this; }
+bool TaskSystem::IsWorkerThread() const {
+    return tlsWorkerOwner == this;
+}
 
 TaskHandle TaskSystem::Launch(std::string name, std::function<void()> fn, std::span<const TaskHandle> prerequisites,
                               TaskPriority priority) {
@@ -247,7 +251,7 @@ void TaskSystem::ParallelFor(u32 count, const std::function<void(u32)>& fn, u32 
 // Pipe
 // ---------------------------------------------------------------------------
 
-TaskHandle Pipe::Launch(std::string name, std::function<void()> fn, std::span<const TaskHandle> prerequisites,
+TaskHandle Pipe::Launch(const std::string& name, std::function<void()> fn, std::span<const TaskHandle> prerequisites,
                         TaskPriority priority) {
     std::lock_guard lock(mMutex);
     std::vector<TaskHandle> deps(prerequisites.begin(), prerequisites.end());

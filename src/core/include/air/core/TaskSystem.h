@@ -85,7 +85,7 @@ class Pipe {
 public:
     Pipe(TaskSystem& system, std::string name) : mSystem(system), mName(std::move(name)) {}
 
-    TaskHandle Launch(std::string name, std::function<void()> fn, std::span<const TaskHandle> prerequisites = {},
+    TaskHandle Launch(const std::string& name, std::function<void()> fn, std::span<const TaskHandle> prerequisites = {},
                       TaskPriority priority = TaskPriority::Normal);
     // Waits for every task launched so far.
     void WaitIdle();

@@ -105,7 +105,7 @@ public:
         u32 culledPassCount = 0;
         u32 barrierCount = 0;
         u32 transientResourceCount = 0;
-        u64 transientHeapSize = 0;     // with aliasing
+        u64 transientHeapSize = 0;       // with aliasing
         u64 transientBytesUnaliased = 0; // what it would cost without aliasing
         u32 commandListCount = 0;
     };

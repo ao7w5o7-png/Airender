@@ -1,0 +1,28 @@
+=== frame 0 graph
+RenderGraph: 2 passes (0 culled), 4 barriers, transient heap 64 KiB (unaliased 64 KiB)
+Passes:
+  [0] Example.Generate (Compute)
+      barrier Example.Pattern: None -> UAVCompute (discard)
+      write Example.Pattern as UAVCompute
+  [1] Example.Composite (Compute)
+      barrier Example.Pattern: UAVCompute -> SRVCompute
+      barrier FrameOutput: None -> UAVCompute
+      read  Example.Pattern as SRVCompute
+      write FrameOutput as UAVCompute
+Resources:
+  tex FrameOutput (imported) passes [1, 1] final SRVCompute
+  tex Example.Pattern (transient) passes [0, 1] heap offset 0 size 65536
+=== frame 0 commands
+[Graphics] Barrier [tex 'Example.Pattern' None -> UAVCompute discard]
+[Graphics] BeginEvent 'Example.Generate'
+[Graphics] SetPipeline pipeline 'Example.Generate'
+[Graphics] PushConstants 32 bytes
+[Graphics] Dispatch 8x4x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'Example.Pattern' UAVCompute -> SRVCompute] [tex 'FrameOutput' None -> UAVCompute]
+[Graphics] BeginEvent 'Example.Composite'
+[Graphics] SetPipeline pipeline 'Example.Composite'
+[Graphics] PushConstants 32 bytes
+[Graphics] Dispatch 8x4x1
+[Graphics] EndEvent
+[Graphics] Barrier [tex 'FrameOutput' UAVCompute -> SRVCompute]
