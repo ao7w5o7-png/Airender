@@ -6,16 +6,20 @@
 
 using namespace airtest;
 
-namespace {
+namespace
+{
 
-std::string Snapshot(Headless& h, int frames) {
+std::string Snapshot(Headless& h, int frames)
+{
     std::string out;
-    for (int frame = 0; frame < frames; ++frame) {
+    for (int frame = 0; frame < frames; ++frame)
+    {
         auto result = h.Frame();
         EXPECT(result.validationErrors.empty());
         out += "=== frame " + std::to_string(frame) + " graph\n" + result.graphText;
         out += "=== frame " + std::to_string(frame) + " commands\n";
-        for (const std::string& line : result.commands) {
+        for (const std::string& line : result.commands)
+        {
             out += line + '\n';
         }
     }
@@ -24,17 +28,20 @@ std::string Snapshot(Headless& h, int frames) {
 
 } // namespace
 
-TEST(Golden_PathTracer) {
+TEST(Golden_PathTracer)
+{
     Headless h({"pathtracer"});
     EXPECT(CheckGolden("pathtracer.txt", Snapshot(h, 2)));
 }
 
-TEST(Golden_Example) {
+TEST(Golden_Example)
+{
     Headless h({"example"});
     EXPECT(CheckGolden("example.txt", Snapshot(h, 1)));
 }
 
-TEST(Golden_PathTracerThenExample) {
+TEST(Golden_PathTracerThenExample)
+{
     Headless h({"pathtracer", "example"});
     EXPECT(CheckGolden("pathtracer_example.txt", Snapshot(h, 1)));
 }

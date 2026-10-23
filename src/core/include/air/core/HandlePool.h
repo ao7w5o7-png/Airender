@@ -13,9 +13,11 @@
 #include <optional>
 #include <vector>
 
-namespace air {
+namespace air
+{
 
-template <typename Tag> struct Handle {
+template <typename Tag> struct Handle
+{
     u32 index = 0;
     u32 generation = 0; // 0 == invalid
 
@@ -24,17 +26,22 @@ template <typename Tag> struct Handle {
     friend bool operator==(Handle, Handle) = default;
 };
 
-template <typename Tag, typename T> class HandlePool {
+template <typename Tag, typename T> class HandlePool
+{
 public:
     using HandleType = Handle<Tag>;
 
-    template <typename... Args> HandleType Allocate(Args&&... args) {
+    template <typename... Args> HandleType Allocate(Args&&... args)
+    {
         std::lock_guard lock(mMutex);
         u32 index;
-        if (!mFreeList.empty()) {
+        if (!mFreeList.empty())
+        {
             index = mFreeList.back();
             mFreeList.pop_back();
-        } else {
+        }
+        else
+        {
             index = u32(mSlots.size());
             mSlots.emplace_back(); // deque: element addresses stay stable on growth
         }
@@ -44,7 +51,8 @@ public:
         return {index, slot.generation};
     }
 
-    void Free(HandleType handle) {
+    void Free(HandleType handle)
+    {
         std::lock_guard lock(mMutex);
         Slot* slot = Lookup(handle);
         AIR_CHECK(slot, "freeing invalid or stale handle (index {}, gen {})", handle.index, handle.generation);
@@ -54,37 +62,60 @@ public:
         --mLiveCount;
     }
 
-    T* Get(HandleType handle) {
+    T* Get(HandleType handle)
+    {
         std::lock_guard lock(mMutex);
         Slot* slot = Lookup(handle);
         return slot && slot->value.has_value() ? &slot->value.value() : nullptr;
     }
 
+    // Calls fn(value) for a live element while holding the pool lock, so that ForEach sees the
+    // change atomically. Returns false for an invalid or stale handle. fn must not call back into
+    // this pool.
+    template <typename Fn> bool Modify(HandleType handle, Fn&& fn)
+    {
+        std::lock_guard lock(mMutex);
+        Slot* slot = Lookup(handle);
+        if (!slot)
+        {
+            return false;
+        }
+        fn(*slot->value);
+        return true;
+    }
+
     // Calls fn(handle, value) for every live element while holding the pool lock: fn must not
     // call back into this pool.
-    template <typename Fn> void ForEach(Fn&& fn) const {
+    template <typename Fn> void ForEach(Fn&& fn) const
+    {
         std::lock_guard lock(mMutex);
-        for (u32 i = 0; i < mSlots.size(); ++i) {
+        for (u32 i = 0; i < mSlots.size(); ++i)
+        {
             const Slot& slot = mSlots[i];
-            if (slot.value.has_value()) {
+            if (slot.value.has_value())
+            {
                 fn(HandleType{i, slot.generation}, *slot.value);
             }
         }
     }
 
-    u32 LiveCount() const {
+    u32 LiveCount() const
+    {
         std::lock_guard lock(mMutex);
         return mLiveCount;
     }
 
 private:
-    struct Slot {
+    struct Slot
+    {
         u32 generation = 1;
         std::optional<T> value;
     };
 
-    Slot* Lookup(HandleType handle) {
-        if (!handle.IsValid() || handle.index >= mSlots.size()) {
+    Slot* Lookup(HandleType handle)
+    {
+        if (!handle.IsValid() || handle.index >= mSlots.size())
+        {
             return nullptr;
         }
         Slot& slot = mSlots[handle.index];

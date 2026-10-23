@@ -9,17 +9,20 @@
 #include <format>
 #include <numbers>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
 using rhi::Access;
 using rhi::Barrier;
 using rhi::BufferUsage;
 using rhi::MemoryLocation;
 
-namespace {
+namespace
+{
 
 // Rows of the inverse transpose of the upper 3x3 (cofactor matrix / determinant).
-void NormalMatrix(const float m[3][4], hlsl::float4 out[3]) {
+void NormalMatrix(const float m[3][4], hlsl::float4 out[3])
+{
     const float3 r0(m[0][0], m[0][1], m[0][2]);
     const float3 r1(m[1][0], m[1][1], m[1][2]);
     const float3 r2(m[2][0], m[2][1], m[2][2]);
@@ -34,11 +37,13 @@ void NormalMatrix(const float m[3][4], hlsl::float4 out[3]) {
     out[2] = {c2 * inv, 0.0f};
 }
 
-hlsl::float4 Row(const float m[3][4], int r) {
+hlsl::float4 Row(const float m[3][4], int r)
+{
     return {m[r][0], m[r][1], m[r][2], m[r][3]};
 }
 
-void WriteBuffer(rhi::Device& device, rhi::BufferHandle buffer, const void* data, u64 size) {
+void WriteBuffer(rhi::Device& device, rhi::BufferHandle buffer, const void* data, u64 size)
+{
     void* mapped = device.GetMappedPointer(buffer);
     AIR_CHECK(mapped, "buffer is not host visible");
     std::memcpy(mapped, data, size);
@@ -46,28 +51,49 @@ void WriteBuffer(rhi::Device& device, rhi::BufferHandle buffer, const void* data
 
 } // namespace
 
-float3 TransformPoint(const float m[3][4], float3 p) {
+float3 TransformPoint(const float m[3][4], float3 p)
+{
     return {m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3],
             m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3],
             m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3]};
 }
 
-std::vector<u32> FirstLightIndices(const SceneDesc& desc) {
+namespace
+{
+
+float EmittedLuminance(const SceneDesc& desc, const Instance& instance)
+{
+    return hlsl::dot(desc.materials[instance.material].ToGpu().emission, float3(0.2126f, 0.7152f, 0.0722f));
+}
+
+} // namespace
+
+std::vector<u32> FirstLightIndices(const SceneDesc& desc)
+{
     std::vector<u32> first;
     u32 next = 0;
-    for (const Instance& instance : desc.instances) {
-        first.push_back(next);
-        next += u32(desc.meshes[instance.mesh].indices.size() / 3);
+    for (const Instance& instance : desc.instances)
+    {
+        if (EmittedLuminance(desc, instance) > 0.0f)
+        {
+            first.push_back(next);
+            next += u32(desc.meshes[instance.mesh].indices.size() / 3);
+        }
+        else
+        {
+            first.push_back(gpu::kInvalidIndex);
+        }
     }
     return first;
 }
 
-gpu::InstanceData MakeInstanceData(const Instance& in, u32 firstLight, u32 vertexBuffer, u32 indexBuffer) {
+gpu::InstanceData MakeInstanceData(const Instance& in, u32 vertexBuffer, u32 indexBuffer)
+{
     gpu::InstanceData data;
     data.vertexBuffer = vertexBuffer;
     data.indexBuffer = indexBuffer;
     data.materialIndex = in.material;
-    data.firstLight = firstLight;
+    data.reserved = gpu::kInvalidIndex;
     data.objectToWorld0 = Row(in.transform, 0);
     data.objectToWorld1 = Row(in.transform, 1);
     data.objectToWorld2 = Row(in.transform, 2);
@@ -80,15 +106,22 @@ gpu::InstanceData MakeInstanceData(const Instance& in, u32 firstLight, u32 verte
 }
 
 // Probability proportional to emitted power, so bright and large emitters get most light samples.
-std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, double* totalPowerOut) {
+std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, double* totalPowerOut)
+{
     std::vector<gpu::LightTriangle> lights;
     double totalPower = 0.0;
-    for (size_t i = 0; i < desc.instances.size(); ++i) {
+    for (size_t i = 0; i < desc.instances.size(); ++i)
+    {
         const Instance& in = desc.instances[i];
         const Mesh& mesh = desc.meshes[in.mesh];
         const gpu::MaterialData material = desc.materials[in.material].ToGpu();
-        const float luminance = hlsl::dot(material.emission, float3(0.2126f, 0.7152f, 0.0722f));
-        for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const float luminance = EmittedLuminance(desc, in);
+        if (luminance <= 0.0f)
+        {
+            continue; // not in the list (FirstLightIndices maps it to kInvalidIndex)
+        }
+        for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3)
+        {
             gpu::LightTriangle light;
             const float3 p0 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t]].position);
             const float3 p1 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t + 1]].position);
@@ -98,71 +131,123 @@ std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, doubl
             light.e2 = p2 - p0;
             light.area = 0.5f * hlsl::length(hlsl::cross(light.e1, light.e2));
             light.radiance = material.emission;
-            light.instance = u32(i);
             // Power of a one-sided Lambertian emitter, L * A * pi; normalized below.
             light.probability = luminance * light.area * std::numbers::pi_v<float>;
             totalPower += light.probability;
             lights.push_back(light);
         }
     }
-    double cdf = 0.0;
-    for (gpu::LightTriangle& light : lights) {
-        light.probability = totalPower > 0.0 ? float(light.probability / totalPower) : 0.0f;
-        cdf += light.probability;
-        light.cdf = float(cdf);
+    // Normalize, then build the alias table (Vose): every entry ends up with a threshold and an alias
+    // such that drawing an entry uniformly and keeping it with probability `aliasThreshold` selects
+    // light j with exactly probability[j]. Doubles keep the redistribution exact for large lists.
+    const size_t count = lights.size();
+    std::vector<double> scaled(count);
+    std::vector<u32> small;
+    std::vector<u32> large;
+    for (size_t i = 0; i < count; ++i)
+    {
+        const double p = totalPower > 0.0 ? lights[i].probability / totalPower : 0.0;
+        lights[i].probability = float(p);
+        lights[i].aliasThreshold = 1.0f;
+        lights[i].alias = u32(i);
+        scaled[i] = p * double(count);
+        (scaled[i] < 1.0 ? small : large).push_back(u32(i));
     }
-    if (!lights.empty() && totalPower > 0.0) {
-        lights.back().cdf = 1.0f; // no rounding gap at the end
+    while (!small.empty() && !large.empty())
+    {
+        const u32 s = small.back();
+        small.pop_back();
+        const u32 l = large.back();
+        lights[s].aliasThreshold = float(scaled[s]);
+        lights[s].alias = l;
+        scaled[l] -= 1.0 - scaled[s];
+        if (scaled[l] < 1.0)
+        {
+            large.pop_back();
+            small.push_back(l);
+        }
     }
-    if (totalPowerOut) {
+    // Whatever is left is 1 up to rounding: keep itself.
+    for (u32 i : small)
+    {
+        lights[i].aliasThreshold = 1.0f;
+    }
+    for (u32 i : large)
+    {
+        lights[i].aliasThreshold = 1.0f;
+    }
+    if (totalPowerOut)
+    {
         *totalPowerOut = totalPower;
     }
     return lights;
 }
 
-Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::move(desc)) {
+Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::move(desc))
+{
     const std::string problem = Validate(mDesc);
     AIR_CHECK(problem.empty(), "scene '{}': {}", mDesc.name, problem);
     Upload();
     const u32 slots = mDevice.GetFramesInFlight() + 1;
-    for (u32 i = 0; i < slots; ++i) {
+    for (u32 i = 0; i < slots; ++i)
+    {
         mMaterialRing.push_back(mDevice.CreateBuffer({.size = mDesc.materials.size() * sizeof(gpu::MaterialData),
                                                       .stride = sizeof(gpu::MaterialData),
                                                       .usage = BufferUsage::ShaderResource,
-                                                      .memory = MemoryLocation::Upload,
+                                                      .memory = MemoryLocation::DeviceLocalHost,
                                                       .debugName = std::format("{}.Materials[{}]", mDesc.name, i)}));
     }
     mLightRing.assign(slots, {});
     mLightRingCapacity.assign(slots, 0);
+    for (u32 i = 0; i < slots; ++i)
+    {
+        mInstanceLightRing.push_back(
+            mDevice.CreateBuffer({.size = mDesc.instances.size() * sizeof(u32),
+                                  .stride = sizeof(u32),
+                                  .usage = BufferUsage::ShaderResource,
+                                  .memory = MemoryLocation::DeviceLocalHost,
+                                  .debugName = std::format("{}.InstanceLights[{}]", mDesc.name, i)}));
+    }
     mGpu.environment = mDesc.environment;
     Update();
 }
 
-Scene::~Scene() {
-    for (GpuMesh& mesh : mMeshes) {
+Scene::~Scene()
+{
+    for (GpuMesh& mesh : mMeshes)
+    {
         mDevice.DestroyBuffer(mesh.vertices);
         mDevice.DestroyBuffer(mesh.indices);
         mDevice.DestroyAccelStruct(mesh.blas);
     }
-    for (rhi::BufferHandle buffer : mMaterialRing) {
+    for (rhi::BufferHandle buffer : mMaterialRing)
+    {
         mDevice.DestroyBuffer(buffer);
     }
-    for (rhi::BufferHandle buffer : mLightRing) {
-        if (buffer.IsValid()) {
+    for (rhi::BufferHandle buffer : mLightRing)
+    {
+        if (buffer.IsValid())
+        {
             mDevice.DestroyBuffer(buffer);
         }
+    }
+    for (rhi::BufferHandle buffer : mInstanceLightRing)
+    {
+        mDevice.DestroyBuffer(buffer);
     }
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
 }
 
-void Scene::Upload() {
+void Scene::Upload()
+{
     AIR_PROFILE_SCOPE("Scene.Upload");
     const BufferUsage geometryUsage =
         BufferUsage::ShaderResource | BufferUsage::AccelStructBuildInput | BufferUsage::CopyDst;
     // One staging buffer for all geometry and instance data.
     u64 stagingSize = mDesc.instances.size() * sizeof(gpu::InstanceData);
-    for (const Mesh& mesh : mDesc.meshes) {
+    for (const Mesh& mesh : mDesc.meshes)
+    {
         stagingSize += mesh.vertices.size() * sizeof(gpu::Vertex) + mesh.indices.size() * sizeof(u32);
     }
     const rhi::BufferHandle staging = mDevice.CreateBuffer({.size = stagingSize,
@@ -177,7 +262,8 @@ void Scene::Upload() {
     cmd->Begin();
     cmd->BeginEvent("Scene.Upload");
     std::vector<Barrier> toShaderRead;
-    auto uploadBuffer = [&](const void* data, u64 size, u32 stride, BufferUsage usage, std::string name) {
+    auto uploadBuffer = [&](const void* data, u64 size, u32 stride, BufferUsage usage, std::string name)
+    {
         const rhi::BufferHandle buffer =
             mDevice.CreateBuffer({.size = size, .stride = stride, .usage = usage, .debugName = std::move(name)});
         AIR_CHECK(buffer.IsValid(), "out of device memory uploading scene '{}'", mDesc.name);
@@ -191,7 +277,8 @@ void Scene::Upload() {
     };
 
     u64 scratchSize = 0;
-    for (const Mesh& mesh : mDesc.meshes) {
+    for (const Mesh& mesh : mDesc.meshes)
+    {
         GpuMesh gpu;
         gpu.vertices = uploadBuffer(mesh.vertices.data(), mesh.vertices.size() * sizeof(gpu::Vertex),
                                     sizeof(gpu::Vertex), geometryUsage, mesh.name + ".Vertices");
@@ -213,10 +300,10 @@ void Scene::Upload() {
 
     std::vector<gpu::InstanceData> instances;
     std::vector<rhi::TlasInstance> tlasInstances;
-    const std::vector<u32> firstLights = FirstLightIndices(mDesc);
-    for (size_t i = 0; i < mDesc.instances.size(); ++i) {
+    for (size_t i = 0; i < mDesc.instances.size(); ++i)
+    {
         const Instance& in = mDesc.instances[i];
-        instances.push_back(MakeInstanceData(in, firstLights[i], mDevice.GetBindlessSRV(mMeshes[in.mesh].vertices),
+        instances.push_back(MakeInstanceData(in, mDevice.GetBindlessSRV(mMeshes[in.mesh].vertices),
                                              mDevice.GetBindlessSRV(mMeshes[in.mesh].indices)));
         rhi::TlasInstance tlas;
         std::memcpy(tlas.transform, in.transform, sizeof(tlas.transform));
@@ -237,7 +324,8 @@ void Scene::Upload() {
                                                             .debugName = mDesc.name + ".BuildScratch"});
     cmd->Barriers(std::array{Barrier::Buf(scratch, Access::None, Access::UAVCompute)});
     // Builds that share the scratch buffer are serialized by the UAV barrier each build ends with.
-    for (const GpuMesh& mesh : mMeshes) {
+    for (const GpuMesh& mesh : mMeshes)
+    {
         cmd->BuildBlas(mesh.blas, scratch);
     }
     cmd->BuildTlas(mGpu.tlas, tlasInstances, scratch);
@@ -252,23 +340,29 @@ void Scene::Upload() {
     mGpu.instances = mInstances;
 }
 
-void Scene::SetMaterial(u32 index, const Material& material) {
+void Scene::SetMaterial(u32 index, const Material& material)
+{
     AIR_CHECK(index < mDesc.materials.size(), "SetMaterial: index {} out of range", index);
-    if (!(mDesc.materials[index] == material)) {
+    if (!(mDesc.materials[index] == material))
+    {
         mDesc.materials[index] = material;
         mDirty = true;
     }
 }
 
-void Scene::SetEnvironment(float3 radiance) {
-    if (!(mDesc.environment == radiance)) {
+void Scene::SetEnvironment(float3 radiance)
+{
+    if (!(mDesc.environment == radiance))
+    {
         mDesc.environment = radiance;
         mDirty = true;
     }
 }
 
-void Scene::Update() {
-    if (!mDirty) {
+void Scene::Update()
+{
+    if (!mDirty)
+    {
         return;
     }
     mRingSlot = (mRingSlot + 1) % u32(mMaterialRing.size());
@@ -278,11 +372,13 @@ void Scene::Update() {
     mDirty = false;
 }
 
-void Scene::WriteDynamicData() {
+void Scene::WriteDynamicData()
+{
     AIR_PROFILE_SCOPE("Scene.WriteDynamicData");
     std::vector<gpu::MaterialData> materials;
     materials.reserve(mDesc.materials.size());
-    for (const Material& m : mDesc.materials) {
+    for (const Material& m : mDesc.materials)
+    {
         materials.push_back(m.ToGpu());
     }
     WriteBuffer(mDevice, mMaterialRing[mRingSlot], materials.data(), materials.size() * sizeof(gpu::MaterialData));
@@ -290,25 +386,31 @@ void Scene::WriteDynamicData() {
 
     double totalPower = 0.0;
     std::vector<gpu::LightTriangle> lights = BuildLightTriangles(mDesc, &totalPower);
-    if (lights.empty()) {
+    if (lights.empty())
+    {
         lights.emplace_back(); // keep a valid buffer to bind
     }
 
     const u64 bytes = lights.size() * sizeof(gpu::LightTriangle);
-    if (mLightRingCapacity[mRingSlot] < lights.size()) {
-        if (mLightRing[mRingSlot].IsValid()) {
+    if (mLightRingCapacity[mRingSlot] < lights.size())
+    {
+        if (mLightRing[mRingSlot].IsValid())
+        {
             mDevice.DestroyBuffer(mLightRing[mRingSlot]); // deferred until the GPU is done with it
         }
         mLightRing[mRingSlot] =
             mDevice.CreateBuffer({.size = bytes,
                                   .stride = sizeof(gpu::LightTriangle),
                                   .usage = BufferUsage::ShaderResource,
-                                  .memory = MemoryLocation::Upload,
+                                  .memory = MemoryLocation::DeviceLocalHost,
                                   .debugName = std::format("{}.Lights[{}]", mDesc.name, mRingSlot)});
         mLightRingCapacity[mRingSlot] = u32(lights.size());
     }
     WriteBuffer(mDevice, mLightRing[mRingSlot], lights.data(), bytes);
     mGpu.lights = mLightRing[mRingSlot];
+    const std::vector<u32> firstLights = FirstLightIndices(mDesc);
+    WriteBuffer(mDevice, mInstanceLightRing[mRingSlot], firstLights.data(), firstLights.size() * sizeof(u32));
+    mGpu.instanceLights = mInstanceLightRing[mRingSlot];
     mGpu.lightCount = totalPower > 0.0 ? u32(lights.size()) : 0u;
     mGpu.lightPower = float(totalPower);
 }

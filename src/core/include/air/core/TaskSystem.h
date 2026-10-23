@@ -20,14 +20,22 @@
 #include <thread>
 #include <vector>
 
-namespace air {
+namespace air
+{
 
-enum class TaskPriority : u8 { High = 0, Normal = 1, Background = 2, Count = 3 };
+enum class TaskPriority : u8
+{
+    High = 0,
+    Normal = 1,
+    Background = 2,
+    Count = 3
+};
 
 class TaskSystem;
 struct TaskState;
 
-class TaskHandle {
+class TaskHandle
+{
 public:
     TaskHandle() = default;
 
@@ -42,7 +50,8 @@ private:
     std::shared_ptr<TaskState> mState;
 };
 
-class TaskSystem {
+class TaskSystem
+{
 public:
     // workerCount == 0 picks hardware_concurrency() - 1 (at least 1).
     explicit TaskSystem(u32 workerCount = 0);
@@ -81,7 +90,8 @@ private:
 };
 
 // Executes tasks launched through it one at a time, in launch order.
-class Pipe {
+class Pipe
+{
 public:
     Pipe(TaskSystem& system, std::string name) : mSystem(system), mName(std::move(name)) {}
 

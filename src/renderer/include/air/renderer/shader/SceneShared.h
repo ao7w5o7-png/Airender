@@ -8,20 +8,23 @@
 #include "air/renderer/shader/HlslCompat.h"
 
 #ifdef __cplusplus
-namespace air::gpu {
+namespace air::gpu
+{
 using namespace air::hlsl;
 #endif
 
 AIR_CONST uint kInvalidIndex = 0xFFFFFFFFu;
 
-struct Vertex {
+struct Vertex
+{
     float3 position; // object space
     float u;
     float3 normal; // object space, normalized
     float v;
 };
 
-struct MaterialData {
+struct MaterialData
+{
     float3 baseColor; // linear albedo (dielectric) or F0 (metal)
     float roughness;  // perceptual
     float3 emission;  // emitted radiance, nits
@@ -29,11 +32,12 @@ struct MaterialData {
 };
 
 // One TLAS instance. InstanceID() indexes this array.
-struct InstanceData {
+struct InstanceData
+{
     uint vertexBuffer; // bindless StructuredBuffer<Vertex>
     uint indexBuffer;  // bindless StructuredBuffer<uint>
     uint materialIndex;
-    uint firstLight; // index of triangle 0 in the light list, kInvalidIndex when not emissive
+    uint reserved; // the light-list offset changes with materials: GpuScene::instanceLights
     // Row-major 3x4 object-to-world transform and the 3x3 inverse transpose for normals.
     float4 objectToWorld0;
     float4 objectToWorld1;
@@ -44,15 +48,18 @@ struct InstanceData {
 };
 
 // An emissive triangle in world space, chosen for next event estimation proportionally to power.
-struct LightTriangle {
+// The list doubles as a Walker/Vose alias table, so choosing a light is O(1): draw entry i
+// uniformly, keep it if a second uniform is below aliasThreshold, otherwise take entry `alias`.
+struct LightTriangle
+{
     float3 p0;
     float area;
     float3 e1;         // p1 - p0; the emitting side is cross(e1, e2)
     float probability; // of being chosen
     float3 e2;         // p2 - p0
-    float cdf;         // inclusive prefix sum of probability
+    float aliasThreshold;
     float3 radiance;
-    uint instance;
+    uint alias;
 };
 
 #ifdef __cplusplus

@@ -8,6 +8,8 @@
 //   * CommandList: NOT thread-safe. One thread records one list at a time. Record different lists
 //     on different threads in parallel and submit them in the order you want them executed.
 //   * Submit(): thread-safe; submissions to one queue are serialised in call order.
+//   * Queues run concurrently. Work on one queue that depends on another's waits for it on the GPU
+//     with QueueWait(); the render graph inserts those waits for async compute passes.
 
 #include "air/rhi/GpuMemoryAllocator.h"
 #include "air/rhi/RHITypes.h"
@@ -18,9 +20,11 @@
 #include <string_view>
 #include <vector>
 
-namespace air::rhi {
+namespace air::rhi
+{
 
-class CommandList {
+class CommandList
+{
 public:
     virtual ~CommandList() = default;
 
@@ -62,7 +66,8 @@ public:
     virtual void* GetNativeHandle() = 0;
 };
 
-struct SwapchainDesc {
+struct SwapchainDesc
+{
     void* window = nullptr; // HWND on Windows; ignored by the Null backend
     u32 width = 0;
     u32 height = 0;
@@ -72,7 +77,8 @@ struct SwapchainDesc {
 };
 
 // Presentation surface. Not thread-safe: use it from the thread that owns the frame loop.
-class Swapchain {
+class Swapchain
+{
 public:
     virtual ~Swapchain() = default;
 
@@ -87,7 +93,8 @@ public:
 };
 
 // Objects handed to third-party SDKs (ImGui, DLSS). nullptr when the backend has no such object.
-enum class NativeObject : u8 {
+enum class NativeObject : u8
+{
     Device,                 // ID3D12Device5* / VkDevice
     Adapter,                // IDXGIAdapter1* / VkPhysicalDevice
     GraphicsQueue,          // ID3D12CommandQueue* / VkQueue
@@ -95,12 +102,14 @@ enum class NativeObject : u8 {
 };
 
 // CPU / GPU descriptor handles (D3D12_CPU_DESCRIPTOR_HANDLE::ptr, D3D12_GPU_DESCRIPTOR_HANDLE::ptr).
-struct DescriptorHandles {
+struct DescriptorHandles
+{
     u64 cpu = 0;
     u64 gpu = 0;
 };
 
-struct DeviceDesc {
+struct DeviceDesc
+{
     Backend backend = Backend::Null;
     bool enableValidation = true;     // D3D12 debug layer / Vulkan validation layers
     bool enableGpuValidation = false; // D3D12 GPU-based validation (slow, catches bindless misuse)
@@ -109,12 +118,14 @@ struct DeviceDesc {
 };
 
 // What the OS says about video memory (DXGI QueryVideoMemoryInfo / VK_EXT_memory_budget).
-struct MemoryBudget {
+struct MemoryBudget
+{
     u64 budgetBytes = 0; // how much the process may use before the OS starts demoting
     u64 usageBytes = 0;  // what the process uses right now (all allocations, not just ours)
 };
 
-struct MemoryStats {
+struct MemoryStats
+{
     GpuMemoryAllocator::Stats perLocation[size_t(MemoryLocation::Count)];
     std::vector<GpuMemoryAllocator::PoolStats> pools; // per memory type, per heap block
     MemoryBudget local;                               // VRAM
@@ -128,8 +139,15 @@ struct MemoryStats {
 };
 
 // One live GPU resource, for memory inspection.
-struct ResourceInfo {
-    enum class Kind : u8 { Buffer, Texture, AccelStruct, Heap };
+struct ResourceInfo
+{
+    enum class Kind : u8
+    {
+        Buffer,
+        Texture,
+        AccelStruct,
+        Heap
+    };
     Kind kind = Kind::Buffer;
     std::string name;
     u64 sizeBytes = 0;
@@ -138,20 +156,30 @@ struct ResourceInfo {
 };
 
 // GPU duration of one BeginEvent/EndEvent scope.
-struct GpuTimingScope {
+struct GpuTimingScope
+{
     std::string name;
-    u32 depth = 0;        // nesting level
-    double beginMs = 0.0; // relative to the frame's first timestamp
+    QueueType queue = QueueType::Graphics; // scopes on different queues may overlap in time
+    u32 depth = 0;                         // nesting level within its queue
+    double beginMs = 0.0;                  // relative to the frame's first timestamp
     double durationMs = 0.0;
 };
 
-struct GpuFrameTimings {
+struct GpuFrameTimings
+{
     u64 frameIndex = ~0ull; // ~0: nothing measured yet
     double frameMs = 0.0;   // first timestamp to last timestamp
+    // Time some queue was inside a scope: frameMs without the gaps where queues waited, for another
+    // queue or for a swapchain buffer (at vsync, a submission that writes one waits on the GPU).
+    double busyMs = 0.0;
     std::vector<GpuTimingScope> scopes;
 };
 
-class Device {
+// The time covered by at least one scope (the union of their intervals, any queue or depth).
+double ComputeBusyMs(std::span<const GpuTimingScope> scopes);
+
+class Device
+{
 public:
     virtual ~Device() = default;
 
@@ -211,6 +239,9 @@ public:
     virtual std::unique_ptr<CommandList> CreateCommandList(QueueType queue) = 0;
     // Returns a fence value that completes when the GPU finished these lists.
     virtual u64 Submit(QueueType queue, std::span<CommandList* const> lists) = 0;
+    // GPU-side wait, no CPU blocking: work submitted to `waiter` after this call starts once
+    // `signaler` has completed `fenceValue` (a value Submit() returned for that queue).
+    virtual void QueueWait(QueueType waiter, QueueType signaler, u64 fenceValue) = 0;
     virtual bool IsFenceComplete(QueueType queue, u64 fenceValue) = 0;
     virtual void WaitForFence(QueueType queue, u64 fenceValue) = 0;
     virtual void WaitIdle() = 0;

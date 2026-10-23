@@ -2,7 +2,8 @@
 
 using namespace airtest;
 
-TEST(Tonemap_RunsInPlaceAfterPathTracer) {
+TEST(Tonemap_RunsInPlaceAfterPathTracer)
+{
     Headless h({"pathtracer", "tonemap"});
     const auto result = h.Frame();
     EXPECT(result.validationErrors.empty());
@@ -10,7 +11,8 @@ TEST(Tonemap_RunsInPlaceAfterPathTracer) {
     EXPECT(result.graphText.find("Tonemap") != std::string::npos);
 }
 
-TEST(Tonemap_RejectsUnknownOperator) {
+TEST(Tonemap_RejectsUnknownOperator)
+{
     Headless h({"tonemap"});
     std::string error;
     EXPECT(!h.runner->SetParameter("tonemap.operator", "7", &error));

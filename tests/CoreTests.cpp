@@ -7,20 +7,26 @@
 
 using namespace air;
 
-TEST(Json_DumpIsDeterministicAndEscaped) {
+TEST(Json_DumpIsDeterministicAndEscaped)
+{
     json::Value v;
     v["b"] = 2;
     v["a"] = "quote\" newline\n";
     v["list"].Push(true);
     v["list"].Push(1.5);
     v["list"].Push(nullptr);
-    EXPECT(v.Dump(0) == R"({"a":"quote\" newline\n","b":2,"list":[true,1.5,null]})");
+    // Kept out of EXPECT: MSVC mis-stringizes raw string literals containing \" in macro arguments.
+    constexpr const char* kExpected = R"({"a":"quote\" newline\n","b":2,"list":[true,1.5,null]})";
+    EXPECT(v.Dump(0) == kExpected);
 }
 
-TEST(Image_PfmAndPpmRoundTrip) {
+TEST(Image_PfmAndPpmRoundTrip)
+{
     Image image(5, 3);
-    for (u32 y = 0; y < 3; ++y) {
-        for (u32 x = 0; x < 5; ++x) {
+    for (u32 y = 0; y < 3; ++y)
+    {
+        for (u32 x = 0; x < 5; ++x)
+        {
             float* p = image.At(x, y);
             p[0] = float(x) / 4.0f;
             p[1] = float(y) / 2.0f;
@@ -39,7 +45,8 @@ TEST(Image_PfmAndPpmRoundTrip) {
     EXPECT(ppm && CompareImages(image, *ppm, {.pixelThreshold = 0.02f, .maxRmse = 0.01f}).passed);
 }
 
-TEST(Image_CompareReportsDifferences) {
+TEST(Image_CompareReportsDifferences)
+{
     Image a(4, 4), b(4, 4);
     b.At(1, 1)[0] = 1.0f;
     const auto result = CompareImages(a, b, {.pixelThreshold = 0.1f, .maxRmse = 1.0f, .maxDifferingFraction = 0.0f});

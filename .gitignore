@@ -8,3 +8,4 @@ out/
 *.spv
 compile_commands.json
 .deps/
+__pycache__/

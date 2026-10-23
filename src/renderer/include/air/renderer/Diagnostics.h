@@ -8,7 +8,8 @@
 #include "air/core/Profiler.h"
 #include "air/rhi/RHIDevice.h"
 
-namespace air::renderer {
+namespace air::renderer
+{
 
 json::Value ToJson(const rhi::MemoryStats& stats);
 json::Value ToJson(const rhi::GpuFrameTimings& timings);

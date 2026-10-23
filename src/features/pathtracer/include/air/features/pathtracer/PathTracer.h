@@ -18,9 +18,11 @@
 #include <filesystem>
 #include <optional>
 
-namespace air::pt {
+namespace air::pt
+{
 
-struct PathTracerSettings {
+struct PathTracerSettings
+{
     u32 width = 1920;
     u32 height = 1080;
     u32 samplesPerPixelPerFrame = 4; // raise for offline throughput, lower for interactive preview
@@ -34,9 +36,15 @@ struct PathTracerSettings {
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap
+    // Length of the Halton(2, 3) jitter sequence used with accumulate=false. Fixed after Initialize().
+    u32 jitterPhases = 32;
+    // DXR 1.2 shader execution reordering when the device actually reorders. Off by default: with
+    // this kernel's cheap shading the reorder costs more than it saves (docs/architecture.md §8.2).
+    bool shaderExecutionReordering = false;
 };
 
-class PathTracer {
+class PathTracer
+{
 public:
     PathTracer(rhi::Device& device, const PathTracerSettings& settings);
     ~PathTracer();
@@ -56,6 +64,11 @@ public:
                    renderer::Blackboard& blackboard, rdg::TextureRef output);
 
     u32 GetAccumulatedSamples() const { return mAccumulatedSamples; }
+    // True when this frame's trace uses the shader execution reordering pipeline.
+    bool UsesShaderExecutionReordering() const
+    {
+        return mSettings.shaderExecutionReordering && mTracePipelineSer.IsValid();
+    }
     bool IsConverged() const { return mSettings.accumulate && mAccumulatedSamples >= mSettings.targetSamples; }
     const PathTracerSettings& GetSettings() const { return mSettings; }
     // Settings other than width/height may change between frames.
@@ -69,6 +82,7 @@ private:
     u64 mLastSceneVersion = ~0ull;
 
     rhi::PipelineHandle mTracePipeline;
+    rhi::PipelineHandle mTracePipelineSer; // PathTracerSer.lib (SM 6.9), when the device reorders
     rhi::PipelineHandle mResolvePipeline;
     rhi::TextureHandle mAccumulation;
     rhi::Access mAccumulationAccess = rhi::Access::None;

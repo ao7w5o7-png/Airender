@@ -8,6 +8,7 @@ unambiguous answer (every step prints `ok` / `FAIL`, the exit code is non-zero o
     python3 tools/air.py check              # format + layering + build + tests (the pre-push gate)
     python3 tools/air.py check --full       # + clang-tidy + ThreadSanitizer run
     python3 tools/air.py test [filter]      # build and run unit tests (substring filter)
+    python3 tools/air.py shaders [filter]   # compile every HLSL shader with the build's dxc commands
     python3 tools/air.py run -- render --features pathtracer --frames 2 --report out/report.json
     python3 tools/air.py golden-update      # rewrite tests/golden/* after an intended change
     python3 tools/air.py new-feature bloom  # scaffold src/features/bloom from the example feature
@@ -133,14 +134,59 @@ def test(preset: str, test_filter: str | None, env: dict | None = None) -> bool:
     return run_step(f"test[{preset}]" + (f"({test_filter})" if test_filter else ""), cmd, env=env, tail=120)
 
 
+HLSL_SUFFIXES = {".hlsl", ".hlsli"}
+HLSL_ELSE_RE = re.compile(r"^(\s*)\}\s*(else\b.*?)\s*\{\s*$")
+HLSL_OPEN_RE = re.compile(r"^(\s*)(\S.*?)\s*\{\s*$")
+
+
+def hlsl_files() -> list[Path]:
+    return sorted(p for d in ["src"] for p in (ROOT / d).rglob("*") if p.suffix in HLSL_SUFFIXES)
+
+
+def hlsl_brace_lines(lines: list[str]) -> list[str]:
+    """Allman braces for HLSL, which clang-format cannot parse: a block brace that ends a line of
+    code moves onto its own line, `} else {` becomes three lines. Nothing else changes."""
+    out = []
+    for line in lines:
+        match = HLSL_ELSE_RE.match(line)
+        if match:
+            out += [f"{match[1]}}}", f"{match[1]}{match[2]}", f"{match[1]}{{"]
+            continue
+        match = HLSL_OPEN_RE.match(line)
+        if match and not match[2].startswith("//") and not match[2].endswith(("=", "(", ",")):
+            out += [f"{match[1]}{match[2]}", f"{match[1]}{{"]
+            continue
+        out.append(line)
+    return out
+
+
+def format_hlsl(check: bool) -> bool:
+    problems = []
+    for path in hlsl_files():
+        lines = path.read_text(encoding="utf-8").split("\n")
+        fixed = hlsl_brace_lines(lines)
+        if fixed == lines:
+            continue
+        if check:
+            first = next(i for i, (a, b) in enumerate(zip(lines, fixed)) if a != b)
+            problems.append(f"{path.relative_to(ROOT)}:{first + 1}: opening brace must be on its own line")
+        else:
+            path.write_text("\n".join(fixed), encoding="utf-8", newline="")
+    if problems:
+        print("\n".join(problems))
+    return record("format hlsl" + (" --check" if check else ""), not problems, f"{len(problems)} files" if problems else "")
+
+
 def format_sources(check: bool) -> bool:
     clang_format = find_tool("clang-format", "clang-format-18", "clang-format-17")
     if not clang_format:
         return record("format", False, "clang-format not found")
     files = [str(p) for p in source_files()]
     if check:
-        return run_step("format --check", [clang_format, "--dry-run", "--Werror", *files], tail=40)
-    return run_step("format", [clang_format, "-i", *files])
+        ok = run_step("format --check", [clang_format, "--dry-run", "--Werror", *files], tail=40)
+    else:
+        ok = run_step("format", [clang_format, "-i", *files])
+    return format_hlsl(check) and ok
 
 
 def tidy(preset: str, paths: list[str]) -> bool:
@@ -235,6 +281,31 @@ def new_feature(name: str) -> bool:
     return True
 
 
+def compile_shaders(preset: str, name_filter: str | None) -> bool:
+    """Compiles every shader of the build's manifest (written by CMake, see cmake/AirShaders.cmake)
+    with exactly the build's command lines into a scratch directory: a fast HLSL check that needs no
+    C++ build and leaves the build's shader outputs (and a running editor) alone."""
+    if not configure(preset):
+        return False
+    manifest_path = build_dir(preset) / "shaders" / "manifest.json"
+    if not manifest_path.exists():
+        return record("shaders", False, f"no {manifest_path.relative_to(ROOT)} (configure found no dxc)")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scratch = build_dir(preset) / "shader-check"
+    scratch.mkdir(parents=True, exist_ok=True)
+    compiled = failed = 0
+    for shader in manifest["shaders"]:
+        name = f"{shader['name']}/{Path(shader['output']).name}"
+        if name_filter and name_filter not in name:
+            continue
+        compiled += 1
+        output = scratch / name.replace("/", "_")
+        command = [manifest["compiler"], *shader["args"], shader["source"], "-Fo", str(output)]
+        if not run_step(f"shader {name}", command, tail=40):
+            failed += 1
+    return record("shaders", compiled > 0 and failed == 0, f"{compiled} compiled, {failed} failed")
+
+
 def check(full: bool) -> bool:
     ok = format_sources(check=True)
     ok = check_layers() and ok
@@ -259,6 +330,8 @@ def main() -> int:
     with_preset(sub.add_parser("build"))
     p = with_preset(sub.add_parser("test"))
     p.add_argument("filter", nargs="?")
+    p = with_preset(sub.add_parser("shaders", help="compile every shader from the build manifest"))
+    p.add_argument("filter", nargs="?")
     p = with_preset(sub.add_parser("run", help="run aircli; pass its arguments after --"))
     p.add_argument("args", nargs=argparse.REMAINDER)
     with_preset(sub.add_parser("golden-update"))
@@ -282,6 +355,8 @@ def main() -> int:
         ok = build(args.preset)
     elif args.command == "test":
         ok = test(args.preset, args.filter)
+    elif args.command == "shaders":
+        ok = compile_shaders(args.preset, args.filter)
     elif args.command == "run":
         ok = run_aircli(args.preset, [a for a in args.args if a != "--"])
     elif args.command == "golden-update":

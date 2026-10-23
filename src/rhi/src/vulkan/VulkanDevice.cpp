@@ -12,9 +12,11 @@
 
 #include "air/core/Log.h"
 
-namespace air::rhi {
+namespace air::rhi
+{
 
-std::unique_ptr<Device> CreateVulkanDevice(const DeviceDesc& desc) {
+std::unique_ptr<Device> CreateVulkanDevice(const DeviceDesc& desc)
+{
     AIR_LOG(Error, "Vulkan", "Vulkan backend is not implemented yet");
     return nullptr;
 }

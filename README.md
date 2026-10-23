@@ -12,7 +12,7 @@ testbed for graphics algorithms. C++20, with an RHI over D3D12 and Vulkan.
 
 | Directory | Contents |
 |---|---|
-| `src/core` | Task system (task DAG / Pipe / ParallelFor), handle pool, logging, JSON, image IO and comparison |
+| `src/core` | Task system (task DAG / Pipe / ParallelFor), handle pool, logging, JSON (write and parse), process runner, image IO and comparison |
 | `src/rhi` | RHI interface, GPU memory allocator (TLSF + pools + dedicated heaps), Null and D3D12 (DXR) backends, Vulkan backend (in progress) |
 | `src/rdg` | Render graph: culling, automatic barriers, transient memory aliasing, parallel recording |
 | `src/renderer` | Extension point: RenderFeature interface, feature registry, parameters, FrameRunner |

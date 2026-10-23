@@ -12,27 +12,35 @@
 
 #include "ExampleShared.h"
 
-namespace air::example {
-namespace {
+namespace air::example
+{
+namespace
+{
 
 using rhi::Access;
 
-class ExampleFeature final : public renderer::RenderFeature {
+class ExampleFeature final : public renderer::RenderFeature
+{
 public:
-    ExampleFeature() {
+    ExampleFeature()
+    {
         mParameters.Add("scale", &mScale, "Spatial frequency of the pattern", 0.0f, 1000.0f);
         mParameters.Add("opacity", &mOpacity, "Blend factor over the existing output", 0.0f, 1.0f);
         mParameters.Add("animate", &mAnimate, "Advance the pattern every frame");
+        mParameters.Add("async", &mAsync, "Generate the pattern on the compute queue (async compute)");
     }
 
-    ~ExampleFeature() override {
-        if (mDevice) {
+    ~ExampleFeature() override
+    {
+        if (mDevice)
+        {
             mDevice->DestroyPipeline(mGenerate);
             mDevice->DestroyPipeline(mComposite);
         }
     }
 
-    bool Initialize(const renderer::FeatureInitContext& context) override {
+    bool Initialize(const renderer::FeatureInitContext& context) override
+    {
         mDevice = &context.device;
         mGenerate = mDevice->CreateComputePipeline(
             {.shader = renderer::LoadShader(*mDevice, context.shaderDir, "Generate.cs", "Main"),
@@ -45,12 +53,14 @@ public:
         return mGenerate.IsValid() && mComposite.IsValid();
     }
 
-    void AddPasses(renderer::FrameContext& context) override {
+    void AddPasses(renderer::FrameContext& context) override
+    {
         rdg::RenderGraph& graph = context.graph;
         const u32 width = context.width;
         const u32 height = context.height;
 
-        // Transient: lives only inside this frame's graph, its memory may be shared with other passes.
+        // Transient: lives only inside this frame's graph. Its memory is shared with other passes unless
+        // an async compute pass uses it, as Generate does here.
         rdg::TextureRef pattern =
             graph.CreateTexture({.format = rhi::Format::RGBA16_FLOAT,
                                  .width = width,
@@ -66,10 +76,15 @@ public:
         generate.scale = mScale;
         const rhi::PipelineHandle generatePipeline = mGenerate;
 
+        // The pattern depends on nothing else in the frame, so it is generated on the compute queue,
+        // overlapping the passes before it (the path tracer's trace). Composite, on the graphics queue,
+        // waits for it; the render graph inserts that wait and keeps the pattern's memory unaliased.
         graph.AddPass(
-            "Example.Generate", rdg::PassFlags::Compute,
+            "Example.Generate",
+            mAsync ? rdg::PassFlags::Compute | rdg::PassFlags::AsyncCompute : rdg::PassFlags::Compute,
             [&](rdg::PassBuilder& b) { b.Write(pattern, Access::UAVCompute); },
-            [=](rdg::PassContext& ctx) mutable {
+            [=](rdg::PassContext& ctx) mutable
+            {
                 generate.outputUav = ctx.UAV(pattern);
                 ctx.cmd.SetPipeline(generatePipeline);
                 ctx.cmd.PushConstants(&generate, sizeof(generate));
@@ -81,11 +96,13 @@ public:
         const rdg::TextureRef output = context.output;
         graph.AddPass(
             "Example.Composite", rdg::PassFlags::Compute,
-            [&](rdg::PassBuilder& b) {
+            [&](rdg::PassBuilder& b)
+            {
                 b.Read(pattern, Access::SRVCompute);
                 b.Write(output, Access::UAVCompute);
             },
-            [=](rdg::PassContext& ctx) {
+            [=](rdg::PassContext& ctx)
+            {
                 CompositeConstants composite{};
                 composite.patternSrv = ctx.SRV(pattern);
                 composite.outputUav = ctx.UAV(output);
@@ -103,16 +120,19 @@ private:
     rhi::PipelineHandle mGenerate;
     rhi::PipelineHandle mComposite;
     float mScale = 20.0f;
-    float mOpacity = 1.0f;
+    float mOpacity = 0.25f; // a light overlay: the image below stays visible
     bool mAnimate = true;
+    bool mAsync = true;
 };
 
 } // namespace
 } // namespace air::example
 
-namespace air::features {
+namespace air::features
+{
 
-void Register_example(renderer::FeatureRegistry& registry) {
+void Register_example(renderer::FeatureRegistry& registry)
+{
     registry.Register({"example", "Template feature: animated pattern composited over the output",
                        [] { return std::make_unique<example::ExampleFeature>(); }});
 }

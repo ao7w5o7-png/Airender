@@ -2,6 +2,7 @@ add_library(air_core
     src/Image.cpp
     src/Json.cpp
     src/Log.cpp
+    src/Process.cpp
     src/Profiler.cpp
     src/TaskSystem.cpp
 )

@@ -6,16 +6,20 @@
 #include <algorithm>
 #include <bit>
 
-namespace air::rhi {
+namespace air::rhi
+{
 
 // ===========================================================================
 // TlsfAllocator
 // ===========================================================================
 
-TlsfAllocator::TlsfAllocator(u64 capacity) : mCapacity(capacity & ~(kMinBlockSize - 1)) {
+TlsfAllocator::TlsfAllocator(u64 capacity) : mCapacity(capacity & ~(kMinBlockSize - 1))
+{
     AIR_CHECK(mCapacity >= kMinBlockSize, "TLSF capacity {} too small", capacity);
-    for (auto& row : mHeads) {
-        for (u32& head : row) {
+    for (auto& row : mHeads)
+    {
+        for (u32& head : row)
+        {
             head = kNull;
         }
     }
@@ -25,27 +29,33 @@ TlsfAllocator::TlsfAllocator(u64 capacity) : mCapacity(capacity & ~(kMinBlockSiz
     InsertFree(root);
 }
 
-void TlsfAllocator::MapInsert(u64 size, u32& fl, u32& sl) {
+void TlsfAllocator::MapInsert(u64 size, u32& fl, u32& sl)
+{
     const u32 log2 = u32(std::bit_width(size)) - 1;
     sl = u32(size >> (log2 - kSecondLevelLog2)) - kSecondLevelCount;
     fl = log2 - kFirstLevelShift;
 }
 
-void TlsfAllocator::MapSearch(u64 size, u32& fl, u32& sl) {
+void TlsfAllocator::MapSearch(u64 size, u32& fl, u32& sl)
+{
     const u32 log2 = u32(std::bit_width(size)) - 1;
     // Round up to the next size class so every block in the found list is large enough.
     size += (1ull << (log2 - kSecondLevelLog2)) - 1;
     MapInsert(size, fl, sl);
 }
 
-u32 TlsfAllocator::FindSuitable(u32 fl, u32 sl) const {
-    if (fl >= kFirstLevelCount) {
+u32 TlsfAllocator::FindSuitable(u32 fl, u32 sl) const
+{
+    if (fl >= kFirstLevelCount)
+    {
         return kNull;
     }
     u32 slMap = mSecondLevelBitmap[fl] & (~0u << sl);
-    if (slMap == 0) {
+    if (slMap == 0)
+    {
         const u64 flMap = fl + 1 < 64 ? mFirstLevelBitmap & (~0ull << (fl + 1)) : 0;
-        if (flMap == 0) {
+        if (flMap == 0)
+        {
             return kNull;
         }
         fl = u32(std::countr_zero(flMap));
@@ -55,14 +65,16 @@ u32 TlsfAllocator::FindSuitable(u32 fl, u32 sl) const {
     return mHeads[fl][sl];
 }
 
-void TlsfAllocator::InsertFree(u32 index) {
+void TlsfAllocator::InsertFree(u32 index)
+{
     Node& node = mNodes[index];
     u32 fl, sl;
     MapInsert(node.size, fl, sl);
     node.free = true;
     node.prevFree = kNull;
     node.nextFree = mHeads[fl][sl];
-    if (node.nextFree != kNull) {
+    if (node.nextFree != kNull)
+    {
         mNodes[node.nextFree].prevFree = index;
     }
     mHeads[fl][sl] = index;
@@ -70,21 +82,27 @@ void TlsfAllocator::InsertFree(u32 index) {
     mSecondLevelBitmap[fl] |= 1u << sl;
 }
 
-void TlsfAllocator::RemoveFree(u32 index) {
+void TlsfAllocator::RemoveFree(u32 index)
+{
     Node& node = mNodes[index];
     u32 fl, sl;
     MapInsert(node.size, fl, sl);
-    if (node.prevFree != kNull) {
+    if (node.prevFree != kNull)
+    {
         mNodes[node.prevFree].nextFree = node.nextFree;
     }
-    if (node.nextFree != kNull) {
+    if (node.nextFree != kNull)
+    {
         mNodes[node.nextFree].prevFree = node.prevFree;
     }
-    if (mHeads[fl][sl] == index) {
+    if (mHeads[fl][sl] == index)
+    {
         mHeads[fl][sl] = node.nextFree;
-        if (node.nextFree == kNull) {
+        if (node.nextFree == kNull)
+        {
             mSecondLevelBitmap[fl] &= ~(1u << sl);
-            if (mSecondLevelBitmap[fl] == 0) {
+            if (mSecondLevelBitmap[fl] == 0)
+            {
                 mFirstLevelBitmap &= ~(1ull << fl);
             }
         }
@@ -93,13 +111,17 @@ void TlsfAllocator::RemoveFree(u32 index) {
     node.free = false;
 }
 
-u32 TlsfAllocator::NewNode() {
+u32 TlsfAllocator::NewNode()
+{
     u32 index;
-    if (!mFreeNodeSlots.empty()) {
+    if (!mFreeNodeSlots.empty())
+    {
         index = mFreeNodeSlots.back();
         mFreeNodeSlots.pop_back();
         mNodes[index] = Node{};
-    } else {
+    }
+    else
+    {
         index = u32(mNodes.size());
         mNodes.emplace_back();
     }
@@ -107,13 +129,16 @@ u32 TlsfAllocator::NewNode() {
     return index;
 }
 
-void TlsfAllocator::ReleaseNode(u32 index) {
+void TlsfAllocator::ReleaseNode(u32 index)
+{
     mNodes[index] = Node{};
     mFreeNodeSlots.push_back(index);
 }
 
-std::optional<TlsfAllocator::Allocation> TlsfAllocator::Allocate(u64 size, u64 alignment) {
-    if (size == 0) {
+std::optional<TlsfAllocator::Allocation> TlsfAllocator::Allocate(u64 size, u64 alignment)
+{
+    if (size == 0)
+    {
         return std::nullopt;
     }
     alignment = alignment < kMinBlockSize ? kMinBlockSize : alignment;
@@ -122,13 +147,15 @@ std::optional<TlsfAllocator::Allocation> TlsfAllocator::Allocate(u64 size, u64 a
 
     // Offsets are multiples of kMinBlockSize, so worst-case front padding is alignment - kMinBlockSize.
     const u64 searchSize = size + alignment - kMinBlockSize;
-    if (searchSize > mCapacity) {
+    if (searchSize > mCapacity)
+    {
         return std::nullopt;
     }
     u32 fl, sl;
     MapSearch(searchSize, fl, sl);
     const u32 index = FindSuitable(fl, sl);
-    if (index == kNull) {
+    if (index == kNull)
+    {
         return std::nullopt;
     }
     RemoveFree(index);
@@ -137,14 +164,16 @@ std::optional<TlsfAllocator::Allocation> TlsfAllocator::Allocate(u64 size, u64 a
     // (free neighbours are always coalesced), so no merge is needed.
     const u64 alignedOffset = AlignUp(mNodes[index].offset, alignment);
     const u64 padding = alignedOffset - mNodes[index].offset;
-    if (padding > 0) {
+    if (padding > 0)
+    {
         const u32 front = NewNode();
         Node& node = mNodes[index];
         mNodes[front].offset = node.offset;
         mNodes[front].size = padding;
         mNodes[front].prevPhys = node.prevPhys;
         mNodes[front].nextPhys = index;
-        if (node.prevPhys != kNull) {
+        if (node.prevPhys != kNull)
+        {
             mNodes[node.prevPhys].nextPhys = front;
         }
         node.prevPhys = front;
@@ -154,14 +183,16 @@ std::optional<TlsfAllocator::Allocation> TlsfAllocator::Allocate(u64 size, u64 a
     }
 
     // Split off the tail.
-    if (mNodes[index].size - size >= kMinBlockSize) {
+    if (mNodes[index].size - size >= kMinBlockSize)
+    {
         const u32 tail = NewNode();
         Node& node = mNodes[index];
         mNodes[tail].offset = node.offset + size;
         mNodes[tail].size = node.size - size;
         mNodes[tail].prevPhys = index;
         mNodes[tail].nextPhys = node.nextPhys;
-        if (node.nextPhys != kNull) {
+        if (node.nextPhys != kNull)
+        {
             mNodes[node.nextPhys].prevPhys = tail;
         }
         node.nextPhys = tail;
@@ -175,31 +206,36 @@ std::optional<TlsfAllocator::Allocation> TlsfAllocator::Allocate(u64 size, u64 a
     return Allocation{node.offset, node.size, index};
 }
 
-void TlsfAllocator::Free(u32 index) {
+void TlsfAllocator::Free(u32 index)
+{
     AIR_CHECK(index < mNodes.size() && mNodes[index].inUse && !mNodes[index].free, "TLSF double free of node {}",
               index);
     mUsed -= mNodes[index].size;
     --mAllocationCount;
 
     const u32 prev = mNodes[index].prevPhys;
-    if (prev != kNull && mNodes[prev].free) {
+    if (prev != kNull && mNodes[prev].free)
+    {
         RemoveFree(prev);
         Node& node = mNodes[index];
         node.offset = mNodes[prev].offset;
         node.size += mNodes[prev].size;
         node.prevPhys = mNodes[prev].prevPhys;
-        if (node.prevPhys != kNull) {
+        if (node.prevPhys != kNull)
+        {
             mNodes[node.prevPhys].nextPhys = index;
         }
         ReleaseNode(prev);
     }
     const u32 next = mNodes[index].nextPhys;
-    if (next != kNull && mNodes[next].free) {
+    if (next != kNull && mNodes[next].free)
+    {
         RemoveFree(next);
         Node& node = mNodes[index];
         node.size += mNodes[next].size;
         node.nextPhys = mNodes[next].nextPhys;
-        if (node.nextPhys != kNull) {
+        if (node.nextPhys != kNull)
+        {
             mNodes[node.nextPhys].prevPhys = index;
         }
         ReleaseNode(next);
@@ -207,29 +243,37 @@ void TlsfAllocator::Free(u32 index) {
     InsertFree(index);
 }
 
-bool TlsfAllocator::Validate() const {
+bool TlsfAllocator::Validate() const
+{
     u32 first = kNull;
-    for (u32 i = 0; i < mNodes.size(); ++i) {
-        if (mNodes[i].inUse && mNodes[i].prevPhys == kNull) {
-            if (first != kNull) {
+    for (u32 i = 0; i < mNodes.size(); ++i)
+    {
+        if (mNodes[i].inUse && mNodes[i].prevPhys == kNull)
+        {
+            if (first != kNull)
+            {
                 return false; // two chain heads
             }
             first = i;
         }
     }
-    if (first == kNull) {
+    if (first == kNull)
+    {
         return false;
     }
     u64 expectedOffset = 0;
     u64 used = 0;
     u32 freeInChain = 0;
     bool prevFree = false;
-    for (u32 i = first; i != kNull; i = mNodes[i].nextPhys) {
+    for (u32 i = first; i != kNull; i = mNodes[i].nextPhys)
+    {
         const Node& node = mNodes[i];
-        if (node.offset != expectedOffset || node.size == 0 || (node.free && prevFree)) {
+        if (node.offset != expectedOffset || node.size == 0 || (node.free && prevFree))
+        {
             return false;
         }
-        if (node.nextPhys != kNull && mNodes[node.nextPhys].prevPhys != i) {
+        if (node.nextPhys != kNull && mNodes[node.nextPhys].prevPhys != i)
+        {
             return false;
         }
         expectedOffset += node.size;
@@ -238,16 +282,21 @@ bool TlsfAllocator::Validate() const {
         prevFree = node.free;
     }
     u32 freeInLists = 0;
-    for (u32 fl = 0; fl < kFirstLevelCount; ++fl) {
-        for (u32 sl = 0; sl < kSecondLevelCount; ++sl) {
+    for (u32 fl = 0; fl < kFirstLevelCount; ++fl)
+    {
+        for (u32 sl = 0; sl < kSecondLevelCount; ++sl)
+        {
             const bool bit = (mSecondLevelBitmap[fl] >> sl) & 1u;
-            if (bit != (mHeads[fl][sl] != kNull)) {
+            if (bit != (mHeads[fl][sl] != kNull))
+            {
                 return false;
             }
-            for (u32 i = mHeads[fl][sl]; i != kNull; i = mNodes[i].nextFree) {
+            for (u32 i = mHeads[fl][sl]; i != kNull; i = mNodes[i].nextFree)
+            {
                 u32 nodeFl, nodeSl;
                 MapInsert(mNodes[i].size, nodeFl, nodeSl);
-                if (!mNodes[i].free || nodeFl != fl || nodeSl != sl) {
+                if (!mNodes[i].free || nodeFl != fl || nodeSl != sl)
+                {
                     return false;
                 }
                 ++freeInLists;
@@ -261,27 +310,35 @@ bool TlsfAllocator::Validate() const {
 // GpuMemoryAllocator
 // ===========================================================================
 
-GpuMemoryAllocator::GpuMemoryAllocator(IGpuHeapProvider& provider, Config config)
-    : mProvider(provider), mConfig(config) {}
+GpuMemoryAllocator::GpuMemoryAllocator(IGpuHeapProvider& provider, Config config) : mProvider(provider), mConfig(config)
+{
+}
 
-GpuMemoryAllocator::~GpuMemoryAllocator() {
-    for (auto& [key, pool] : mPools) {
-        if (pool->allocationCount > 0) {
+GpuMemoryAllocator::~GpuMemoryAllocator()
+{
+    for (auto& [key, pool] : mPools)
+    {
+        if (pool->allocationCount > 0)
+        {
             AIR_LOG(Warning, "GpuMemory", "pool {} ({}) destroyed with {} live allocations ({} bytes)", key,
                     ToString(pool->location), pool->allocationCount, pool->usedBytes);
         }
-        for (Block& block : pool->blocks) {
-            if (block.alive) {
+        for (Block& block : pool->blocks)
+        {
+            if (block.alive)
+            {
                 mProvider.DestroyHeap(key, block.heap);
             }
         }
     }
 }
 
-GpuMemoryAllocator::Pool& GpuMemoryAllocator::GetPool(u32 memoryTypeKey, MemoryLocation location) {
+GpuMemoryAllocator::Pool& GpuMemoryAllocator::GetPool(u32 memoryTypeKey, MemoryLocation location)
+{
     std::lock_guard lock(mPoolsMutex);
     auto& pool = mPools[memoryTypeKey];
-    if (!pool) {
+    if (!pool)
+    {
         pool = std::make_unique<Pool>();
         pool->location = location;
     }
@@ -289,15 +346,18 @@ GpuMemoryAllocator::Pool& GpuMemoryAllocator::GetPool(u32 memoryTypeKey, MemoryL
     return *pool;
 }
 
-GpuMemoryAllocator::Pool* GpuMemoryAllocator::FindPool(u32 memoryTypeKey) const {
+GpuMemoryAllocator::Pool* GpuMemoryAllocator::FindPool(u32 memoryTypeKey) const
+{
     std::lock_guard lock(mPoolsMutex);
     auto it = mPools.find(memoryTypeKey);
     return it == mPools.end() ? nullptr : it->second.get();
 }
 
-u32 GpuMemoryAllocator::AddBlock(Pool& pool, Block block) {
+u32 GpuMemoryAllocator::AddBlock(Pool& pool, Block block)
+{
     block.alive = true;
-    if (!pool.freeBlockSlots.empty()) {
+    if (!pool.freeBlockSlots.empty())
+    {
         const u32 index = pool.freeBlockSlots.back();
         pool.freeBlockSlots.pop_back();
         pool.blocks[index] = std::move(block);
@@ -307,7 +367,8 @@ u32 GpuMemoryAllocator::AddBlock(Pool& pool, Block block) {
     return u32(pool.blocks.size() - 1);
 }
 
-std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request) {
+std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request)
+{
     AIR_CHECK(request.size > 0, "zero sized GPU allocation");
     Pool& pool = GetPool(request.memoryTypeKey, request.location);
 
@@ -318,10 +379,12 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
     const bool dedicated = request.forceDedicated || request.size >= mConfig.dedicatedThreshold;
 
     std::lock_guard lock(pool.mutex);
-    if (dedicated) {
+    if (dedicated)
+    {
         const u64 size = AlignUp(request.size, TlsfAllocator::kMinBlockSize);
         auto heap = mProvider.CreateHeap(request.memoryTypeKey, request.location, size);
-        if (!heap) {
+        if (!heap)
+        {
             AIR_LOG(Error, "GpuMemory", "out of memory: dedicated {} bytes in {}", size, ToString(request.location));
             return std::nullopt;
         }
@@ -337,7 +400,8 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
         return result;
     }
 
-    auto fill = [&](u32 blockIndex, const TlsfAllocator::Allocation& a) {
+    auto fill = [&](u32 blockIndex, const TlsfAllocator::Allocation& a)
+    {
         const Block& block = pool.blocks[blockIndex];
         result.mHeapIndex = blockIndex;
         result.mTlsfNode = a.node;
@@ -349,12 +413,15 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
         ++pool.allocationCount;
     };
 
-    for (u32 i = 0; i < pool.blocks.size(); ++i) {
+    for (u32 i = 0; i < pool.blocks.size(); ++i)
+    {
         Block& block = pool.blocks[i];
-        if (!block.alive || !block.tlsf) {
+        if (!block.alive || !block.tlsf)
+        {
             continue;
         }
-        if (auto a = block.tlsf->Allocate(request.size, request.alignment)) {
+        if (auto a = block.tlsf->Allocate(request.size, request.alignment))
+        {
             fill(i, *a);
             return result;
         }
@@ -364,7 +431,8 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
     u64 heapSize = hostVisible ? mConfig.hostVisibleHeapSize : mConfig.defaultHeapSize;
     heapSize = std::max(heapSize, AlignUp(request.size + request.alignment, TlsfAllocator::kMinBlockSize));
     auto heap = mProvider.CreateHeap(request.memoryTypeKey, request.location, heapSize);
-    if (!heap) {
+    if (!heap)
+    {
         AIR_LOG(Error, "GpuMemory", "out of memory: heap of {} bytes in {}", heapSize, ToString(request.location));
         return std::nullopt;
     }
@@ -375,8 +443,10 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
     return result;
 }
 
-void GpuMemoryAllocator::Free(const GpuAllocation& allocation) {
-    if (!allocation.IsValid()) {
+void GpuMemoryAllocator::Free(const GpuAllocation& allocation)
+{
+    if (!allocation.IsValid())
+    {
         return;
     }
     Pool* pool = FindPool(allocation.memoryTypeKey);
@@ -389,24 +459,29 @@ void GpuMemoryAllocator::Free(const GpuAllocation& allocation) {
     pool->usedBytes -= allocation.size;
     --pool->allocationCount;
 
-    auto destroyBlock = [&](u32 index) {
+    auto destroyBlock = [&](u32 index)
+    {
         mProvider.DestroyHeap(allocation.memoryTypeKey, pool->blocks[index].heap);
         pool->blocks[index] = Block{};
         pool->freeBlockSlots.push_back(index);
     };
 
-    if (allocation.mDedicated) {
+    if (allocation.mDedicated)
+    {
         --pool->dedicatedCount;
         destroyBlock(allocation.mHeapIndex);
         return;
     }
 
     block.tlsf->Free(allocation.mTlsfNode);
-    if (mConfig.freeEmptyHeaps && block.tlsf->IsEmpty()) {
+    if (mConfig.freeEmptyHeaps && block.tlsf->IsEmpty())
+    {
         // Keep one empty heap around to avoid create/destroy thrashing.
-        for (u32 i = 0; i < pool->blocks.size(); ++i) {
+        for (u32 i = 0; i < pool->blocks.size(); ++i)
+        {
             const Block& other = pool->blocks[i];
-            if (i != allocation.mHeapIndex && other.alive && other.tlsf && other.tlsf->IsEmpty()) {
+            if (i != allocation.mHeapIndex && other.alive && other.tlsf && other.tlsf->IsEmpty())
+            {
                 destroyBlock(allocation.mHeapIndex);
                 return;
             }
@@ -414,16 +489,21 @@ void GpuMemoryAllocator::Free(const GpuAllocation& allocation) {
     }
 }
 
-GpuMemoryAllocator::Stats GpuMemoryAllocator::GetStats(MemoryLocation location) const {
+GpuMemoryAllocator::Stats GpuMemoryAllocator::GetStats(MemoryLocation location) const
+{
     Stats stats;
     std::lock_guard lock(mPoolsMutex);
-    for (const auto& [key, pool] : mPools) {
-        if (pool->location != location) {
+    for (const auto& [key, pool] : mPools)
+    {
+        if (pool->location != location)
+        {
             continue;
         }
         std::lock_guard poolLock(pool->mutex);
-        for (const Block& block : pool->blocks) {
-            if (block.alive) {
+        for (const Block& block : pool->blocks)
+        {
+            if (block.alive)
+            {
                 stats.reservedBytes += block.heap.size;
                 ++stats.heapCount;
             }
@@ -435,16 +515,20 @@ GpuMemoryAllocator::Stats GpuMemoryAllocator::GetStats(MemoryLocation location) 
     return stats;
 }
 
-std::vector<GpuMemoryAllocator::PoolStats> GpuMemoryAllocator::GetPoolStats() const {
+std::vector<GpuMemoryAllocator::PoolStats> GpuMemoryAllocator::GetPoolStats() const
+{
     std::vector<PoolStats> result;
     std::lock_guard lock(mPoolsMutex);
-    for (const auto& [key, pool] : mPools) {
+    for (const auto& [key, pool] : mPools)
+    {
         PoolStats out;
         out.memoryTypeKey = key;
         out.location = pool->location;
         std::lock_guard poolLock(pool->mutex);
-        for (const Block& block : pool->blocks) {
-            if (!block.alive) {
+        for (const Block& block : pool->blocks)
+        {
+            if (!block.alive)
+            {
                 continue;
             }
             HeapUsage heap;
@@ -466,9 +550,11 @@ std::vector<GpuMemoryAllocator::PoolStats> GpuMemoryAllocator::GetPoolStats() co
     return result;
 }
 
-GpuMemoryAllocator::Stats GpuMemoryAllocator::GetTotalStats() const {
+GpuMemoryAllocator::Stats GpuMemoryAllocator::GetTotalStats() const
+{
     Stats total;
-    for (u32 i = 0; i < u32(MemoryLocation::Count); ++i) {
+    for (u32 i = 0; i < u32(MemoryLocation::Count); ++i)
+    {
         const Stats s = GetStats(MemoryLocation(i));
         total.reservedBytes += s.reservedBytes;
         total.usedBytes += s.usedBytes;

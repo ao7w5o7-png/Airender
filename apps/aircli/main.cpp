@@ -3,10 +3,12 @@
 // 2 usage / setup error).
 //
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
-//                   [--frames N] [--width W] [--height H] [--shaders DIR]
-//                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]
-//                   [--scene cornell_box|furnace] [--output image.pfm|image.ppm]
+//                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
+//                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
+//                   [--no-async-compute]
+//                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //   aircli features                         list available features and their parameters (JSON)
+//   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee]
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
@@ -39,32 +41,38 @@
 
 using namespace air;
 
-namespace {
+namespace
+{
 
 constexpr int kExitOk = 0;
 constexpr int kExitCheckFailed = 1;
 constexpr int kExitUsage = 2;
 
-int Usage() {
+int Usage()
+{
     std::fputs("usage:\n"
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
-               "                [--frames N] [--width W] [--height H] [--shaders DIR]\n"
+               "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
-               "                [--scene cornell_box|furnace] [--output image.pfm|image.ppm]\n"
+               "                [--no-validation] [--no-async-compute]\n"
+               "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee]\n"
-               "  aircli features\n"
+               "  aircli features | scenes\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
                stderr);
     return kExitUsage;
 }
 
-std::vector<std::string> Split(std::string_view text, char separator) {
+std::vector<std::string> Split(std::string_view text, char separator)
+{
     std::vector<std::string> parts;
     size_t start = 0;
-    while (start <= text.size()) {
+    while (start <= text.size())
+    {
         const size_t end = std::min(text.find(separator, start), text.size());
-        if (end > start) {
+        if (end > start)
+        {
             parts.emplace_back(text.substr(start, end - start));
         }
         start = end + 1;
@@ -73,7 +81,8 @@ std::vector<std::string> Split(std::string_view text, char separator) {
 }
 
 // Small argument cursor: Next() returns the following argument or reports a usage error.
-struct Args {
+struct Args
+{
     std::vector<std::string_view> items;
     size_t index = 0;
     bool error = false;
@@ -81,8 +90,10 @@ struct Args {
     bool Done() const { return index >= items.size(); }
     std::string_view Peek() const { return items[index]; }
     std::string_view Take() { return items[index++]; }
-    std::string_view Next() {
-        if (Done()) {
+    std::string_view Next()
+    {
+        if (Done())
+        {
             error = true;
             return {};
         }
@@ -93,11 +104,13 @@ struct Args {
 // ---------------------------------------------------------------------------
 // features
 // ---------------------------------------------------------------------------
-int CommandFeatures() {
+int CommandFeatures()
+{
     renderer::FeatureRegistry registry;
     renderer::RegisterBuiltinFeatures(registry);
     json::Value out = json::Value::MakeArray();
-    for (const renderer::FeatureInfo& info : registry.List()) {
+    for (const renderer::FeatureInfo& info : registry.List())
+    {
         json::Value item = json::Value::MakeObject();
         item["name"] = info.name;
         item["description"] = info.description;
@@ -109,40 +122,90 @@ int CommandFeatures() {
 }
 
 // ---------------------------------------------------------------------------
+// scenes
+// ---------------------------------------------------------------------------
+int CommandScenes()
+{
+    json::Value out = json::Value::MakeArray();
+    for (const std::string& name : renderer::BuiltinSceneNames())
+    {
+        const renderer::SceneDesc desc = *renderer::MakeBuiltinScene(name);
+        u64 triangles = 0;
+        u32 emissive = 0;
+        for (const renderer::Instance& instance : desc.instances)
+        {
+            triangles += desc.meshes[instance.mesh].indices.size() / 3;
+            emissive += desc.materials[instance.material].emissionNits > 0.0f ? 1u : 0u;
+        }
+        json::Value item = json::Value::MakeObject();
+        item["name"] = name;
+        item["instances"] = u64(desc.instances.size());
+        item["meshes"] = u64(desc.meshes.size());
+        item["materials"] = u64(desc.materials.size());
+        item["triangles"] = triangles;
+        item["emissiveInstances"] = emissive;
+        item["ev100"] = desc.camera.ev100;
+        out.Push(std::move(item));
+    }
+    std::puts(out.Dump().c_str());
+    return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
 // reference: the path tracer's estimator on the CPU, to validate GPU output with `compare`
 // ---------------------------------------------------------------------------
-int CommandReference(Args& args) {
+int CommandReference(Args& args)
+{
     std::string sceneName = "cornell_box";
     std::string outputPath;
     pt::ReferenceSettings settings;
     settings.width = 320;
     settings.height = 180;
     settings.samplesPerPixel = 256;
-    while (!args.Done()) {
+    while (!args.Done())
+    {
         const std::string_view arg = args.Take();
-        if (arg == "--scene") {
+        if (arg == "--scene")
+        {
             sceneName = args.Next();
-        } else if (arg == "--output") {
+        }
+        else if (arg == "--output")
+        {
             outputPath = args.Next();
-        } else if (arg == "--width") {
+        }
+        else if (arg == "--width")
+        {
             settings.width = u32(std::stoul(std::string(args.Next())));
-        } else if (arg == "--height") {
+        }
+        else if (arg == "--height")
+        {
             settings.height = u32(std::stoul(std::string(args.Next())));
-        } else if (arg == "--spp") {
+        }
+        else if (arg == "--spp")
+        {
             settings.samplesPerPixel = u32(std::stoul(std::string(args.Next())));
-        } else if (arg == "--bounces") {
+        }
+        else if (arg == "--bounces")
+        {
             settings.maxBounces = u32(std::stoul(std::string(args.Next())));
-        } else if (arg == "--furnace") {
+        }
+        else if (arg == "--furnace")
+        {
             settings.furnace = true;
-        } else if (arg == "--no-nee") {
+        }
+        else if (arg == "--no-nee")
+        {
             settings.nextEventEstimation = false;
-        } else {
+        }
+        else
+        {
             AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
             return Usage();
         }
     }
     const std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
-    if (args.error || outputPath.empty() || !scene) {
+    if (args.error || outputPath.empty() || !scene)
+    {
         return Usage();
     }
     TaskSystem tasks;
@@ -151,7 +214,8 @@ int CommandReference(Args& args) {
     const Image image = pt::RenderReference(*scene, scene->camera, settings);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     const bool ppm = outputPath.ends_with(".ppm");
-    if (!(ppm ? WritePpm(outputPath, image) : WritePfm(outputPath, image))) {
+    if (!(ppm ? WritePpm(outputPath, image) : WritePfm(outputPath, image)))
+    {
         AIR_LOG(Error, "aircli", "could not write '{}'", outputPath);
         return kExitCheckFailed;
     }
@@ -166,35 +230,49 @@ int CommandReference(Args& args) {
 // ---------------------------------------------------------------------------
 // compare
 // ---------------------------------------------------------------------------
-int CommandCompare(Args& args) {
+int CommandCompare(Args& args)
+{
     std::vector<std::string> files;
     std::string diffPath;
     ImageCompareOptions options;
-    while (!args.Done()) {
+    while (!args.Done())
+    {
         const std::string_view arg = args.Take();
-        if (arg == "--diff") {
+        if (arg == "--diff")
+        {
             diffPath = args.Next();
-        } else if (arg == "--max-rmse") {
+        }
+        else if (arg == "--max-rmse")
+        {
             options.maxRmse = std::stof(std::string(args.Next()));
-        } else if (arg == "--threshold") {
+        }
+        else if (arg == "--threshold")
+        {
             options.pixelThreshold = std::stof(std::string(args.Next()));
-        } else if (arg == "--max-differing") {
+        }
+        else if (arg == "--max-differing")
+        {
             options.maxDifferingFraction = std::stof(std::string(args.Next()));
-        } else {
+        }
+        else
+        {
             files.emplace_back(arg);
         }
     }
-    if (args.error || files.size() != 2) {
+    if (args.error || files.size() != 2)
+    {
         return Usage();
     }
     const auto reference = ReadImage(files[0]);
     const auto test = ReadImage(files[1]);
-    if (!reference || !test) {
+    if (!reference || !test)
+    {
         AIR_LOG(Error, "aircli", "could not read '{}' (supported: .pfm, .ppm)", !reference ? files[0] : files[1]);
         return kExitUsage;
     }
     const ImageCompareResult result = CompareImages(*reference, *test, options);
-    if (!diffPath.empty() && !result.sizeMismatch) {
+    if (!diffPath.empty() && !result.sizeMismatch)
+    {
         WritePpm(diffPath, result.diff);
     }
     json::Value out = json::Value::MakeObject();
@@ -213,8 +291,10 @@ int CommandCompare(Args& args) {
 // ---------------------------------------------------------------------------
 // render
 // ---------------------------------------------------------------------------
-int CommandRender(Args& args) {
+int CommandRender(Args& args)
+{
     rhi::Backend backend = rhi::Backend::Null;
+    bool validation = true;
     u32 frames = 4;
     renderer::FrameRunnerDesc desc;
     std::vector<std::string> featureNames = {"pathtracer"};
@@ -225,41 +305,82 @@ int CommandRender(Args& args) {
     std::string outputPath;
     bool dumpCommands = false;
 
-    while (!args.Done()) {
+    while (!args.Done())
+    {
         const std::string_view arg = args.Take();
-        if (arg == "--backend") {
+        if (arg == "--backend")
+        {
             const std::string_view b = args.Next();
             backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
-        } else if (arg == "--features") {
+        }
+        else if (arg == "--features")
+        {
             featureNames = Split(args.Next(), ',');
-        } else if (arg == "--set") {
+        }
+        else if (arg == "--set")
+        {
             sets.emplace_back(args.Next());
-        } else if (arg == "--frames") {
+        }
+        else if (arg == "--frames")
+        {
             frames = u32(std::stoul(std::string(args.Next())));
-        } else if (arg == "--width") {
+        }
+        else if (arg == "--width")
+        {
             desc.width = u32(std::stoul(std::string(args.Next())));
-        } else if (arg == "--height") {
+        }
+        else if (arg == "--height")
+        {
             desc.height = u32(std::stoul(std::string(args.Next())));
-        } else if (arg == "--shaders") {
+        }
+        else if (arg == "--render-scale")
+        {
+            desc.renderScale = std::stof(std::string(args.Next())); // < 1: the scene renders smaller, dlss upscales
+        }
+        else if (arg == "--shaders")
+        {
             desc.shaderRoot = std::string(args.Next());
-        } else if (arg == "--dump-graph") {
+        }
+        else if (arg == "--dump-graph")
+        {
             dumpGraph = args.Next();
-        } else if (arg == "--dump-commands") {
+        }
+        else if (arg == "--dump-commands")
+        {
             dumpCommands = true;
-        } else if (arg == "--report") {
+        }
+        else if (arg == "--report")
+        {
             reportPath = args.Next();
-        } else if (arg == "--profile") {
+        }
+        else if (arg == "--profile")
+        {
             desc.profile = true;
-        } else if (arg == "--scene") {
+        }
+        else if (arg == "--no-validation")
+        {
+            validation = false; // no D3D12 debug layer / DRED: timings like a release run
+        }
+        else if (arg == "--no-async-compute")
+        {
+            desc.graphConfig.enableAsyncCompute = false; // async passes run on the graphics queue
+        }
+        else if (arg == "--scene")
+        {
             sceneName = args.Next();
-        } else if (arg == "--output") {
+        }
+        else if (arg == "--output")
+        {
             outputPath = args.Next();
-        } else {
+        }
+        else
+        {
             AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
             return Usage();
         }
     }
-    if (args.error) {
+    if (args.error)
+    {
         return Usage();
     }
     desc.captureCommands = dumpCommands;
@@ -267,8 +388,9 @@ int CommandRender(Args& args) {
     Profiler::Get().SetEnabled(desc.profile);
     Profiler::Get().SetThreadName("Main");
 
-    auto device = rhi::CreateDevice({.backend = backend});
-    if (!device) {
+    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = validation});
+    if (!device)
+    {
         return kExitUsage;
     }
     TaskSystem tasks;
@@ -288,7 +410,8 @@ int CommandRender(Args& args) {
         renderer::RegisterBuiltinFeatures(registry);
         renderer::FrameRunner runner(*device, tasks, desc);
         std::optional<renderer::SceneDesc> sceneDesc = renderer::MakeBuiltinScene(sceneName);
-        if (!sceneDesc) {
+        if (!sceneDesc)
+        {
             AIR_LOG(Error, "aircli", "unknown scene '{}'", sceneName);
             return kExitUsage;
         }
@@ -296,23 +419,30 @@ int CommandRender(Args& args) {
         const renderer::Camera camera = scene.Desc().camera;
         report["scene"] = sceneName;
 
-        for (const std::string& name : featureNames) {
+        for (const std::string& name : featureNames)
+        {
             auto feature = registry.Create(name);
-            if (!feature) {
+            if (!feature)
+            {
                 AIR_LOG(Error, "aircli", "unknown feature '{}' (see `aircli features`)", name);
                 return kExitUsage;
             }
-            if (!runner.AddFeature(name, std::move(feature))) {
+            if (!runner.AddFeature(name, std::move(feature)))
+            {
                 return kExitUsage;
             }
         }
-        for (const std::string& set : sets) {
+        for (const std::string& set : sets)
+        {
             const size_t eq = set.find('=');
             std::string error;
-            if (eq == std::string::npos) {
+            if (eq == std::string::npos)
+            {
                 error = "--set expects feature.param=value, got '" + set + "'";
-            } else if (runner.SetParameter(std::string_view(set).substr(0, eq), std::string_view(set).substr(eq + 1),
-                                           &error)) {
+            }
+            else if (runner.SetParameter(std::string_view(set).substr(0, eq), std::string_view(set).substr(eq + 1),
+                                         &error))
+            {
                 continue;
             }
             AIR_LOG(Error, "aircli", "{}", error);
@@ -321,53 +451,64 @@ int CommandRender(Args& args) {
 
         json::Value frameReports = json::Value::MakeArray();
         json::Value commands = json::Value::MakeArray();
-        for (u32 frame = 0; frame < frames; ++frame) {
+        for (u32 frame = 0; frame < frames; ++frame)
+        {
             Profiler::Get().BeginFrame();
             scene.Update();
             renderer::FrameResult result = runner.RenderFrame(scene.Get(), camera);
             Profiler::Get().EndFrame();
-            if (frame == 0) {
+            if (frame == 0)
+            {
                 std::fputs(result.graphText.c_str(), stdout);
                 report["graph"] = result.graphText;
-                if (!dumpGraph.empty()) {
+                if (!dumpGraph.empty())
+                {
                     std::ofstream(dumpGraph) << result.graphviz;
                     AIR_LOG(Info, "aircli", "wrote {}", dumpGraph);
                 }
             }
-            for (const std::string& line : result.commands) {
+            for (const std::string& line : result.commands)
+            {
                 std::printf("frame %u: %s\n", frame, line.c_str());
                 commands.Push(std::string("frame ") + std::to_string(frame) + ": " + line);
             }
-            for (const std::string& e : result.validationErrors) {
+            for (const std::string& e : result.validationErrors)
+            {
                 errors.Push(std::string("frame ") + std::to_string(frame) + ": " + e);
                 failed = true;
             }
             frameReports.Push(result.ToJson());
         }
         report["frames"] = std::move(frameReports);
-        if (!outputPath.empty()) {
+        if (!outputPath.empty())
+        {
             // The frame output is left in SRVCompute by FrameRunner.
             const std::optional<Image> image =
                 renderer::ReadbackTexture(*device, runner.GetOutput(), rhi::Access::SRVCompute);
             const bool ppm = outputPath.ends_with(".ppm");
-            if (!image || !(ppm ? WritePpm(outputPath, *image) : WritePfm(outputPath, *image))) {
+            if (!image || !(ppm ? WritePpm(outputPath, *image) : WritePfm(outputPath, *image)))
+            {
                 AIR_LOG(Error, "aircli", "could not write '{}'", outputPath);
                 errors.Push("could not write " + outputPath);
                 failed = true;
-            } else {
+            }
+            else
+            {
                 AIR_LOG(Info, "aircli", "wrote {}", outputPath);
                 report["output"] = outputPath;
             }
         }
         report["features"] = runner.DescribeFeatures();
-        if (desc.profile) {
+        if (desc.profile)
+        {
             device->WaitIdle(); // lets the last frames' GPU timings resolve
             report["gpuProfile"] = renderer::ToJson(device->GetGpuTimings());
             report["cpuProfile"] = renderer::ToJson(Profiler::Get().GetLastFrame());
             report["memory"] = renderer::ToJson(device->GetMemoryStats());
             report["processMemory"] = renderer::ToJson(GetProcessMemory());
         }
-        if (dumpCommands) {
+        if (dumpCommands)
+        {
             report["commands"] = std::move(commands);
         }
     }
@@ -375,14 +516,16 @@ int CommandRender(Args& args) {
 
     json::Value memory = json::Value::MakeObject();
     const rhi::MemoryStats stats = device->GetMemoryStats();
-    for (u32 i = 0; i < u32(rhi::MemoryLocation::Count); ++i) {
+    for (u32 i = 0; i < u32(rhi::MemoryLocation::Count); ++i)
+    {
         const auto& s = stats.perLocation[i];
         json::Value& m = memory[rhi::ToString(rhi::MemoryLocation(i))];
         m["heaps"] = s.heapCount;
         m["reservedBytes"] = s.reservedBytes;
         m["usedBytes"] = s.usedBytes;
         m["allocations"] = s.allocationCount;
-        if (s.allocationCount > 0) {
+        if (s.allocationCount > 0)
+        {
             errors.Push(std::format("leak: {} live allocations in {} after shutdown", s.allocationCount,
                                     rhi::ToString(rhi::MemoryLocation(i))));
             failed = true;
@@ -392,9 +535,11 @@ int CommandRender(Args& args) {
     report["errors"] = std::move(errors);
     report["passed"] = !failed;
 
-    if (!reportPath.empty()) {
+    if (!reportPath.empty())
+    {
         const std::filesystem::path path(reportPath);
-        if (path.has_parent_path()) {
+        if (path.has_parent_path())
+        {
             std::filesystem::create_directories(path.parent_path());
         }
         std::ofstream(path) << report.Dump() << '\n';
@@ -406,25 +551,36 @@ int CommandRender(Args& args) {
 
 } // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
     Args args;
-    for (int i = 1; i < argc; ++i) {
+    for (int i = 1; i < argc; ++i)
+    {
         args.items.emplace_back(argv[i]);
     }
-    if (args.Done()) {
+    if (args.Done())
+    {
         return Usage();
     }
     const std::string_view command = args.Take();
-    if (command == "render") {
+    if (command == "render")
+    {
         return CommandRender(args);
     }
-    if (command == "features") {
+    if (command == "features")
+    {
         return CommandFeatures();
     }
-    if (command == "reference") {
+    if (command == "scenes")
+    {
+        return CommandScenes();
+    }
+    if (command == "reference")
+    {
         return CommandReference(args);
     }
-    if (command == "compare") {
+    if (command == "compare")
+    {
         return CommandCompare(args);
     }
     return Usage();

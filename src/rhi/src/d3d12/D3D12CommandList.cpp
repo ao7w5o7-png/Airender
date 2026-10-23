@@ -9,20 +9,26 @@
 #include <cstring>
 #include <format>
 
-namespace air::rhi::d3d12 {
+namespace air::rhi::d3d12
+{
 
-D3D12CommandList::~D3D12CommandList() {
-    if (mContext) {
-        if (mRecording) {
+D3D12CommandList::~D3D12CommandList()
+{
+    if (mContext)
+    {
+        if (mRecording)
+        {
             mList->Close();
         }
         mDevice.ReleaseContext(mQueue, std::move(mContext)); // never submitted: reusable right away
     }
 }
 
-void D3D12CommandList::Begin() {
+void D3D12CommandList::Begin()
+{
     AIR_CHECK(!mRecording, "Begin() on a command list that is already recording");
-    if (!mContext) {
+    if (!mContext)
+    {
         mContext = mDevice.AcquireContext(mQueue);
     }
     AIR_D3D12_CHECK(mContext->allocator->Reset());
@@ -39,14 +45,19 @@ void D3D12CommandList::Begin() {
     mClosedScopes.clear();
 }
 
-void D3D12CommandList::End() {
+void D3D12CommandList::End()
+{
     AIR_CHECK(mRecording, "End() without Begin()");
     AIR_CHECK(mEventDepth == 0, "{} unbalanced BeginEvent()", mEventDepth);
-    if (mTimestamps) {
-        for (const TimestampBlock& block : mTimestampBlocks) {
-            if (block.used > block.begin) {
-                mList->ResolveQueryData(mTimestamps->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, block.begin,
-                                        block.used - block.begin, mTimestamps->readback.Get(), u64(block.begin) * 8);
+    if (mTimestamps)
+    {
+        const TimestampQueries& queries = mTimestamps->queues[size_t(mQueue)];
+        for (const TimestampBlock& block : mTimestampBlocks)
+        {
+            if (block.used > block.begin)
+            {
+                mList->ResolveQueryData(queries.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, block.begin,
+                                        block.used - block.begin, queries.readback.Get(), u64(block.begin) * 8);
             }
         }
     }
@@ -54,45 +65,56 @@ void D3D12CommandList::End() {
     mRecording = false;
 }
 
-std::unique_ptr<CommandContext> D3D12CommandList::DetachContext() {
+std::unique_ptr<CommandContext> D3D12CommandList::DetachContext()
+{
     AIR_CHECK(!mRecording, "Submit() of a command list that is still recording (missing End())");
     mList = nullptr;
     return std::move(mContext);
 }
 
-void D3D12CommandList::BindRootState() {
-    if (mRootStateBound || mQueue == QueueType::Copy) {
+void D3D12CommandList::BindRootState()
+{
+    if (mRootStateBound || mQueue == QueueType::Copy)
+    {
         return;
     }
     ID3D12DescriptorHeap* heap = mDevice.BindlessHeap();
     mList->SetDescriptorHeaps(1, &heap);
     mList->SetComputeRootSignature(mDevice.RootSignature());
-    if (mQueue == QueueType::Graphics) {
+    if (mQueue == QueueType::Graphics)
+    {
         mList->SetGraphicsRootSignature(mDevice.RootSignature());
     }
     mRootStateBound = true;
 }
 
-void D3D12CommandList::Capture(std::string text) {
-    if (mCapture) {
+void D3D12CommandList::Capture(std::string text)
+{
+    if (mCapture)
+    {
         mCaptured.push_back(std::move(text));
     }
 }
 
-void D3D12CommandList::Barriers(std::span<const Barrier> barriers) {
+void D3D12CommandList::Barriers(std::span<const Barrier> barriers)
+{
     std::vector<D3D12_RESOURCE_BARRIER> native;
     native.reserve(barriers.size() * 2);
-    auto uavBarrier = [&](ID3D12Resource* resource) {
+    auto uavBarrier = [&](ID3D12Resource* resource)
+    {
         D3D12_RESOURCE_BARRIER b = {};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         b.UAV.pResource = resource;
         native.push_back(b);
     };
-    auto transition = [&](ID3D12Resource* resource, Access before, Access after) {
+    auto transition = [&](ID3D12Resource* resource, Access before, Access after)
+    {
         const D3D12_RESOURCE_STATES from = ToStates(before);
         const D3D12_RESOURCE_STATES to = ToStates(after);
-        if (from == to) {
-            if (to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+        if (from == to)
+        {
+            if (to == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+            {
                 uavBarrier(resource);
             }
             return;
@@ -106,12 +128,16 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers) {
         native.push_back(b);
     };
 
-    for (const Barrier& barrier : barriers) {
-        switch (barrier.type) {
-        case Barrier::Type::Texture: {
+    for (const Barrier& barrier : barriers)
+    {
+        switch (barrier.type)
+        {
+        case Barrier::Type::Texture:
+        {
             D3D12Texture* texture = mDevice.Texture(barrier.texture);
             AIR_CHECK(texture, "barrier on invalid texture");
-            if (barrier.discard) {
+            if (barrier.discard)
+            {
                 // First use of a (possibly aliased) transient: activate it in the heap. Fresh
                 // placed resources start in COMMON, which is what Access::None maps to.
                 D3D12_RESOURCE_BARRIER aliasing = {};
@@ -124,13 +150,16 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers) {
                                 ToString(barrier.after), barrier.discard ? " discard" : ""));
             break;
         }
-        case Barrier::Type::Buffer: {
+        case Barrier::Type::Buffer:
+        {
             D3D12Buffer* buffer = mDevice.Buffer(barrier.buffer);
             AIR_CHECK(buffer, "barrier on invalid buffer");
-            if (buffer->hostVisible) {
+            if (buffer->hostVisible)
+            {
                 break; // upload / readback heaps have a fixed state
             }
-            if (barrier.discard && !buffer->ownsAllocation) {
+            if (barrier.discard && !buffer->ownsAllocation)
+            {
                 D3D12_RESOURCE_BARRIER aliasing = {};
                 aliasing.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
                 aliasing.Aliasing.pResourceAfter = buffer->resource.Get();
@@ -141,13 +170,15 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers) {
                                 ToString(barrier.after)));
             break;
         }
-        case Barrier::Type::AccelStruct: {
+        case Barrier::Type::AccelStruct:
+        {
             D3D12AccelStruct* as = mDevice.AccelStruct(barrier.accelStruct);
             AIR_CHECK(as, "barrier on invalid acceleration structure");
             uavBarrier(as->resource.Get());
             break;
         }
-        case Barrier::Type::Aliasing: {
+        case Barrier::Type::Aliasing:
+        {
             D3D12_RESOURCE_BARRIER aliasing = {};
             aliasing.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
             native.push_back(aliasing);
@@ -155,12 +186,14 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers) {
         }
         }
     }
-    if (!native.empty()) {
+    if (!native.empty())
+    {
         mList->ResourceBarrier(UINT(native.size()), native.data());
     }
 }
 
-void D3D12CommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size) {
+void D3D12CommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size)
+{
     D3D12Buffer* d = mDevice.Buffer(dst);
     D3D12Buffer* s = mDevice.Buffer(src);
     AIR_CHECK(d && s, "CopyBuffer: invalid buffer");
@@ -170,9 +203,11 @@ void D3D12CommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle 
     Capture(std::format("CopyBuffer '{}' <- '{}' ({} bytes)", d->desc.debugName, s->desc.debugName, size));
 }
 
-namespace {
+namespace
+{
 
-D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint(const TextureDesc& desc, u32 mip, u64 offset) {
+D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint(const TextureDesc& desc, u32 mip, u64 offset)
+{
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint = {};
     footprint.Offset = offset;
     footprint.Footprint.Format = ToDxgi(desc.format);
@@ -185,7 +220,8 @@ D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint(const TextureDesc& desc, u32 mip, u
 
 } // namespace
 
-void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) {
+void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset)
+{
     D3D12Texture* t = mDevice.Texture(dst);
     D3D12Buffer* b = mDevice.Buffer(src);
     AIR_CHECK(t && b, "CopyBufferToTexture: invalid resource");
@@ -203,7 +239,8 @@ void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHan
     Capture(std::format("CopyBufferToTexture '{}' mip {} <- '{}'", t->desc.debugName, mip, b->desc.debugName));
 }
 
-void D3D12CommandList::CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) {
+void D3D12CommandList::CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip)
+{
     D3D12Texture* t = mDevice.Texture(src);
     D3D12Buffer* b = mDevice.Buffer(dst);
     AIR_CHECK(t && b, "CopyTextureToBuffer: invalid resource");
@@ -221,7 +258,8 @@ void D3D12CommandList::CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, Text
     Capture(std::format("CopyTextureToBuffer '{}' <- '{}' mip {}", b->desc.debugName, t->desc.debugName, mip));
 }
 
-void D3D12CommandList::CopyTexture(TextureHandle dst, TextureHandle src) {
+void D3D12CommandList::CopyTexture(TextureHandle dst, TextureHandle src)
+{
     D3D12Texture* d = mDevice.Texture(dst);
     D3D12Texture* s = mDevice.Texture(src);
     AIR_CHECK(d && s, "CopyTexture: invalid texture");
@@ -229,12 +267,16 @@ void D3D12CommandList::CopyTexture(TextureHandle dst, TextureHandle src) {
     Capture(std::format("CopyTexture '{}' <- '{}'", d->desc.debugName, s->desc.debugName));
 }
 
-void D3D12CommandList::ClearTexture(TextureHandle handle, const float color[4]) {
+void D3D12CommandList::ClearTexture(TextureHandle handle, const float color[4])
+{
     D3D12Texture* t = mDevice.Texture(handle);
     AIR_CHECK(t, "ClearTexture: invalid texture");
-    if (Any(t->desc.usage & TextureUsage::RenderTarget)) {
+    if (Any(t->desc.usage & TextureUsage::RenderTarget))
+    {
         mList->ClearRenderTargetView(mDevice.GetRtv(handle), color, 0, nullptr);
-    } else {
+    }
+    else
+    {
         AIR_CHECK(Any(t->desc.usage & TextureUsage::UnorderedAccess),
                   "ClearTexture '{}' needs RenderTarget or UnorderedAccess usage", t->desc.debugName);
         BindRootState();
@@ -246,21 +288,26 @@ void D3D12CommandList::ClearTexture(TextureHandle handle, const float color[4]) 
     Capture(std::format("ClearTexture '{}'", t->desc.debugName));
 }
 
-void D3D12CommandList::SetPipeline(PipelineHandle handle) {
+void D3D12CommandList::SetPipeline(PipelineHandle handle)
+{
     D3D12Pipeline* pipeline = mDevice.Pipeline(handle);
     AIR_CHECK(pipeline, "SetPipeline: invalid pipeline");
     BindRootState();
-    if (pipeline->rayTracing) {
+    if (pipeline->rayTracing)
+    {
         mList->SetPipelineState1(pipeline->stateObject.Get());
         mRayTracingPipeline = pipeline;
-    } else {
+    }
+    else
+    {
         mList->SetPipelineState(pipeline->pso.Get());
         mRayTracingPipeline = nullptr;
     }
     Capture(std::format("SetPipeline '{}'", pipeline->name));
 }
 
-void D3D12CommandList::PushConstants(const void* data, u32 size) {
+void D3D12CommandList::PushConstants(const void* data, u32 size)
+{
     AIR_CHECK(size <= kRootConstantCount * 4, "push constants limited to {} bytes, got {}", kRootConstantCount * 4,
               size);
     BindRootState();
@@ -269,12 +316,14 @@ void D3D12CommandList::PushConstants(const void* data, u32 size) {
     mList->SetComputeRoot32BitConstants(0, (size + 3) / 4, words, 0);
 }
 
-void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z) {
+void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z)
+{
     mList->Dispatch(x, y, z);
     Capture(std::format("Dispatch {}x{}x{}", x, y, z));
 }
 
-void D3D12CommandList::DispatchRays(u32 width, u32 height, u32 depth) {
+void D3D12CommandList::DispatchRays(u32 width, u32 height, u32 depth)
+{
     AIR_CHECK(mRayTracingPipeline, "DispatchRays without a ray tracing pipeline");
     D3D12_DISPATCH_RAYS_DESC desc = {};
     desc.RayGenerationShaderRecord = mRayTracingPipeline->rayGen;
@@ -287,7 +336,8 @@ void D3D12CommandList::DispatchRays(u32 width, u32 height, u32 depth) {
     Capture(std::format("DispatchRays {}x{}x{}", width, height, depth));
 }
 
-void D3D12CommandList::BeginRenderPass(TextureHandle target, const float* clearColor) {
+void D3D12CommandList::BeginRenderPass(TextureHandle target, const float* clearColor)
+{
     D3D12Texture* t = mDevice.Texture(target);
     AIR_CHECK(t, "BeginRenderPass: invalid texture");
     const D3D12_CPU_DESCRIPTOR_HANDLE rtv = mDevice.GetRtv(target);
@@ -297,20 +347,25 @@ void D3D12CommandList::BeginRenderPass(TextureHandle target, const float* clearC
     const D3D12_RECT scissor = {0, 0, LONG(t->desc.width), LONG(t->desc.height)};
     mList->RSSetViewports(1, &viewport);
     mList->RSSetScissorRects(1, &scissor);
-    if (clearColor) {
+    if (clearColor)
+    {
         mList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
     }
     Capture(std::format("BeginRenderPass '{}'", t->desc.debugName));
 }
 
-void D3D12CommandList::EndRenderPass() {
+void D3D12CommandList::EndRenderPass()
+{
     Capture("EndRenderPass");
 }
 
-u32 D3D12CommandList::AllocateTimestamp() {
-    if (mTimestampBlocks.empty() || mTimestampBlocks.back().used == mTimestampBlocks.back().begin + kTimestampBlock) {
-        const u32 begin = mTimestamps->next.fetch_add(kTimestampBlock);
-        if (begin + kTimestampBlock > kMaxTimestampsPerFrame) {
+u32 D3D12CommandList::AllocateTimestamp()
+{
+    if (mTimestampBlocks.empty() || mTimestampBlocks.back().used == mTimestampBlocks.back().begin + kTimestampBlock)
+    {
+        const u32 begin = mTimestamps->queues[size_t(mQueue)].next.fetch_add(kTimestampBlock);
+        if (begin + kTimestampBlock > kMaxTimestampsPerFrame)
+        {
             return ~0u; // out of queries this frame: the scope is not timed
         }
         mTimestampBlocks.push_back({begin, begin});
@@ -318,38 +373,45 @@ u32 D3D12CommandList::AllocateTimestamp() {
     return mTimestampBlocks.back().used++;
 }
 
-void D3D12CommandList::BeginEvent(std::string_view name) {
+void D3D12CommandList::BeginEvent(std::string_view name)
+{
     ++mEventDepth;
     // PIX convention: metadata 1 = ANSI string (also shown by RenderDoc and Nsight).
     std::string text(name);
     mList->BeginEvent(1, text.c_str(), UINT(text.size() + 1));
-    if (mTimestamps) {
+    if (mTimestamps)
+    {
         const u32 index = AllocateTimestamp();
-        if (index != ~0u) {
-            mList->EndQuery(mTimestamps->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
+        if (index != ~0u)
+        {
+            mList->EndQuery(mTimestamps->queues[size_t(mQueue)].heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
         }
         mOpenScopes.push_back({std::move(text), index});
     }
     Capture(std::format("BeginEvent '{}'", name));
 }
 
-void D3D12CommandList::EndEvent() {
+void D3D12CommandList::EndEvent()
+{
     AIR_CHECK(mEventDepth > 0, "EndEvent without BeginEvent");
     --mEventDepth;
-    if (mTimestamps && !mOpenScopes.empty()) {
+    if (mTimestamps && !mOpenScopes.empty())
+    {
         OpenScope scope = std::move(mOpenScopes.back());
         mOpenScopes.pop_back();
         const u32 index = scope.begin == ~0u ? ~0u : AllocateTimestamp();
-        if (index != ~0u) {
-            mList->EndQuery(mTimestamps->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
-            mClosedScopes.push_back({std::move(scope.name), u32(mOpenScopes.size()), scope.begin, index});
+        if (index != ~0u)
+        {
+            mList->EndQuery(mTimestamps->queues[size_t(mQueue)].heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
+            mClosedScopes.push_back({std::move(scope.name), mQueue, u32(mOpenScopes.size()), scope.begin, index});
         }
     }
     mList->EndEvent();
     Capture("EndEvent");
 }
 
-void* D3D12CommandList::GetNativeHandle() {
+void* D3D12CommandList::GetNativeHandle()
+{
     mRootStateBound = false; // native code may change heaps and root signatures
     mRayTracingPipeline = nullptr;
     return mList;

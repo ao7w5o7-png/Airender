@@ -20,13 +20,16 @@
 #include <unordered_map>
 #include <vector>
 
-namespace air::rhi {
+namespace air::rhi
+{
 
-class TlsfAllocator {
+class TlsfAllocator
+{
 public:
     static constexpr u64 kMinBlockSize = 256; // allocation granularity (D3D12 CB alignment)
 
-    struct Allocation {
+    struct Allocation
+    {
         u64 offset = 0;
         u64 size = 0;
         u32 node = ~0u; // opaque id passed back to Free()
@@ -51,7 +54,8 @@ private:
     static constexpr u32 kFirstLevelCount = 64 - kFirstLevelShift;
     static constexpr u32 kNull = ~0u;
 
-    struct Node {
+    struct Node
+    {
         u64 offset = 0;
         u64 size = 0;
         u32 prevPhys = kNull;
@@ -81,20 +85,23 @@ private:
 };
 
 // A heap created by the backend (ID3D12Heap, VkDeviceMemory, or CPU memory for the Null backend).
-struct GpuHeap {
+struct GpuHeap
+{
     void* native = nullptr;
     u8* mapped = nullptr; // persistent CPU mapping for host visible memory
     u64 size = 0;
 };
 
-class IGpuHeapProvider {
+class IGpuHeapProvider
+{
 public:
     virtual ~IGpuHeapProvider() = default;
     virtual std::optional<GpuHeap> CreateHeap(u32 memoryTypeKey, MemoryLocation location, u64 size) = 0;
     virtual void DestroyHeap(u32 memoryTypeKey, const GpuHeap& heap) = 0;
 };
 
-struct GpuAllocation {
+struct GpuAllocation
+{
     void* nativeHeap = nullptr;
     u8* mapped = nullptr; // already offset; nullptr for device-only memory
     u64 offset = 0;
@@ -111,16 +118,19 @@ private:
     bool mDedicated = false;
 };
 
-class GpuMemoryAllocator {
+class GpuMemoryAllocator
+{
 public:
-    struct Config {
+    struct Config
+    {
         u64 defaultHeapSize = 256ull << 20;    // 256 MiB blocks
         u64 dedicatedThreshold = 64ull << 20;  // >= 64 MiB gets its own heap
         u64 hostVisibleHeapSize = 64ull << 20; // smaller blocks for Upload / Readback
         bool freeEmptyHeaps = true;            // keep at most one empty heap per pool
     };
 
-    struct Request {
+    struct Request
+    {
         u32 memoryTypeKey = 0;
         MemoryLocation location = MemoryLocation::DeviceLocal;
         u64 size = 0;
@@ -128,7 +138,8 @@ public:
         bool forceDedicated = false;
     };
 
-    struct Stats {
+    struct Stats
+    {
         u64 reservedBytes = 0; // sum of heap sizes
         u64 usedBytes = 0;     // sum of live allocation sizes
         u32 heapCount = 0;
@@ -144,13 +155,15 @@ public:
     void Free(const GpuAllocation& allocation);
 
     // Per heap block usage, for memory visualisation (fragmentation, dedicated heaps).
-    struct HeapUsage {
+    struct HeapUsage
+    {
         u64 size = 0;
         u64 usedBytes = 0;
         u32 allocationCount = 0;
         bool dedicated = false;
     };
-    struct PoolStats {
+    struct PoolStats
+    {
         u32 memoryTypeKey = 0;
         MemoryLocation location = MemoryLocation::DeviceLocal;
         Stats stats;
@@ -162,12 +175,14 @@ public:
     std::vector<PoolStats> GetPoolStats() const; // sorted by memory type key
 
 private:
-    struct Block {
+    struct Block
+    {
         GpuHeap heap;
         std::unique_ptr<TlsfAllocator> tlsf; // null for dedicated heaps
         bool alive = false;
     };
-    struct Pool {
+    struct Pool
+    {
         mutable std::mutex mutex;
         MemoryLocation location = MemoryLocation::DeviceLocal;
         std::vector<Block> blocks;

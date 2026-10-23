@@ -54,5 +54,7 @@ if(AIR_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+air_write_shader_manifest()
+
 message(STATUS "Airender: D3D12=${AIR_RHI_D3D12} Vulkan=${AIR_RHI_VULKAN} Editor=${AIR_BUILD_EDITOR} "
                "DLSS=${AIR_WITH_DLSS} Tests=${AIR_BUILD_TESTS}")

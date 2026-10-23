@@ -20,24 +20,29 @@
 #include <string>
 #include <vector>
 
-namespace airtest {
+namespace airtest
+{
 
-inline bool ContainsLine(const std::vector<std::string>& lines, std::string_view needle) {
+inline bool ContainsLine(const std::vector<std::string>& lines, std::string_view needle)
+{
     return std::any_of(lines.begin(), lines.end(),
                        [&](const std::string& l) { return l.find(needle) != std::string::npos; });
 }
 
-inline size_t CountLines(const std::vector<std::string>& lines, std::string_view needle) {
+inline size_t CountLines(const std::vector<std::string>& lines, std::string_view needle)
+{
     return size_t(std::count_if(lines.begin(), lines.end(),
                                 [&](const std::string& l) { return l.find(needle) != std::string::npos; }));
 }
 
 // Null device + task system + the Cornell box scene + FrameRunner with the named features.
-class Headless {
+class Headless
+{
 public:
     explicit Headless(const std::vector<std::string>& features, air::u32 width = 64, air::u32 height = 32,
                       bool captureGraph = true)
-        : device(air::rhi::CreateDevice({.backend = air::rhi::Backend::Null})), tasks(2) {
+        : device(air::rhi::CreateDevice({.backend = air::rhi::Backend::Null})), tasks(2)
+    {
         air::renderer::FeatureRegistry registry;
         air::renderer::RegisterBuiltinFeatures(registry);
         scene = std::make_unique<air::renderer::Scene>(*device, air::renderer::MakeCornellBox());
@@ -46,22 +51,26 @@ public:
             *device, tasks,
             air::renderer::FrameRunnerDesc{
                 .width = width, .height = height, .captureCommands = true, .captureGraph = captureGraph});
-        for (const std::string& name : features) {
+        for (const std::string& name : features)
+        {
             auto feature = registry.Create(name);
             EXPECT(feature != nullptr);
-            if (feature) {
+            if (feature)
+            {
                 EXPECT(runner->AddFeature(name, std::move(feature)));
             }
         }
     }
 
-    ~Headless() {
+    ~Headless()
+    {
         runner.reset();
         scene.reset();
         device->WaitIdle();
     }
 
-    air::renderer::FrameResult Frame() {
+    air::renderer::FrameResult Frame()
+    {
         scene->Update();
         return runner->RenderFrame(scene->Get(), camera);
     }
@@ -75,37 +84,44 @@ public:
 
 // Compares `actual` against tests/golden/<name>. Set AIR_UPDATE_GOLDEN=1 to (re)write the files,
 // then review the diff with git like any other code change.
-inline bool CheckGolden(const std::string& name, const std::string& actual) {
+inline bool CheckGolden(const std::string& name, const std::string& actual)
+{
     const std::filesystem::path path = std::filesystem::path(AIR_SOURCE_DIR) / "tests" / "golden" / name;
     const char* update = std::getenv("AIR_UPDATE_GOLDEN"); // NOLINT(concurrency-mt-unsafe): test thread only
-    if (update && std::string(update) == "1") {
+    if (update && std::string(update) == "1")
+    {
         std::filesystem::create_directories(path.parent_path());
         std::ofstream(path, std::ios::binary) << actual;
         std::printf("  updated golden %s\n", path.string().c_str());
         return true;
     }
     std::ifstream file(path, std::ios::binary);
-    if (!file) {
+    if (!file)
+    {
         std::fprintf(stderr, "  missing golden %s (run with AIR_UPDATE_GOLDEN=1 to create it)\n",
                      path.string().c_str());
         return false;
     }
     std::stringstream expected;
     expected << file.rdbuf();
-    if (expected.str() == actual) {
+    if (expected.str() == actual)
+    {
         return true;
     }
     // Report the first differing line so the failure is actionable without a diff tool.
     std::istringstream a(expected.str()), b(actual);
     std::string la, lb;
     int line = 1;
-    while (true) {
+    while (true)
+    {
         const bool ha = bool(std::getline(a, la));
         const bool hb = bool(std::getline(b, lb));
-        if (!ha && !hb) {
+        if (!ha && !hb)
+        {
             break;
         }
-        if (!ha || !hb || la != lb) {
+        if (!ha || !hb || la != lb)
+        {
             std::fprintf(stderr, "  golden %s differs at line %d\n    expected: %s\n    actual:   %s\n", name.c_str(),
                          line, ha ? la.c_str() : "<end of file>", hb ? lb.c_str() : "<end of file>");
             break;

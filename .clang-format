@@ -2,8 +2,12 @@ BasedOnStyle: LLVM
 IndentWidth: 4
 ColumnLimit: 120
 PointerAlignment: Left
+# Opening braces of multi-line blocks go on their own line (functions, types, namespaces,
+# control statements, multi-line lambdas). One-line inline functions and lambdas stay on one line.
+BreakBeforeBraces: Allman
 AllowShortFunctionsOnASingleLine: Inline
 AllowShortIfStatementsOnASingleLine: Never
+AllowShortBlocksOnASingleLine: Never
 AccessModifierOffset: -4
 NamespaceIndentation: None
 IncludeBlocks: Preserve

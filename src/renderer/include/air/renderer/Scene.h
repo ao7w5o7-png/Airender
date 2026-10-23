@@ -16,12 +16,14 @@
 #include <string>
 #include <vector>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
 using float3 = hlsl::float3;
 
 // Pinhole camera with a physical exposure. yaw = 0, pitch = 0 looks down -z; +y is up.
-struct Camera {
+struct Camera
+{
     float3 position = {0.0f, 1.0f, 4.0f};
     float yaw = 0.0f;   // radians, around +y
     float pitch = 0.0f; // radians, positive looks up
@@ -40,7 +42,8 @@ struct Camera {
 // 1 / (1.2 * 2^EV100) (saturation-based sensitivity, Lagarde & de Rousiers 2014).
 float ExposureScale(float ev100);
 
-struct Material {
+struct Material
+{
     std::string name;
     float3 baseColor = {0.8f, 0.8f, 0.8f};
     float roughness = 0.5f;
@@ -52,20 +55,23 @@ struct Material {
     bool operator==(const Material&) const = default;
 };
 
-struct Mesh {
+struct Mesh
+{
     std::string name;
     std::vector<gpu::Vertex> vertices;
     std::vector<u32> indices; // triangle list
 };
 
-struct Instance {
+struct Instance
+{
     std::string name;
     u32 mesh = 0;
     u32 material = 0;
     float transform[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}; // row-major object-to-world
 };
 
-struct SceneDesc {
+struct SceneDesc
+{
     std::string name;
     std::vector<Mesh> meshes;
     std::vector<Material> materials;
@@ -80,8 +86,19 @@ Mesh MakeBox(std::string name, float3 halfExtent); // centred at the origin, out
 Mesh MakeSphere(std::string name, float radius, u32 segments);
 void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0f, float scale = 1.0f);
 
-// Built-in scenes: "cornell_box" (default) and "furnace" (spheres of increasing roughness in a
-// uniform white environment: with energy-conserving white materials they become invisible).
+// Built-in scenes (all procedural and deterministic, so their images match across platforms):
+//   cornell_box    the default: a 2 m box with a ceiling light, a tall box and a gold sphere
+//   furnace        spheres of increasing roughness in a uniform environment: with
+//                  energy-conserving white materials they become invisible
+//   veach_mis      4 glossy plates reflecting 4 spherical lights of equal power and very different
+//                  sizes (Veach's MIS test): NEE and BSDF sampling each fail somewhere
+//   material_grid  roughness x material grid of spheres under one area light
+//   sphere_field   ~2400 instanced spheres and boxes, 32 materials, sun (1.6e9 nits) + sky,
+//                  emissive spheres: TLAS scale, material variety, extreme dynamic range
+//   many_lights    a hall lit by ~370 lights spanning two orders of magnitude: light selection
+//   door           light reaches the camera's room only through a door left ajar: indirect-
+//                  dominated transport, hard for unidirectional path tracing
+//   terrain        a 2.1M triangle height field with a lake, sun and sky: dense geometry
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 std::vector<std::string> BuiltinSceneNames();
@@ -90,25 +107,32 @@ std::optional<SceneDesc> MakeBuiltinScene(std::string_view name);
 std::string Validate(const SceneDesc& desc);
 
 // The tables a GpuScene is made of, also used by the CPU reference renderer.
-// Every triangle of every instance has a light-list slot (instance i starts at FirstLightIndices()[i]),
-// so emission can change without touching instance data; non-emissive slots have probability 0.
+// The light list holds the triangles of emissive instances only (an instance is emissive when its
+// material emits), all of an instance's triangles in order, so triangle t of instance i is entry
+// FirstLightIndices()[i] + t; non-emissive instances map to gpu::kInvalidIndex. Both change with
+// the materials, which is why they live in per-frame buffers rather than in the instance data.
 std::vector<u32> FirstLightIndices(const SceneDesc& desc);
 std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, double* totalPower = nullptr);
-gpu::InstanceData MakeInstanceData(const Instance& instance, u32 firstLight, u32 vertexBuffer, u32 indexBuffer);
+gpu::InstanceData MakeInstanceData(const Instance& instance, u32 vertexBuffer, u32 indexBuffer);
 float3 TransformPoint(const float transform[3][4], float3 p);
 
-struct GpuScene {
+struct GpuScene
+{
     rhi::AccelStructHandle tlas;
     rhi::BufferHandle instances; // StructuredBuffer<gpu::InstanceData>, indexed by InstanceID()
     rhi::BufferHandle materials; // StructuredBuffer<gpu::MaterialData>
     rhi::BufferHandle lights;    // StructuredBuffer<gpu::LightTriangle>, at least one element
+    // StructuredBuffer<uint> per instance: its first entry in `lights`, gpu::kInvalidIndex if it does
+    // not emit. Written together with `materials` and `lights`, so the three always agree.
+    rhi::BufferHandle instanceLights;
     u32 lightCount = 0;
     float lightPower = 0.0f; // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
     float3 environment = {0.0f, 0.0f, 0.0f};
     u64 version = 0; // bumped whenever anything that changes the image changes
 };
 
-class Scene {
+class Scene
+{
 public:
     // Uploads geometry, builds the acceleration structures and waits for the GPU.
     Scene(rhi::Device& device, SceneDesc desc);
@@ -132,7 +156,8 @@ private:
     void Upload();
     void WriteDynamicData();
 
-    struct GpuMesh {
+    struct GpuMesh
+    {
         rhi::BufferHandle vertices;
         rhi::BufferHandle indices;
         rhi::AccelStructHandle blas;
@@ -147,6 +172,7 @@ private:
     std::vector<rhi::BufferHandle> mMaterialRing;
     std::vector<rhi::BufferHandle> mLightRing;
     std::vector<u32> mLightRingCapacity;
+    std::vector<rhi::BufferHandle> mInstanceLightRing;
     u32 mRingSlot = 0;
     bool mDirty = true;
     u64 mGeometryBytes = 0;

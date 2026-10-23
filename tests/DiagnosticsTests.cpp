@@ -6,14 +6,17 @@
 using namespace air;
 using namespace airtest;
 
-TEST(Profiler_CollectsScopesFromTasksAndMainThread) {
+TEST(Profiler_CollectsScopesFromTasksAndMainThread)
+{
     Profiler& profiler = Profiler::Get();
     profiler.SetEnabled(true);
     profiler.BeginFrame();
     {
         TaskSystem tasks(2);
         AIR_PROFILE_SCOPE("Test.Outer");
-        { AIR_PROFILE_SCOPE("Test.Inner"); }
+        {
+            AIR_PROFILE_SCOPE("Test.Inner");
+        }
         tasks.Launch("Test.Task", [] {}).Wait();
     }
     profiler.EndFrame();
@@ -30,7 +33,8 @@ TEST(Profiler_CollectsScopesFromTasksAndMainThread) {
     EXPECT(renderer::ToJson(frame).Dump(0).find("\"Test.Outer\"") != std::string::npos);
 }
 
-TEST(FrameRunner_ProfileReportsPassTimingsAndMemory) {
+TEST(FrameRunner_ProfileReportsPassTimingsAndMemory)
+{
     auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
     TaskSystem tasks(2);
     {
@@ -58,8 +62,48 @@ TEST(FrameRunner_ProfileReportsPassTimingsAndMemory) {
     device->WaitIdle();
 }
 
-TEST(Diagnostics_FormatBytes) {
+TEST(Diagnostics_FormatBytes)
+{
     EXPECT(renderer::FormatBytes(512) == "512 B");
     EXPECT(renderer::FormatBytes(1536) == "1.50 KiB");
     EXPECT(renderer::FormatBytes(3ull << 30) == "3.00 GiB");
+}
+
+// GPU busy time counts overlapping scopes (async compute, nesting) once and skips the gaps where the
+// queues waited, e.g. for a swapchain buffer at vsync.
+TEST(Diagnostics_GpuBusyTimeSkipsWaits)
+{
+    using rhi::QueueType;
+    const std::vector<rhi::GpuTimingScope> scopes = {
+        {"Trace", QueueType::Graphics, 0, 0.0, 2.0},
+        {"Trace.Inner", QueueType::Graphics, 1, 0.5, 1.0}, // nested: already counted
+        {"Generate", QueueType::Compute, 0, 1.5, 1.0},     // overlaps Trace by 0.5
+        {"UI", QueueType::Graphics, 0, 6.0, 0.5},          // after waiting 3.5 for vsync
+    };
+    EXPECT(std::abs(rhi::ComputeBusyMs(scopes) - 3.0) < 1e-9);
+    EXPECT(rhi::ComputeBusyMs({}) == 0.0);
+}
+
+// Destroyed resources wait for the GPU before they are released; the resource list must hide them
+// immediately, or its length depends on how far the GPU is behind (the editor list flickers).
+TEST(Device_ResourceListHidesResourcesPendingDeletion)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    auto has = [&](std::string_view name)
+    {
+        const std::vector<rhi::ResourceInfo> list = device->GetResourceList();
+        return std::any_of(list.begin(), list.end(), [&](const rhi::ResourceInfo& r) { return r.name == name; });
+    };
+    const rhi::TextureHandle texture = device->CreateTexture({.format = rhi::Format::RGBA16_FLOAT,
+                                                              .width = 16,
+                                                              .height = 16,
+                                                              .usage = rhi::TextureUsage::ShaderResource,
+                                                              .debugName = "Test.Texture"});
+    const rhi::HeapHandle heap = device->CreateHeap(1 << 16, rhi::MemoryLocation::DeviceLocal, "Test.Heap");
+    EXPECT(has("Test.Texture") && has("Test.Heap"));
+    device->DestroyTexture(texture);
+    device->DestroyHeap(heap);
+    EXPECT(!has("Test.Texture") && !has("Test.Heap"));
+    device->WaitIdle();
+    EXPECT(!has("Test.Texture") && !has("Test.Heap"));
 }

@@ -15,9 +15,11 @@
 #include <variant>
 #include <vector>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
-class ParameterSet {
+class ParameterSet
+{
 public:
     void Add(std::string name, u32* value, std::string description, u32 min = 0, u32 max = ~0u);
     void Add(std::string name, float* value, std::string description, float min = -1e30f, float max = 1e30f);
@@ -33,7 +35,8 @@ public:
     // {"name": {"value": ..., "type": "u32", "min": ..., "max": ..., "description": ...}}
     json::Value ToJson() const;
 
-    struct Entry {
+    struct Entry
+    {
         std::string name;
         std::string description;
         std::variant<u32*, float*, bool*> value;

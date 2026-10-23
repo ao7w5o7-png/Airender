@@ -12,9 +12,11 @@
 #include <string>
 #include <vector>
 
-namespace air {
+namespace air
+{
 
-struct Image {
+struct Image
+{
     u32 width = 0;
     u32 height = 0;
     std::vector<float> rgba; // width * height * 4, linear, row 0 = top
@@ -36,13 +38,15 @@ std::optional<Image> ReadPpm(const std::filesystem::path& path);
 // Picks the reader from the extension (.pfm / .ppm).
 std::optional<Image> ReadImage(const std::filesystem::path& path);
 
-struct ImageCompareOptions {
+struct ImageCompareOptions
+{
     float pixelThreshold = 1e-3f; // per-channel absolute difference that counts a pixel as different
     float maxRmse = 1e-3f;        // pass criteria
     float maxDifferingFraction = 0.0f;
 };
 
-struct ImageCompareResult {
+struct ImageCompareResult
+{
     bool sizeMismatch = false;
     double rmse = 0.0;
     double psnr = 0.0; // dB, +inf when identical

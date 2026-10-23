@@ -9,23 +9,27 @@
 #include <array>
 #include <span>
 
-namespace air::pt {
+namespace air::pt
+{
 
 using Rgb = std::array<float, 3>;
 using Direction = std::array<float, 3>; // local shading frame, z = normal, pointing away from the surface
 
-struct Material {
+struct Material
+{
     Rgb baseColor = {0.8f, 0.8f, 0.8f};
     float roughness = 0.5f; // perceptual; alpha = roughness^2
     float metallic = 0.0f;
 };
 
-struct BsdfValue {
+struct BsdfValue
+{
     Rgb fCos{};       // f(wo, wi) * cos(theta_i)
     float pdf = 0.0f; // solid angle pdf of SampleBsdf producing wi
 };
 
-struct BsdfDraw {
+struct BsdfDraw
+{
     Direction wi{};
     Rgb weight{}; // f * cos / pdf
     float pdf = 0.0f;

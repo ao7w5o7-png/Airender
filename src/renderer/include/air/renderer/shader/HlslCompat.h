@@ -25,11 +25,13 @@
 
 // HLSL spells its intrinsics in lower case; the C++ mirror keeps the same names.
 // NOLINTBEGIN(readability-identifier-naming)
-namespace air::hlsl {
+namespace air::hlsl
+{
 
 using uint = u32;
 
-struct float2 {
+struct float2
+{
     float x = 0, y = 0;
     constexpr float2() = default;
     constexpr float2(float s) : x(s), y(s) {} // NOLINT(google-explicit-constructor): HLSL scalar promotion
@@ -37,7 +39,8 @@ struct float2 {
     bool operator==(const float2&) const = default; // C++ only: whole-vector equality
 };
 
-struct float3 {
+struct float3
+{
     float x = 0, y = 0, z = 0;
     constexpr float3() = default;
     constexpr float3(float s) : x(s), y(s), z(s) {} // NOLINT(google-explicit-constructor): HLSL scalar promotion
@@ -45,7 +48,8 @@ struct float3 {
     bool operator==(const float3&) const = default;
 };
 
-struct float4 {
+struct float4
+{
     float x = 0, y = 0, z = 0, w = 0;
     constexpr float4() = default;
     constexpr float4(float s) : x(s), y(s), z(s), w(s) {} // NOLINT(google-explicit-constructor)
@@ -58,49 +62,64 @@ static_assert(sizeof(float2) == 8 && sizeof(float3) == 12 && sizeof(float4) == 1
 
 // Component-wise arithmetic.
 #define AIR_HLSL_VEC_OPS(T, APPLY)                                                                                     \
-    constexpr T operator+(T a, T b) {                                                                                  \
+    constexpr T operator+(T a, T b)                                                                                    \
+    {                                                                                                                  \
         return APPLY(a, b, +);                                                                                         \
     }                                                                                                                  \
-    constexpr T operator-(T a, T b) {                                                                                  \
+    constexpr T operator-(T a, T b)                                                                                    \
+    {                                                                                                                  \
         return APPLY(a, b, -);                                                                                         \
     }                                                                                                                  \
-    constexpr T operator*(T a, T b) {                                                                                  \
+    constexpr T operator*(T a, T b)                                                                                    \
+    {                                                                                                                  \
         return APPLY(a, b, *);                                                                                         \
     }                                                                                                                  \
-    constexpr T operator/(T a, T b) {                                                                                  \
+    constexpr T operator/(T a, T b)                                                                                    \
+    {                                                                                                                  \
         return APPLY(a, b, /);                                                                                         \
     }                                                                                                                  \
-    constexpr T operator*(T a, float s) {                                                                              \
+    constexpr T operator*(T a, float s)                                                                                \
+    {                                                                                                                  \
         return a * T(s);                                                                                               \
     }                                                                                                                  \
-    constexpr T operator*(float s, T a) {                                                                              \
+    constexpr T operator*(float s, T a)                                                                                \
+    {                                                                                                                  \
         return T(s) * a;                                                                                               \
     }                                                                                                                  \
-    constexpr T operator/(T a, float s) {                                                                              \
+    constexpr T operator/(T a, float s)                                                                                \
+    {                                                                                                                  \
         return a / T(s);                                                                                               \
     }                                                                                                                  \
-    constexpr T operator+(T a, float s) {                                                                              \
+    constexpr T operator+(T a, float s)                                                                                \
+    {                                                                                                                  \
         return a + T(s);                                                                                               \
     }                                                                                                                  \
-    constexpr T operator-(T a, float s) {                                                                              \
+    constexpr T operator-(T a, float s)                                                                                \
+    {                                                                                                                  \
         return a - T(s);                                                                                               \
     }                                                                                                                  \
-    constexpr T operator-(float s, T a) {                                                                              \
+    constexpr T operator-(float s, T a)                                                                                \
+    {                                                                                                                  \
         return T(s) - a;                                                                                               \
     }                                                                                                                  \
-    constexpr T operator-(T a) {                                                                                       \
+    constexpr T operator-(T a)                                                                                         \
+    {                                                                                                                  \
         return T(0.0f) - a;                                                                                            \
     }                                                                                                                  \
-    constexpr T& operator+=(T& a, T b) {                                                                               \
+    constexpr T& operator+=(T& a, T b)                                                                                 \
+    {                                                                                                                  \
         return a = a + b;                                                                                              \
     }                                                                                                                  \
-    constexpr T& operator-=(T& a, T b) {                                                                               \
+    constexpr T& operator-=(T& a, T b)                                                                                 \
+    {                                                                                                                  \
         return a = a - b;                                                                                              \
     }                                                                                                                  \
-    constexpr T& operator*=(T& a, T b) {                                                                               \
+    constexpr T& operator*=(T& a, T b)                                                                                 \
+    {                                                                                                                  \
         return a = a * b;                                                                                              \
     }                                                                                                                  \
-    constexpr T& operator/=(T& a, T b) {                                                                               \
+    constexpr T& operator/=(T& a, T b)                                                                                 \
+    {                                                                                                                  \
         return a = a / b;                                                                                              \
     }
 
@@ -116,25 +135,32 @@ AIR_HLSL_VEC_OPS(float4, AIR_HLSL_APPLY4)
 #undef AIR_HLSL_APPLY4
 
 // Scalar intrinsics.
-inline float saturate(float v) {
+inline float saturate(float v)
+{
     return std::clamp(v, 0.0f, 1.0f);
 }
-inline float clamp(float v, float lo, float hi) {
+inline float clamp(float v, float lo, float hi)
+{
     return std::clamp(v, lo, hi);
 }
-inline float lerp(float a, float b, float t) {
+inline float lerp(float a, float b, float t)
+{
     return a + (b - a) * t;
 }
-inline float rsqrt(float v) {
+inline float rsqrt(float v)
+{
     return 1.0f / std::sqrt(v);
 }
-inline float rcp(float v) {
+inline float rcp(float v)
+{
     return 1.0f / v;
 }
-inline float frac(float v) {
+inline float frac(float v)
+{
     return v - std::floor(v);
 }
-inline bool isfinite(float v) {
+inline bool isfinite(float v)
+{
     return std::isfinite(v);
 }
 using std::abs;
@@ -150,70 +176,90 @@ using std::pow;
 using std::sin;
 using std::sqrt;
 using std::tan;
-inline uint asuint(float v) {
+inline uint asuint(float v)
+{
     uint u;
     std::memcpy(&u, &v, 4);
     return u;
 }
-inline float asfloat(uint u) {
+inline float asfloat(uint u)
+{
     float v;
     std::memcpy(&v, &u, 4);
     return v;
 }
 
 // Vector intrinsics.
-constexpr float dot(float2 a, float2 b) {
+constexpr float dot(float2 a, float2 b)
+{
     return a.x * b.x + a.y * b.y;
 }
-constexpr float dot(float3 a, float3 b) {
+constexpr float dot(float3 a, float3 b)
+{
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
-constexpr float dot(float4 a, float4 b) {
+constexpr float dot(float4 a, float4 b)
+{
     return a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
 }
-constexpr float3 cross(float3 a, float3 b) {
+constexpr float3 cross(float3 a, float3 b)
+{
     return float3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x);
 }
-inline float length(float3 v) {
+inline float length(float3 v)
+{
     return std::sqrt(dot(v, v));
 }
-inline float length(float2 v) {
+inline float length(float2 v)
+{
     return std::sqrt(dot(v, v));
 }
-inline float3 normalize(float3 v) {
+inline float3 normalize(float3 v)
+{
     return v * (1.0f / length(v));
 }
-inline float3 lerp(float3 a, float3 b, float t) {
+inline float3 lerp(float3 a, float3 b, float t)
+{
     return a + (b - a) * t;
 }
-inline float3 lerp(float3 a, float3 b, float3 t) {
+inline float3 lerp(float3 a, float3 b, float3 t)
+{
     return a + (b - a) * t;
 }
-inline float3 saturate(float3 v) {
+inline float3 saturate(float3 v)
+{
     return float3(saturate(v.x), saturate(v.y), saturate(v.z));
 }
-inline float3 min(float3 a, float3 b) {
+inline float3 min(float3 a, float3 b)
+{
     return float3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
 }
-inline float3 max(float3 a, float3 b) {
+inline float3 max(float3 a, float3 b)
+{
     return float3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
 }
-inline float3 abs(float3 v) {
+inline float3 abs(float3 v)
+{
     return float3(std::abs(v.x), std::abs(v.y), std::abs(v.z));
 }
-inline float3 sqrt(float3 v) {
+inline float3 sqrt(float3 v)
+{
     return float3(std::sqrt(v.x), std::sqrt(v.y), std::sqrt(v.z));
 }
-inline float3 exp(float3 v) {
+inline float3 exp(float3 v)
+{
     return float3(std::exp(v.x), std::exp(v.y), std::exp(v.z));
 }
-inline float3 pow(float3 v, float e) {
+inline float3 pow(float3 v, float e)
+{
     return float3(std::pow(v.x, e), std::pow(v.y, e), std::pow(v.z, e));
 }
-inline float3 reflect(float3 i, float3 n) {
+inline float3 reflect(float3 i, float3 n)
+{
     return i - 2.0f * dot(n, i) * n;
 }
-inline bool any(float3 v) {
+inline bool any(float3 v)
+{
     return v.x != 0.0f || v.y != 0.0f || v.z != 0.0f;
 }
 

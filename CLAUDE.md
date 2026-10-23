@@ -8,6 +8,9 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Gate before pushing: `python3 tools/air.py check` (format + layering + build + all tests). Add
   `--full` (clang-tidy + TSAN) after touching concurrent code.
 - Run a subset of tests: `python3 tools/air.py test <name substring>`.
+- After editing HLSL: `python3 tools/air.py shaders` compiles every shader with the build's exact
+  dxc command lines (no C++ build needed). A running editor hot-reloads saved shaders by itself
+  (docs/architecture.md §9.1).
 - Run the renderer: `python3 tools/air.py run -- render --features pathtracer,example --frames 2 --report out/report.json`
   - The report is JSON: per-frame stats, feature parameters and status, `errors`, `passed`. Exit
     code 0 = passed, 1 = validation errors or leaks, 2 = usage or environment error.
@@ -21,6 +24,15 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Rendering correctness: `aircli reference --scene cornell_box --output ref.pfm` renders on the CPU
   with the same `.hlsli` integrator; compare a GPU `render --output gpu.pfm` against it. BSDF and
   integrator changes must keep `BsdfTests` / `IntegratorTests` (white furnace, energy) green.
+- Test scenes (`aircli scenes` lists them with sizes; docs/architecture.md §8.1): pick the one that
+  stresses the change, e.g. `veach_mis` for MIS / light sampling, `many_lights` for light
+  selection, `door` for indirect transport, `sphere_field` / `terrain` for instancing, dense
+  geometry and memory. Validate GPU against `aircli reference` on the same scene.
+- Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
+  upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
+  (output size); see docs/architecture.md §8.5.
+- Before trusting GPU timings, check the report's `vramBudgetBytes`: other processes holding VRAM
+  (graphics debuggers, IDEs) make WDDM page resources to system memory and inflate every pass.
 - Debug a frame with `--set pathtracer.debugView=N` (normals, albedo, depth, heatmaps, direct /
   indirect) or `--set pathtracer.furnace=1`; see docs/architecture.md §8.4.
 - All of the above works without a GPU (Null backend), except GPU renders.
@@ -42,6 +54,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Execute lambdas may run concurrently on worker threads: capture by value or read only immutable data.
 - Every new pass gets at least one Null backend test (`Headless` in `tests/TestHelpers.h`)
   asserting there are no validation errors.
+- A compute pass that depends on little and is needed late can run on the compute queue: add
+  `PassFlags::AsyncCompute`. The graph inserts the cross-queue waits and hand-over barriers; the
+  pass may only use compute-queue states (no `SRVGraphics`, render targets, depth). Check the
+  schedule in `DumpText()` (`Submissions:`), and compare GPU timings with `--no-async-compute`
+  (docs/architecture.md §5.4).
 
 ## Features talk through the blackboard
 - Publish and consume per-frame textures and values via `ctx.blackboard` with the keys in
@@ -56,4 +73,7 @@ serialising shared mutable state through a `Pipe` over adding locks.
 ## Style
 - C++20, as defined by `.clang-format` / `.clang-tidy`: types and functions `PascalCase`, private
   members `mName`, constants `kName`.
+- Braces of multi-line blocks on their own line (Allman), in C++ and HLSL alike; one-line inline
+  functions and lambdas stay on one line. Run `python3 tools/air.py format` after editing: it runs
+  clang-format 18 on C++ and fixes HLSL brace placement (clang-format cannot parse HLSL).
 - Invariants use `AIR_CHECK` (always on, messages name the pass/resource); debug-only checks use `AIR_DCHECK`.

@@ -2,33 +2,42 @@
 
 #include "air/renderer/Scene.h"
 
+#include "SceneBuilders.h"
+
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <numbers>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
 using hlsl::cross;
 using hlsl::dot;
 using hlsl::normalize;
 
-float3 Camera::Forward() const {
+float3 Camera::Forward() const
+{
     return {-std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
 }
 
-float3 Camera::Right() const {
+float3 Camera::Right() const
+{
     return {std::cos(yaw), 0.0f, -std::sin(yaw)};
 }
 
-float3 Camera::Up() const {
+float3 Camera::Up() const
+{
     return cross(Right(), Forward());
 }
 
-float ExposureScale(float ev100) {
+float ExposureScale(float ev100)
+{
     return 1.0f / (1.2f * std::exp2(ev100));
 }
 
-gpu::MaterialData Material::ToGpu() const {
+gpu::MaterialData Material::ToGpu() const
+{
     gpu::MaterialData out;
     out.baseColor = baseColor;
     out.roughness = roughness;
@@ -38,24 +47,30 @@ gpu::MaterialData Material::ToGpu() const {
     return out;
 }
 
-Mesh MakeQuad(std::string name, float3 p0, float3 p1, float3 p2, float3 p3, float3 normal) {
+Mesh MakeQuad(std::string name, float3 p0, float3 p1, float3 p2, float3 p3, float3 normal)
+{
     Mesh mesh;
     mesh.name = std::move(name);
     const float3 n = normalize(normal);
-    for (const float3& p : {p0, p1, p2, p3}) {
+    for (const float3& p : {p0, p1, p2, p3})
+    {
         mesh.vertices.push_back({p, 0.0f, n, 0.0f});
     }
     mesh.vertices[1].u = mesh.vertices[2].u = 1.0f;
     mesh.vertices[2].v = mesh.vertices[3].v = 1.0f;
-    if (dot(cross(p1 - p0, p2 - p0), n) >= 0.0f) {
+    if (dot(cross(p1 - p0, p2 - p0), n) >= 0.0f)
+    {
         mesh.indices = {0, 1, 2, 0, 2, 3};
-    } else {
+    }
+    else
+    {
         mesh.indices = {0, 2, 1, 0, 3, 2};
     }
     return mesh;
 }
 
-Mesh MakeBox(std::string name, float3 h) {
+Mesh MakeBox(std::string name, float3 h)
+{
     Mesh mesh;
     mesh.name = std::move(name);
     // For each face: normal and two tangent axes; corners = n*h +- t*h +- b*h.
@@ -63,43 +78,52 @@ Mesh MakeBox(std::string name, float3 h) {
         {{1, 0, 0}, {0, 0, -1}, {0, 1, 0}}, {{-1, 0, 0}, {0, 0, 1}, {0, 1, 0}}, {{0, 1, 0}, {1, 0, 0}, {0, 0, -1}},
         {{0, -1, 0}, {1, 0, 0}, {0, 0, 1}}, {{0, 0, 1}, {1, 0, 0}, {0, 1, 0}},  {{0, 0, -1}, {-1, 0, 0}, {0, 1, 0}},
     };
-    for (const auto& face : axes) {
+    for (const auto& face : axes)
+    {
         const float3 n = face[0] * h;
         const float3 t = face[1] * h;
         const float3 b = face[2] * h;
         Mesh quad = MakeQuad("", n - t - b, n + t - b, n + t + b, n - t + b, face[0]);
         const u32 base = u32(mesh.vertices.size());
         mesh.vertices.insert(mesh.vertices.end(), quad.vertices.begin(), quad.vertices.end());
-        for (u32 index : quad.indices) {
+        for (u32 index : quad.indices)
+        {
             mesh.indices.push_back(base + index);
         }
     }
     return mesh;
 }
 
-Mesh MakeSphere(std::string name, float radius, u32 segments) {
+Mesh MakeSphere(std::string name, float radius, u32 segments)
+{
     Mesh mesh;
     mesh.name = std::move(name);
     const u32 rings = std::max(segments / 2, 2u);
     const u32 columns = std::max(segments, 3u);
-    for (u32 r = 0; r <= rings; ++r) {
+    for (u32 r = 0; r <= rings; ++r)
+    {
         const float theta = std::numbers::pi_v<float> * float(r) / float(rings);
-        for (u32 c = 0; c <= columns; ++c) {
+        for (u32 c = 0; c <= columns; ++c)
+        {
             const float phi = 2.0f * std::numbers::pi_v<float> * float(c) / float(columns);
             const float3 n(std::sin(theta) * std::cos(phi), std::cos(theta), -std::sin(theta) * std::sin(phi));
             mesh.vertices.push_back({n * radius, float(c) / float(columns), n, float(r) / float(rings)});
         }
     }
     const u32 stride = columns + 1;
-    for (u32 r = 0; r < rings; ++r) {
-        for (u32 c = 0; c < columns; ++c) {
+    for (u32 r = 0; r < rings; ++r)
+    {
+        for (u32 c = 0; c < columns; ++c)
+        {
             const u32 a = r * stride + c;
             const u32 b = a + stride;
             // Counter-clockwise seen from outside: cross(e1, e2) points outward.
-            if (r != 0) {
+            if (r != 0)
+            {
                 mesh.indices.insert(mesh.indices.end(), {a, b, a + 1});
             }
-            if (r != rings - 1) {
+            if (r != rings - 1)
+            {
                 mesh.indices.insert(mesh.indices.end(), {a + 1, b, b + 1});
             }
         }
@@ -107,7 +131,8 @@ Mesh MakeSphere(std::string name, float radius, u32 segments) {
     return mesh;
 }
 
-void SetTransform(Instance& instance, float3 translation, float yawRadians, float scale) {
+void SetTransform(Instance& instance, float3 translation, float yawRadians, float scale)
+{
     const float c = std::cos(yawRadians) * scale;
     const float s = std::sin(yawRadians) * scale;
     const float rows[3][4] = {
@@ -118,19 +143,23 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians, floa
     std::copy(&rows[0][0], &rows[0][0] + 12, &instance.transform[0][0]);
 }
 
-namespace {
+namespace detail
+{
 
-u32 AddMaterial(SceneDesc& scene, Material material) {
+u32 AddMaterial(SceneDesc& scene, Material material)
+{
     scene.materials.push_back(std::move(material));
     return u32(scene.materials.size() - 1);
 }
 
-u32 AddMesh(SceneDesc& scene, Mesh mesh) {
+u32 AddMesh(SceneDesc& scene, Mesh mesh)
+{
     scene.meshes.push_back(std::move(mesh));
     return u32(scene.meshes.size() - 1);
 }
 
-Instance& AddInstance(SceneDesc& scene, std::string name, u32 mesh, u32 material) {
+Instance& AddInstance(SceneDesc& scene, std::string name, u32 mesh, u32 material)
+{
     Instance instance;
     instance.name = std::move(name);
     instance.mesh = mesh;
@@ -139,12 +168,73 @@ Instance& AddInstance(SceneDesc& scene, std::string name, u32 mesh, u32 material
     return scene.instances.back();
 }
 
-} // namespace
+void SetBasis(Instance& instance, float3 x, float3 y, float3 z, float3 translation)
+{
+    const float rows[3][4] = {
+        {x.x, y.x, z.x, translation.x},
+        {x.y, y.y, z.y, translation.y},
+        {x.z, y.z, z.z, translation.z},
+    };
+    std::copy(&rows[0][0], &rows[0][0] + 12, &instance.transform[0][0]);
+}
+
+void LookAt(Camera& camera, float3 eye, float3 target)
+{
+    const float3 d = normalize(target - eye);
+    camera.position = eye;
+    camera.yaw = std::atan2(-d.x, -d.z);
+    camera.pitch = std::asin(std::clamp(d.y, -1.0f, 1.0f));
+}
+
+Mesh MakeDisc(std::string name, float3 center, float3 normal, float radius, u32 segments)
+{
+    Mesh mesh;
+    mesh.name = std::move(name);
+    const float3 n = normalize(normal);
+    // Any tangent frame; the fan is wound so that cross(e1, e2) points along `normal`.
+    const float3 helper = std::abs(n.y) < 0.9f ? float3(0.0f, 1.0f, 0.0f) : float3(1.0f, 0.0f, 0.0f);
+    const float3 t = normalize(cross(helper, n));
+    const float3 b = cross(n, t);
+    mesh.vertices.push_back({center, 0.5f, n, 0.5f});
+    for (u32 i = 0; i < segments; ++i)
+    {
+        const float a = 2.0f * std::numbers::pi_v<float> * float(i) / float(segments);
+        const float3 p = center + (t * std::cos(a) + b * std::sin(a)) * radius;
+        mesh.vertices.push_back({p, 0.5f + 0.5f * std::cos(a), n, 0.5f + 0.5f * std::sin(a)});
+    }
+    for (u32 i = 0; i < segments; ++i)
+    {
+        const u32 a = 1 + i;
+        const u32 c = 1 + (i + 1) % segments;
+        if (dot(cross(mesh.vertices[a].position - center, mesh.vertices[c].position - center), n) >= 0.0f)
+        {
+            mesh.indices.insert(mesh.indices.end(), {0u, a, c});
+        }
+        else
+        {
+            mesh.indices.insert(mesh.indices.end(), {0u, c, a});
+        }
+    }
+    return mesh;
+}
+
+float3 Hue(float h)
+{
+    const float r = std::clamp(std::abs(h * 6.0f - 3.0f) - 1.0f, 0.0f, 1.0f);
+    const float g = std::clamp(2.0f - std::abs(h * 6.0f - 2.0f), 0.0f, 1.0f);
+    const float b = std::clamp(2.0f - std::abs(h * 6.0f - 4.0f), 0.0f, 1.0f);
+    return {r, g, b};
+}
+
+} // namespace detail
+
+using namespace detail;
 
 // A 2 m Cornell box (x, z in [-1, 1], y in [0, 2], open towards +z) lit by a 3000 nit ceiling
 // panel, with a diffuse tall box and a rough gold sphere. Reflectances are those of the
 // original Cornell measurements converted to linear sRGB.
-SceneDesc MakeCornellBox() {
+SceneDesc MakeCornellBox()
+{
     SceneDesc scene;
     scene.name = "cornell_box";
     const u32 white = AddMaterial(scene, {.name = "White", .baseColor = {0.725f, 0.71f, 0.68f}, .roughness = 0.9f});
@@ -188,13 +278,16 @@ SceneDesc MakeCornellBox() {
 // Two rows of spheres, roughness 0 .. 1: dielectric (front) and metal (back), in a uniform
 // 1000 nit environment. Set pathtracer.furnace=true to make every material white: an
 // energy-conserving BSDF then renders every sphere exactly as bright as the background.
-SceneDesc MakeFurnaceScene() {
+SceneDesc MakeFurnaceScene()
+{
     SceneDesc scene;
     scene.name = "furnace";
     const u32 sphere = AddMesh(scene, MakeSphere("Sphere", 0.2f, 64));
-    for (u32 i = 0; i < 6; ++i) {
+    for (u32 i = 0; i < 6; ++i)
+    {
         const float roughness = float(i) / 5.0f;
-        for (u32 metal = 0; metal < 2; ++metal) {
+        for (u32 metal = 0; metal < 2; ++metal)
+        {
             const u32 material = AddMaterial(scene, {.name = std::format("{}{}", metal ? "Metal" : "Dielectric", i),
                                                      .baseColor = metal ? float3(0.95f, 0.64f, 0.54f) : float3(0.8f),
                                                      .roughness = roughness,
@@ -211,43 +304,83 @@ SceneDesc MakeFurnaceScene() {
     return scene;
 }
 
-std::vector<std::string> BuiltinSceneNames() {
-    return {"cornell_box", "furnace"};
+namespace
+{
+
+struct BuiltinScene
+{
+    const char* name;
+    SceneDesc (*make)();
+};
+
+constexpr BuiltinScene kBuiltinScenes[] = {
+    {"cornell_box", MakeCornellBox},
+    {"furnace", MakeFurnaceScene},
+    {"veach_mis", detail::MakeVeachMis},
+    {"material_grid", detail::MakeMaterialGrid},
+    {"sphere_field", detail::MakeSphereField},
+    {"many_lights", detail::MakeManyLights},
+    {"door", detail::MakeDoor},
+    {"terrain", detail::MakeTerrain},
+};
+
+} // namespace
+
+std::vector<std::string> BuiltinSceneNames()
+{
+    std::vector<std::string> names;
+    for (const BuiltinScene& scene : kBuiltinScenes)
+    {
+        names.emplace_back(scene.name);
+    }
+    return names;
 }
 
-std::optional<SceneDesc> MakeBuiltinScene(std::string_view name) {
-    if (name == "cornell_box") {
-        return MakeCornellBox();
-    }
-    if (name == "furnace") {
-        return MakeFurnaceScene();
+std::optional<SceneDesc> MakeBuiltinScene(std::string_view name)
+{
+    for (const BuiltinScene& scene : kBuiltinScenes)
+    {
+        if (name == scene.name)
+        {
+            return scene.make();
+        }
     }
     return std::nullopt;
 }
 
-std::string Validate(const SceneDesc& desc) {
-    for (const Mesh& mesh : desc.meshes) {
-        if (mesh.vertices.empty() || mesh.indices.empty() || mesh.indices.size() % 3 != 0) {
+std::string Validate(const SceneDesc& desc)
+{
+    for (const Mesh& mesh : desc.meshes)
+    {
+        if (mesh.vertices.empty() || mesh.indices.empty() || mesh.indices.size() % 3 != 0)
+        {
             return std::format("mesh '{}' needs vertices and a multiple of 3 indices", mesh.name);
         }
-        for (u32 index : mesh.indices) {
-            if (index >= mesh.vertices.size()) {
+        for (u32 index : mesh.indices)
+        {
+            if (index >= mesh.vertices.size())
+            {
                 return std::format("mesh '{}' index {} out of range", mesh.name, index);
             }
         }
     }
-    for (const Material& m : desc.materials) {
+    for (const Material& m : desc.materials)
+    {
         if (!(m.roughness >= 0.0f && m.roughness <= 1.0f) || !(m.metallic >= 0.0f && m.metallic <= 1.0f) ||
-            !(m.emissionNits >= 0.0f)) {
+            !(m.emissionNits >= 0.0f))
+        {
             return std::format("material '{}': roughness and metallic must be in [0, 1], emission >= 0", m.name);
         }
     }
-    for (const Instance& instance : desc.instances) {
-        if (instance.mesh >= desc.meshes.size() || instance.material >= desc.materials.size()) {
+    for (const Instance& instance : desc.instances)
+    {
+        if (instance.mesh >= desc.meshes.size() || instance.material >= desc.materials.size())
+        {
             return std::format("instance '{}' references a missing mesh or material", instance.name);
         }
     }
-    if (desc.instances.empty()) {
+    if (desc.instances.empty())
+    {
         return "scene has no instances";
     }
     return {};

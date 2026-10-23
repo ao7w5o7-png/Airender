@@ -15,6 +15,7 @@
 #include "air/core/TaskSystem.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/Scene.h"
+#include "air/renderer/ShaderHotReload.h"
 
 #include <chrono>
 #include <deque>
@@ -24,24 +25,42 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-namespace air::editor {
+namespace air::editor
+{
 
-struct EditorOptions {
+// DLSS Ray Reconstruction modes: output / render ratio as in NGX (DLAA renders at the output size).
+struct DlssMode
+{
+    const char* name;
+    float renderScale;
+};
+inline constexpr DlssMode kDlssModes[] = {
+    {"DLAA", 1.0f},        {"Quality", 1.0f / 1.5f},           {"Balanced", 0.58f},
+    {"Performance", 0.5f}, {"Ultra Performance", 1.0f / 3.0f},
+};
+
+struct EditorOptions
+{
     std::filesystem::path shaderRoot = AIR_DEFAULT_SHADER_DIR;
     std::string scene = "cornell_box";
     std::vector<std::string> features = {"pathtracer", "tonemap"}; // "dlss" is inserted when available
     u32 width = 1280; // initial render resolution; follows the viewport afterwards
     u32 height = 720;
+    bool vsync = true; // off: present as fast as possible (uncapped frame rate, tearing when supported)
+    u32 dlssMode = 1;  // index into kDlssModes, used while dlss is enabled (Quality)
 };
 
-struct LogLine {
+struct LogLine
+{
     LogLevel level = LogLevel::Info;
     std::string text;
 };
 
-class EditorApp {
+class EditorApp
+{
 public:
     EditorApp(rhi::Device& device, TaskSystem& tasks, EditorOptions options);
     ~EditorApp();
@@ -54,6 +73,10 @@ public:
     void RenderFrame(const std::function<void(renderer::FrameContext&)>& uiPass = {});
 
     bool WantsQuit() const { return mQuit; }
+    // Presentation sync chosen in the UI; the platform layer applies it to its swapchain.
+    bool GetVsync() const { return mOptions.vsync; }
+    void SetVsync(bool vsync) { mOptions.vsync = vsync; }
+    DiagnosticsPanels& Diagnostics() { return mDiagnostics; }
     rhi::TextureHandle GetOutput() const { return mRunner ? mRunner->GetOutput() : rhi::TextureHandle{}; }
     renderer::FrameRunner* GetRunner() const { return mRunner.get(); }
     renderer::Camera& MutableCamera() { return mCamera; }
@@ -65,6 +88,18 @@ public:
     // Applies a resolution change now (the UI otherwise waits until the viewport stops resizing).
     void Resize(u32 width, u32 height);
     bool LoadScene(const std::string& name);
+    // Inserts or removes the dlss feature after pathtracer. Enabling switches the path tracer to
+    // jittered single frames (accumulate=false, spp=1); disabling restores what was set before.
+    void SetDlssEnabled(bool enabled);
+    bool IsDlssEnabled() const;
+    // Index into kDlssModes; recreates the runner at the mode's render scale while dlss is enabled.
+    void SetDlssMode(u32 mode);
+    u32 GetDlssMode() const { return mOptions.dlssMode; }
+    // A feature parameter as text ("" if the feature or parameter is missing).
+    std::string GetParameter(std::string_view feature, std::string_view name) const;
+    // Shader hot reload: polled every BuildUi(); a successful compile recreates the runner.
+    renderer::ShaderHotReload& GetShaderReload() { return *mShaderReload; }
+    bool HasShaderError() const { return mShaderFailed; }
 
 private:
     void CreateRunner(u32 width, u32 height);
@@ -75,6 +110,8 @@ private:
     void BuildDebugPanel();
     void BuildLogPanel();
     void UpdateCamera(float deltaSeconds);
+    void PollShaderReload();
+    void BuildShaderSection();
     std::string SetParameter(const std::string& qualified, const std::string& value);
 
     rhi::Device& mDevice;
@@ -93,10 +130,23 @@ private:
     u32 mPendingWidth = 0;
     u32 mPendingHeight = 0;
     float mResizeTimer = 0.0f;
+    u32 mSettledFrames = 0; // frames the pending size has been unchanged
+    u32 mSettlingWidth = 0; // pending size the timer is running for
+    u32 mSettlingHeight = 0;
     bool mLockResolution = false;
     float mResolutionScale = 1.0f;
     float mMoveSpeed = 1.5f; // metres per second
     bool mViewportHovered = false;
+    // Path tracer settings from before DLSS was enabled, restored when it is disabled.
+    std::string mPreDlssAccumulate;
+    std::string mPreDlssSpp;
+
+    // Shader hot reload of the build's HLSL sources (see renderer::ShaderHotReload).
+    std::unique_ptr<renderer::ShaderHotReload> mShaderReload;
+    bool mShaderHotReload = true;           // watch the sources
+    bool mShaderRecompileRequested = false; // Recompile all / Ctrl+R, also while not watching
+    bool mShaderFailed = false;             // the last compile failed; the previous shaders still run
+    std::string mShaderStatus;
 
     // Windows.
     bool mShowScene = true;

@@ -12,10 +12,15 @@
 //   3. expose tunables through Parameters()
 //   4. CMake picks it up automatically (air_add_feature)
 //
-// Features run in the order they were added to the FrameRunner and all write to the same output
-// texture, so a later feature can post-process an earlier one. Features never call each other:
+// Features run by stage (FeatureStage), and within a stage in the order they were added to the
+// FrameRunner, so a later feature can post-process an earlier one. Features never call each other:
 // what one produces for another (denoiser guides, flags) goes through the frame's Blackboard
 // under the names in namespace `slots`.
+//
+// Resolutions: the Scene stage renders at the render resolution into FrameContext::sceneColor;
+// the output (and the Post stage) is at the output resolution. They are equal unless the
+// FrameRunner was created with a render scale below 1, in which case an Upscale feature (dlss)
+// reconstructs the output, or FrameRunner falls back to a bilinear upscale.
 
 #include "air/core/Json.h"
 #include "air/core/TaskSystem.h"
@@ -28,22 +33,41 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
-struct FeatureInitContext {
+// Where a feature runs in the frame. Stages run in this order:
+//   Scene    renders the scene at the render resolution into FrameContext::sceneColor
+//   Upscale  reconstructs FrameContext::output from sceneColor and sets outputWritten (dlss)
+//   Post     works on the output at the output resolution (tonemap, overlays)
+// When sceneColor is smaller than the output and no Upscale feature wrote the output, FrameRunner
+// adds a bilinear upscale between the Upscale and Post stages.
+enum class FeatureStage : u8
+{
+    Scene,
+    Upscale,
+    Post,
+};
+
+struct FeatureInitContext
+{
     rhi::Device& device;
     TaskSystem& tasks;
     std::filesystem::path shaderDir; // <shader root>/<feature name>
-    u32 width = 0;
+    u32 width = 0;                   // output resolution
     u32 height = 0;
+    u32 renderWidth = 0; // Scene stage resolution; equals width/height without upscaling
+    u32 renderHeight = 0;
 };
 
 // Well-known blackboard names. Producers document the format next to each name.
-namespace slots {
-// Textures (all render resolution).
+namespace slots
+{
+// Textures (all at the render resolution).
 inline constexpr std::string_view kDiffuseAlbedo = "guide.diffuseAlbedo";     // RGBA16F, rgb
 inline constexpr std::string_view kSpecularAlbedo = "guide.specularAlbedo";   // RGBA16F, rgb
 inline constexpr std::string_view kNormalRoughness = "guide.normalRoughness"; // RGBA16F, world normal, a = roughness
@@ -60,15 +84,18 @@ inline constexpr std::string_view kOutputIsDisplay = "output.isDisplay";
 } // namespace slots
 
 // Per-frame named exchange between features. Lives for one RenderFrame().
-class Blackboard {
+class Blackboard
+{
 public:
     void SetTexture(std::string_view name, rdg::TextureRef texture) { mTextures[std::string(name)] = texture; }
-    std::optional<rdg::TextureRef> FindTexture(std::string_view name) const {
+    std::optional<rdg::TextureRef> FindTexture(std::string_view name) const
+    {
         const auto it = mTextures.find(name);
         return it == mTextures.end() ? std::nullopt : std::optional(it->second);
     }
     void SetValue(std::string_view name, double value) { mValues[std::string(name)] = value; }
-    double GetValue(std::string_view name, double fallback = 0.0) const {
+    double GetValue(std::string_view name, double fallback = 0.0) const
+    {
         const auto it = mValues.find(name);
         return it == mValues.end() ? fallback : it->second;
     }
@@ -78,20 +105,33 @@ private:
     std::map<std::string, double, std::less<>> mValues;
 };
 
-struct FrameContext {
+struct FrameContext
+{
     rhi::Device& device;
     TaskSystem& tasks;
     rdg::RenderGraph& graph;
     const GpuScene& scene;
     const Camera& camera;
     Blackboard& blackboard;
-    rdg::TextureRef output; // RGBA16F linear, UnorderedAccess | ShaderResource
-    u32 width = 0;
+    rdg::TextureRef output; // RGBA16F linear, UnorderedAccess | ShaderResource, output resolution
+    u32 width = 0;          // output resolution
     u32 height = 0;
     u64 frameIndex = 0;
+    // Scene stage target: RGBA16F at the render resolution, UnorderedAccess | ShaderResource. The
+    // same texture as `output` when the render and output resolutions match.
+    rdg::TextureRef sceneColor;
+    u32 renderWidth = 0;
+    u32 renderHeight = 0;
+    // Set by an Upscale feature that writes `output` from `sceneColor` this frame.
+    bool outputWritten = false;
+    // Blackboard slots some active feature reads (RenderFeature::ConsumedSlots()). Producers skip
+    // work nobody consumes, e.g. the path tracer's denoiser guides without a denoiser.
+    const std::set<std::string, std::less<>>* consumedSlots = nullptr;
+    bool Consumes(std::string_view slot) const { return consumedSlots && consumedSlots->contains(slot); }
 };
 
-class RenderFeature {
+class RenderFeature
+{
 public:
     virtual ~RenderFeature() = default;
 
@@ -101,6 +141,10 @@ public:
     virtual void AddPasses(FrameContext& context) = 0;
     // Feature specific state for reports (e.g. accumulated samples). Optional.
     virtual json::Value GetStatus() const { return {}; }
+    // Fixed for the feature's lifetime. Post is right for anything that works on the output.
+    virtual FeatureStage GetStage() const { return FeatureStage::Post; }
+    // Blackboard slots this feature reads, so their producers know someone needs them.
+    virtual std::vector<std::string_view> ConsumedSlots() const { return {}; }
 
     ParameterSet& Parameters() { return mParameters; }
     const ParameterSet& Parameters() const { return mParameters; }
@@ -109,13 +153,15 @@ protected:
     ParameterSet mParameters;
 };
 
-struct FeatureInfo {
+struct FeatureInfo
+{
     std::string name;        // identifier used on the command line, e.g. "pathtracer"
     std::string description; // one line
     std::function<std::unique_ptr<RenderFeature>()> create;
 };
 
-class FeatureRegistry {
+class FeatureRegistry
+{
 public:
     void Register(FeatureInfo info);
     std::unique_ptr<RenderFeature> Create(std::string_view name) const;
