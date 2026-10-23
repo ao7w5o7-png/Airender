@@ -8,8 +8,8 @@
 //   Temporal  generalized balance heuristic between that reservoir and last frame's final one at
 //             the reprojected pixel, whose confidence is capped at maxConfidence.
 //   Spatial   defensive pairwise MIS with spatialSamples neighbours (disocclusionSamples where the
-//             temporal pass found no history); shades the result into the accumulation and keeps it
-//             as next frame's history.
+//             temporal pass found no history); shades every candidate by its resampling weight
+//             into the accumulation and keeps the chosen one as next frame's history.
 // A sample is a point on an emissive triangle, the same point in every pixel's domain (shift
 // Jacobian 1). The target function is the luminance of the unshadowed contribution. Each pass traces
 // the shadow ray of the sample it chose when that sample is new to the pixel, and zeroes W when it
@@ -492,11 +492,17 @@ void SpatialPass(uint2 pixel)
 
     // Defensive pairwise MIS (Wyman et al. 2023, eq. 7.8): each neighbour plays a balance heuristic
     // game against this pixel, weighted by its share of the confidence; this pixel keeps at least
-    // its own share.
+    // its own share. The target here includes this pixel's visibility: one ray per reused sample,
+    // which makes the chosen sample visible (no shading ray) and lets the shading average every
+    // candidate by its resampling weight instead of using the chosen one alone (the expectation of
+    // f(Y) W over the choice; Lin et al. 2026), which removes most of the colour noise of one
+    // light per pixel.
     float cc = canonical.M;
     float total = cc + neighbourConfidence;
-    float pc = canonical.W > 0.0f ? TargetPdf(r, canonical.y) : 0.0f;
+    LightPoint canonicalPoint = EvaluateSample(r, canonical.y);
+    float pc = canonical.W > 0.0f ? Luminance(canonicalPoint.contribution) : 0.0f; // visible: zeroed otherwise
     float canonicalMis = cc / total;
+    float3 direct = float3(0.0f, 0.0f, 0.0f);
     uint seed = StreamSeed(pixel, f.frameIndex, 4u);
     Resampler s = MakeResampler();
     draw = firstDraw;
@@ -516,30 +522,23 @@ void SpatialPass(uint2 pixel)
         }
         if (n.W > 0.0f)
         {
-            float pq = TargetPdf(r, n.y);
-            float pn = TargetPdf(rn, n.y); // its surface sees it: W would be 0 otherwise
-            float m = (neighbourConfidence / total) * n.M * pn / (neighbourConfidence * pn + cc * pq);
-            Stream(s, n.y, pq, m * pq * n.W, j + 1u, seed);
+            LightPoint lp = EvaluateSample(r, n.y);
+            float pq = Luminance(lp.contribution);
+            if (pq > 0.0f && Visible(r, lp))
+            {
+                float pn = TargetPdf(rn, n.y); // its surface sees it: W would be 0 otherwise
+                float m = (neighbourConfidence / total) * n.M * pn / (neighbourConfidence * pn + cc * pq);
+                Stream(s, n.y, pq, m * pq * n.W, j + 1u, seed);
+                direct += lp.contribution * (m * n.W);
+            }
         }
     }
     if (pc > 0.0f)
     {
         Stream(s, canonical.y, pc, canonicalMis * pc * canonical.W, 0u, seed);
+        direct += canonicalPoint.contribution * (canonicalMis * canonical.W);
     }
     ReservoirState result = Finish(s, total);
-
-    // Shade. This pixel's own sample is visible (the temporal pass zeroed it otherwise); a
-    // neighbour's needs the shadow ray, whose result also goes into the history.
-    float3 direct = float3(0.0f, 0.0f, 0.0f);
-    if (result.W > 0.0f)
-    {
-        LightPoint lp = EvaluateSample(r, result.y);
-        if (s.source != 0u && !Visible(r, lp))
-        {
-            result.W = 0.0f;
-        }
-        direct = lp.contribution * result.W;
-    }
     if ((g.flags & kReSTIRAddDirect) != 0u && any(direct > 0.0f) && all(isfinite(direct)))
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];

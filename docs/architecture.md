@@ -640,7 +640,7 @@ Files: `shaders/ReSTIR.hlsli` (all of the math), `ReSTIRInitial/Temporal/Spatial
   |---|---|---|---|
   | `ReSTIR.Initial` | primary hits | RIS over `restirLights` points on lights chosen by power and `restirBsdf` BSDF rays that hit an emitter, balance heuristic between the two strategies | 1 BSDF + 1 |
   | `ReSTIR.Temporal` | + last frame's hits and final reservoirs | reprojects the point with the previous camera; if the surface there is similar, generalized balance heuristic between the two domains, last frame's confidence capped at `restirHistory` | 1 + 1 |
-  | `ReSTIR.Spatial` | temporal reservoirs | `restirSpatial` neighbours in a disc of `restirRadius` pixels (`restirDisocclusion` where the pixel has no history), defensive pairwise MIS (course eq. 7.8); shades and stores the result as next frame's history | k + 1 |
+  | `ReSTIR.Spatial` | temporal reservoirs | `restirSpatial` neighbours in a disc of `restirRadius` pixels (`restirDisocclusion` where the pixel has no history), defensive pairwise MIS (course eq. 7.8) with this pixel's visibility in the target; shades and stores the result as next frame's history | k + k |
 
 - **Visibility reuse, without bias**: each pass traces the shadow ray of the sample it chose when the
   sample is new to the pixel, and zeroes W when it is occluded, so a reservoir only ever holds light
@@ -650,6 +650,13 @@ Files: `shaders/ReSTIR.hlsli` (all of the math), `ReSTIRInitial/Temporal/Spatial
   reservoir. `restirUnbiased=0` assumes the other surface sees the sample: the classic biased
   visibility reuse, fewer rays, penumbrae and contact shadows darker (-2% on `many_lights`, -2.8% on
   `cornell_box` direct light).
+- **Shading with every candidate**: the spatial pass traces this pixel's visibility for each reused
+  sample, so its target is p̂ times visibility and the chosen sample needs no shading ray. The
+  direct light it adds is the sum of all candidates' contributions weighted by their resampling
+  weights (the expectation of f(Y) W over the choice, as in ReSTIR PT Enhanced, Lin et al. 2026)
+  instead of the chosen sample's alone: with the scalar target choosing by luminance, one light per
+  pixel otherwise shows as colour noise. Per-channel relMSE on `many_lights` drops 4x (5.4 -> 1.3),
+  for about 0.15 ms.
 - **Neighbour choice**: from geometry only (normal within 60 degrees, distance to the eye within
   10%), never from the samples, so heuristics change the noise but not the expected value. Pixels
   without a hit keep empty reservoirs.
@@ -657,8 +664,7 @@ Files: `shaders/ReSTIR.hlsli` (all of the math), `ReSTIRInitial/Temporal/Spatial
   them; they exist only once ReSTIR has been used). A scene or setting change, or a frame without
   ReSTIR, starts without history; a camera move does not (the reprojection handles it).
 - **Limits**: lights must not move between frames (samples are reused as light-list points); light
-  indices have 24 bits. With colored lights one sample per pixel shows as colour noise, which a
-  denoiser (DLSS RR) resolves. Reuse is per-pixel only: large disocclusions recover over a few
+  indices have 24 bits. Reuse is per-pixel only: large disocclusions recover over a few
   frames (the disocclusion boost helps); stochastic pairwise MIS over screen-space cells (Hedstrom et
   al. 2026) is the known fix.
 
@@ -675,10 +681,10 @@ Validation (`aircli render --set pathtracer.debugView=8` isolates the direct lig
 
   | Scene | Trace | Initial | Temporal | Spatial |
   |---|---|---|---|---|
-  | `cornell_box` | 2.04 ms | 0.32 ms | 0.34 ms | 0.63 ms |
-  | `many_lights` | 3.95 ms | 1.09 ms | 0.70 ms | 1.44 ms |
-  | `sphere_field` | 1.58 ms | 0.56 ms | 0.46 ms | 0.95 ms |
-  | `veach_mis` | 1.24 ms | 0.85 ms | 0.56 ms | 1.24 ms |
+  | `cornell_box` | 2.02 ms | 0.32 ms | 0.35 ms | 0.72 ms |
+  | `many_lights` | 3.94 ms | 1.09 ms | 0.64 ms | 1.61 ms |
+  | `sphere_field` | 1.58 ms | 0.56 ms | 0.43 ms | 1.13 ms |
+  | `veach_mis` | 1.25 ms | 0.85 ms | 0.57 ms | 1.48 ms |
 
   The unbiased MIS rays cost about 0.1 ms; each neighbour about 0.4 ms on `many_lights`, each light
   candidate about 0.1 ms. Rebuilding a surface from its `PrimaryHit` costs about 0.1 ms per use
