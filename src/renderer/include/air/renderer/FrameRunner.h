@@ -19,8 +19,11 @@ namespace air::renderer
 
 struct FrameRunnerDesc
 {
-    u32 width = 1280;
+    u32 width = 1280; // output resolution
     u32 height = 720;
+    // Scene stage resolution as a fraction of the output per axis (1 = native). Below 1 an Upscale
+    // feature (dlss) reconstructs the output; without one FrameRunner upscales bilinearly.
+    float renderScale = 1.0f;
     rhi::Format outputFormat = rhi::Format::RGBA16_FLOAT;
     std::filesystem::path shaderRoot = "shaders"; // features load from shaderRoot/<feature name>
     rdg::RenderGraph::Config graphConfig;
@@ -71,10 +74,15 @@ public:
 
     rhi::TextureHandle GetOutput() const { return mOutput; }
     const FrameRunnerDesc& GetDesc() const { return mDesc; }
+    // Scene stage resolution: the output resolution scaled by FrameRunnerDesc::renderScale.
+    u32 GetRenderWidth() const { return mRenderWidth; }
+    u32 GetRenderHeight() const { return mRenderHeight; }
     // Features with their parameters and status.
     json::Value DescribeFeatures() const;
 
 private:
+    void AddFallbackUpscale(FrameContext& context);
+
     struct Entry
     {
         std::string name;
@@ -88,6 +96,9 @@ private:
     rhi::TextureHandle mOutput;
     rhi::Access mOutputAccess = rhi::Access::None;
     u64 mFrameIndex = 0;
+    u32 mRenderWidth = 0;
+    u32 mRenderHeight = 0;
+    rhi::PipelineHandle mUpscalePipeline; // fallback upscale, only when rendering below the output size
 };
 
 } // namespace air::renderer

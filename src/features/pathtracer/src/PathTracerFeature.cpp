@@ -5,6 +5,9 @@
 
 #include "PathTracerShared.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace air::pt
 {
 namespace
@@ -36,8 +39,13 @@ public:
 
     bool Initialize(const renderer::FeatureInitContext& context) override
     {
-        mSettings.width = context.width;
-        mSettings.height = context.height;
+        // The Scene stage renders at the render resolution; an upscaler reconstructs the output.
+        mSettings.width = context.renderWidth;
+        mSettings.height = context.renderHeight;
+        // Jitter phases for temporal upscalers: 8 x (output / render)^2 (NVIDIA DLSS guide), and
+        // never fewer than the 32 used at native resolution.
+        const float ratio = float(context.width) / float(std::max(context.renderWidth, 1u));
+        mSettings.jitterPhases = std::max(32u, u32(std::ceil(8.0f * ratio * ratio)));
         mTracer = std::make_unique<PathTracer>(context.device, mSettings);
         return mTracer->Initialize(context.shaderDir);
     }
@@ -48,11 +56,15 @@ public:
         PathTracerSettings& live = mTracer->MutableSettings();
         const u32 width = live.width;
         const u32 height = live.height;
+        const u32 phases = live.jitterPhases;
         live = mSettings;
         live.width = width;
         live.height = height;
-        mTracer->AddPasses(context.graph, context.scene, context.camera, context.blackboard, context.output);
+        live.jitterPhases = phases;
+        mTracer->AddPasses(context.graph, context.scene, context.camera, context.blackboard, context.sceneColor);
     }
+
+    renderer::FeatureStage GetStage() const override { return renderer::FeatureStage::Scene; }
 
     json::Value GetStatus() const override
     {

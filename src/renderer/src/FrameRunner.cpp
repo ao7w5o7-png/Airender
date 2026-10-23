@@ -3,12 +3,26 @@
 #include "air/core/Assert.h"
 #include "air/core/Log.h"
 #include "air/renderer/Diagnostics.h"
+#include "air/renderer/ShaderLoader.h"
+#include "air/renderer/shader/UpscaleShared.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <format>
 
 namespace air::renderer
 {
+
+namespace
+{
+
+u32 ScaledSize(u32 size, float scale)
+{
+    return std::clamp(u32(std::lround(double(size) * double(scale))), 1u, size);
+}
+
+} // namespace
 
 json::Value FrameResult::ToJson() const
 {
@@ -53,9 +67,23 @@ FrameRunner::FrameRunner(rhi::Device& device, TaskSystem& tasks, FrameRunnerDesc
         {.format = mDesc.outputFormat,
          .width = mDesc.width,
          .height = mDesc.height,
-         .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopySrc,
+         // CopyDst: features that produce the frame elsewhere (dlss) copy their result back into it.
+         .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopySrc |
+                  rhi::TextureUsage::CopyDst,
          .debugName = "FrameOutput"});
     AIR_CHECK(mOutput.IsValid(), "failed to create the frame output texture");
+    AIR_CHECK(mDesc.renderScale > 0.0f && mDesc.renderScale <= 1.0f, "renderScale {} must be in (0, 1]",
+              mDesc.renderScale);
+    mRenderWidth = ScaledSize(mDesc.width, mDesc.renderScale);
+    mRenderHeight = ScaledSize(mDesc.height, mDesc.renderScale);
+    if (mRenderWidth != mDesc.width || mRenderHeight != mDesc.height)
+    {
+        mUpscalePipeline = mDevice.CreateComputePipeline(
+            {.shader = LoadShader(mDevice, mDesc.shaderRoot / "renderer", "Upscale.cs", "Main"),
+             .pushConstantBytes = sizeof(gpu::UpscaleConstants),
+             .debugName = "FrameRunner.Upscale"});
+        AIR_CHECK(mUpscalePipeline.IsValid(), "failed to create the FrameRunner.Upscale pipeline");
+    }
     mDevice.SetCommandCapture(true); // always on: validation lines are collected every frame
     if (mDesc.profile)
     {
@@ -67,19 +95,28 @@ FrameRunner::~FrameRunner()
 {
     mFeatures.clear(); // features release their resources before the output goes away
     mDevice.DestroyTexture(mOutput);
+    if (mUpscalePipeline.IsValid())
+    {
+        mDevice.DestroyPipeline(mUpscalePipeline);
+    }
 }
 
 bool FrameRunner::AddFeature(const std::string& name, std::unique_ptr<RenderFeature> feature)
 {
     AIR_CHECK(feature, "AddFeature('{}') with a null feature", name);
     AIR_CHECK(!FindFeature(name), "feature '{}' added twice", name);
-    FeatureInitContext context{mDevice, mTasks, mDesc.shaderRoot / name, mDesc.width, mDesc.height};
+    FeatureInitContext context{mDevice,      mTasks,       mDesc.shaderRoot / name, mDesc.width, mDesc.height,
+                               mRenderWidth, mRenderHeight};
     if (!feature->Initialize(context))
     {
         AIR_LOG(Error, "FrameRunner", "feature '{}' failed to initialize", name);
         return false;
     }
-    mFeatures.push_back({name, std::move(feature)});
+    // Keep the list ordered by stage; within a stage, in the order features were added.
+    const FeatureStage stage = feature->GetStage();
+    const auto position =
+        std::find_if(mFeatures.begin(), mFeatures.end(), [&](const Entry& e) { return e.feature->GetStage() > stage; });
+    mFeatures.insert(position, {name, std::move(feature)});
     return true;
 }
 
@@ -136,12 +173,35 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
         Blackboard blackboard;
         FrameContext context{mDevice,    mTasks, graph,       scene,        camera,
                              blackboard, output, mDesc.width, mDesc.height, mFrameIndex};
+        context.renderWidth = mRenderWidth;
+        context.renderHeight = mRenderHeight;
+        context.sceneColor = output;
+        const bool upscaling = mUpscalePipeline.IsValid();
+        if (upscaling)
+        {
+            context.sceneColor =
+                graph.CreateTexture({.format = rhi::Format::RGBA16_FLOAT,
+                                     .width = mRenderWidth,
+                                     .height = mRenderHeight,
+                                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                                     .debugName = "FrameRunner.SceneColor"});
+        }
         {
             AIR_PROFILE_SCOPE("FrameRunner.AddPasses");
+            bool outputReady = !upscaling;
             for (Entry& e : mFeatures)
             {
+                if (!outputReady && e.feature->GetStage() == FeatureStage::Post)
+                {
+                    AddFallbackUpscale(context);
+                    outputReady = true;
+                }
                 AIR_PROFILE_SCOPE(e.name);
                 e.feature->AddPasses(context);
+            }
+            if (!outputReady)
+            {
+                AddFallbackUpscale(context);
             }
             if (extraPasses)
             {
@@ -184,6 +244,38 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
     result.cpuMilliseconds =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     return result;
+}
+
+void FrameRunner::AddFallbackUpscale(FrameContext& context)
+{
+    if (context.outputWritten)
+    {
+        return; // an Upscale feature reconstructed the output
+    }
+    const rdg::TextureRef source = context.sceneColor;
+    const rdg::TextureRef destination = context.output;
+    gpu::UpscaleConstants constants{};
+    constants.sourceWidth = context.renderWidth;
+    constants.sourceHeight = context.renderHeight;
+    constants.destinationWidth = context.width;
+    constants.destinationHeight = context.height;
+    const rhi::PipelineHandle pipeline = mUpscalePipeline;
+    context.graph.AddPass(
+        "FrameRunner.Upscale", rdg::PassFlags::Compute,
+        [&](rdg::PassBuilder& b)
+        {
+            b.Read(source, rhi::Access::SRVCompute);
+            b.Write(destination, rhi::Access::UAVCompute);
+        },
+        [=](rdg::PassContext& ctx) mutable
+        {
+            constants.source = ctx.SRV(source);
+            constants.destination = ctx.UAV(destination);
+            ctx.cmd.SetPipeline(pipeline);
+            ctx.cmd.PushConstants(&constants, sizeof(constants));
+            ctx.cmd.Dispatch((constants.destinationWidth + 7) / 8, (constants.destinationHeight + 7) / 8, 1);
+        });
+    context.outputWritten = true;
 }
 
 json::Value FrameRunner::DescribeFeatures() const

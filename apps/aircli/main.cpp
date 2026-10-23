@@ -3,7 +3,7 @@
 // 2 usage / setup error).
 //
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
-//                   [--frames N] [--width W] [--height H] [--shaders DIR]
+//                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]
 //                   [--scene cornell_box|furnace] [--output image.pfm|image.ppm]
 //   aircli features                         list available features and their parameters (JSON)
@@ -50,7 +50,7 @@ int Usage()
 {
     std::fputs("usage:\n"
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
-               "                [--frames N] [--width W] [--height H] [--shaders DIR]\n"
+               "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
                "                [--scene cornell_box|furnace] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
@@ -298,6 +298,10 @@ int CommandRender(Args& args)
         else if (arg == "--height")
         {
             desc.height = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--render-scale")
+        {
+            desc.renderScale = std::stof(std::string(args.Next())); // < 1: the scene renders smaller, dlss upscales
         }
         else if (arg == "--shaders")
         {

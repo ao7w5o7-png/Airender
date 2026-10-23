@@ -21,6 +21,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Rendering correctness: `aircli reference --scene cornell_box --output ref.pfm` renders on the CPU
   with the same `.hlsli` integrator; compare a GPU `render --output gpu.pfm` against it. BSDF and
   integrator changes must keep `BsdfTests` / `IntegratorTests` (white furnace, energy) green.
+- Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
+  upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
+  (output size); see docs/architecture.md §8.5.
+- Before trusting GPU timings, check the report's `vramBudgetBytes`: other processes holding VRAM
+  (graphics debuggers, IDEs) make WDDM page resources to system memory and inflate every pass.
 - Debug a frame with `--set pathtracer.debugView=N` (normals, albedo, depth, heatmaps, direct /
   indirect) or `--set pathtracer.furnace=1`; see docs/architecture.md §8.4.
 - All of the above works without a GPU (Null backend), except GPU renders.

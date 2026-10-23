@@ -36,6 +36,8 @@ struct PathTracerSettings
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap
+    // Length of the Halton(2, 3) jitter sequence used with accumulate=false. Fixed after Initialize().
+    u32 jitterPhases = 32;
 };
 
 class PathTracer

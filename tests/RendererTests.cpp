@@ -86,3 +86,48 @@ TEST(FrameRunner_ReleasesAllMemoryOnShutdown)
         EXPECT(location.allocationCount == 0);
     }
 }
+
+// Rendering below the output size: the Scene stage gets its own smaller target, and without an
+// Upscale feature FrameRunner fills the output with its bilinear upscale before the Post stage.
+TEST(FrameRunner_RenderScaleUpscalesBeforePostFeatures)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    {
+        TaskSystem tasks(2);
+        renderer::FeatureRegistry registry;
+        renderer::RegisterBuiltinFeatures(registry);
+        renderer::Scene scene(*device, renderer::MakeCornellBox());
+        renderer::FrameRunner runner(*device, tasks,
+                                     {.width = 64, .height = 36, .renderScale = 0.5f, .captureGraph = true});
+        EXPECT(runner.GetRenderWidth() == 32 && runner.GetRenderHeight() == 18);
+        // Added out of order on purpose: stages decide the order, not the call order.
+        EXPECT(runner.AddFeature("tonemap", registry.Create("tonemap")));
+        EXPECT(runner.AddFeature("pathtracer", registry.Create("pathtracer")));
+        const renderer::FrameResult result = runner.RenderFrame(scene.Get(), scene.Desc().camera);
+        EXPECT(result.validationErrors.empty());
+        const size_t trace = result.graphText.find("PathTracer.Trace");
+        const size_t upscale = result.graphText.find("FrameRunner.Upscale");
+        const size_t tonemap = result.graphText.find("Tonemap");
+        EXPECT(trace != std::string::npos && upscale != std::string::npos && tonemap != std::string::npos);
+        EXPECT(trace < upscale && upscale < tonemap);
+        EXPECT(result.graphText.find("FrameRunner.SceneColor") != std::string::npos);
+    }
+    device->WaitIdle();
+    EXPECT(device->GetMemoryStats().liveTextures == 0);
+}
+
+// At native resolution the Scene stage renders straight into the output: no extra pass or texture.
+TEST(FrameRunner_NativeResolutionHasNoUpscale)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    renderer::FeatureRegistry registry;
+    renderer::RegisterBuiltinFeatures(registry);
+    renderer::Scene scene(*device, renderer::MakeCornellBox());
+    renderer::FrameRunner runner(*device, tasks, {.width = 32, .height = 32, .captureGraph = true});
+    EXPECT(runner.AddFeature("pathtracer", registry.Create("pathtracer")));
+    const renderer::FrameResult result = runner.RenderFrame(scene.Get(), scene.Desc().camera);
+    EXPECT(result.validationErrors.empty());
+    EXPECT(result.graphText.find("FrameRunner.Upscale") == std::string::npos);
+    EXPECT(result.graphText.find("FrameRunner.SceneColor") == std::string::npos);
+}

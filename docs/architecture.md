@@ -373,6 +373,22 @@ energy error.
 
 ### 8.5 Feature chain and the blackboard
 
+Features run in three stages (`RenderFeature::GetStage()`), and within a stage in the order they
+were added:
+
+| Stage | Resolution | Writes | Features |
+|---|---|---|---|
+| `Scene` | render (`FrameContext::renderWidth/Height`) | `FrameContext::sceneColor` | pathtracer |
+| `Upscale` | render -> output | `FrameContext::output`, sets `outputWritten` | dlss |
+| `Post` | output (`FrameContext::width/height`) | `FrameContext::output` in place | tonemap, example |
+
+The render resolution is the output resolution times `FrameRunnerDesc::renderScale` (`aircli
+render --render-scale S`). At scale 1 `sceneColor` *is* the output texture and nothing extra runs.
+Below 1 `sceneColor` is a transient texture (`FrameRunner.SceneColor`), and if no Upscale feature
+wrote the output (dlss missing, disabled, failed, or a debug view) FrameRunner adds
+`FrameRunner.Upscale` (bilinear, `src/renderer/shaders/Upscale.hlsl`) before the Post stage, so
+the output is always defined.
+
 Features communicate only through `renderer::Blackboard` (`FrameContext::blackboard`), never by
 including each other. Slots live in `renderer::slots`:
 
@@ -385,10 +401,21 @@ including each other. Slots live in `renderer::slots`:
 | `kJitterX/Y`, `kHistoryReset` | pathtracer | Sub-pixel jitter; history is invalid this frame |
 | `kOutputIsDisplay` | pathtracer | Output is a display-referred debug view: do not tonemap or denoise |
 
-- **dlss** (Windows, D3D12, `AIR_WITH_DLSS`): NVIDIA DLSS Ray Reconstruction (NGX DLSS-D) at 1:1
-  (DLAA) on the noisy HDR output, using the guides above. Run the path tracer with
-  `accumulate=0, spp=1` in front of it. It disables itself on other backends or when guides are
-  missing.
+- **dlss** (Windows, D3D12, `AIR_WITH_DLSS`): NVIDIA DLSS Ray Reconstruction (NGX DLSS-D), the
+  Upscale stage: denoises `sceneColor` with the guides above and writes the output. The NGX mode
+  follows the render scale: 1 = DLAA, 0.667 = Quality, 0.58 = Balanced, 0.5 = Performance,
+  0.333 = Ultra Performance. Use Quality or lower for path tracing: at 2790x1125 Quality traces
+  44% of the pixels and RR itself is far cheaper than DLAA, with no visible loss on the Cornell
+  box (PSNR against a 2048 spp reference: DLAA 43.9 dB, Quality 46.4 dB). Run the path tracer
+  with `accumulate=0, spp=1` in front of it; its jitter sequence has 8 x (output / render)^2
+  phases (at least 32). The jitter is passed negated (NGX takes the image shift, the opposite of
+  the sample offset); a static camera must give a steady image (`dlss.flipJitter=1` shows the
+  wrong sign for comparison). The NGX feature is created in `Initialize()`; if NGX rejects the
+  size it passes the frame through. It refuses to run on other backends.
+- GPU timings are only meaningful when the GPU has VRAM to spare: with other processes (graphics
+  debuggers, IDEs) holding most of it, WDDM pages resources to system memory and every pass slows
+  down by an order of magnitude. Check `vramUsageBytes` / `vramBudgetBytes` in the report and the
+  per-process usage before trusting a profile.
 - **tonemap**: exposure is applied by the path tracer; tonemap maps HDR to display with `clamp`,
   `aces` or `neutral` (Khronos PBR Neutral), highlights NaN/Inf (magenta) and negative values
   (cyan), and optionally encodes sRGB.

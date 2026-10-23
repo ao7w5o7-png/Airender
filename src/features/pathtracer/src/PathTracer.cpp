@@ -8,6 +8,7 @@
 
 #include "PathTracerShared.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -188,7 +189,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.environment.w = exposure;
     if (!mSettings.accumulate)
     {
-        const u32 phase = mFrameIndex % 32 + 1;
+        const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;
         frame.jitter = {Halton(phase, 2) - 0.5f, Halton(phase, 3) - 0.5f};
     }
     blackboard.SetValue(slots::kJitterX, frame.jitter.x);
