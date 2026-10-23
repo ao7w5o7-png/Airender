@@ -15,7 +15,9 @@ TEST(Json_DumpIsDeterministicAndEscaped)
     v["list"].Push(true);
     v["list"].Push(1.5);
     v["list"].Push(nullptr);
-    EXPECT(v.Dump(0) == R"({"a":"quote\" newline\n","b":2,"list":[true,1.5,null]})");
+    // Kept out of EXPECT: MSVC mis-stringizes raw string literals containing \" in macro arguments.
+    constexpr const char* kExpected = R"({"a":"quote\" newline\n","b":2,"list":[true,1.5,null]})";
+    EXPECT(v.Dump(0) == kExpected);
 }
 
 TEST(Image_PfmAndPpmRoundTrip)
