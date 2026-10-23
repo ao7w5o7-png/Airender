@@ -587,7 +587,7 @@ SceneDesc MakeCumulus()
         SetTransform(AddInstance(scene, std::format("Crown{}", i), crown, leaves), trees[i] + float3(0.0f, 5.6f, 0.0f));
     }
     AddSky(scene, 38.0f, 150.0f);
-    scene.clouds = {.enabled = true, .bottom = 1200.0f, .top = 3200.0f, .coverage = 0.4f};
+    scene.clouds = {.enabled = true, .bottom = 1200.0f, .top = 3200.0f, .coverage = 0.4f, .seed = 5};
     LookAt(scene.camera, {0.0f, 1.7f, 0.0f}, {-10.0f, 12.0f, -60.0f});
     scene.camera.verticalFov = 1.0f;
     scene.camera.ev100 = 14.5f;
