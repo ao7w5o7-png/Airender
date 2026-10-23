@@ -5,7 +5,10 @@
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
 //                   [--frames N] [--width W] [--height H] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]
+//                   [--scene cornell_box|furnace] [--output image.pfm|image.ppm]
 //   aircli features                         list available features and their parameters (JSON)
+//   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
+//                    [--furnace] [--no-nee]
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
 //
 // `render` fails (exit 1) if any frame produced a validation error.
@@ -15,17 +18,21 @@
 #include "air/core/Log.h"
 #include "air/core/Profiler.h"
 #include "air/core/TaskSystem.h"
+#include "air/features/pathtracer/ReferenceRenderer.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
+#include "air/renderer/Transfer.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -43,6 +50,9 @@ int Usage() {
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
                "                [--frames N] [--width W] [--height H] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
+               "                [--scene cornell_box|furnace] [--output image.pfm|image.ppm]\n"
+               "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
+               "                [--bounces N] [--furnace] [--no-nee]\n"
                "  aircli features\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
                stderr);
@@ -95,6 +105,61 @@ int CommandFeatures() {
         out.Push(std::move(item));
     }
     std::puts(out.Dump().c_str());
+    return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
+// reference: the path tracer's estimator on the CPU, to validate GPU output with `compare`
+// ---------------------------------------------------------------------------
+int CommandReference(Args& args) {
+    std::string sceneName = "cornell_box";
+    std::string outputPath;
+    pt::ReferenceSettings settings;
+    settings.width = 320;
+    settings.height = 180;
+    settings.samplesPerPixel = 256;
+    while (!args.Done()) {
+        const std::string_view arg = args.Take();
+        if (arg == "--scene") {
+            sceneName = args.Next();
+        } else if (arg == "--output") {
+            outputPath = args.Next();
+        } else if (arg == "--width") {
+            settings.width = u32(std::stoul(std::string(args.Next())));
+        } else if (arg == "--height") {
+            settings.height = u32(std::stoul(std::string(args.Next())));
+        } else if (arg == "--spp") {
+            settings.samplesPerPixel = u32(std::stoul(std::string(args.Next())));
+        } else if (arg == "--bounces") {
+            settings.maxBounces = u32(std::stoul(std::string(args.Next())));
+        } else if (arg == "--furnace") {
+            settings.furnace = true;
+        } else if (arg == "--no-nee") {
+            settings.nextEventEstimation = false;
+        } else {
+            AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
+            return Usage();
+        }
+    }
+    const std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
+    if (args.error || outputPath.empty() || !scene) {
+        return Usage();
+    }
+    TaskSystem tasks;
+    settings.tasks = &tasks;
+    const auto start = std::chrono::steady_clock::now();
+    const Image image = pt::RenderReference(*scene, scene->camera, settings);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const bool ppm = outputPath.ends_with(".ppm");
+    if (!(ppm ? WritePpm(outputPath, image) : WritePfm(outputPath, image))) {
+        AIR_LOG(Error, "aircli", "could not write '{}'", outputPath);
+        return kExitCheckFailed;
+    }
+    json::Value report = json::Value::MakeObject();
+    report["output"] = outputPath;
+    report["scene"] = sceneName;
+    report["seconds"] = seconds;
+    std::puts(report.Dump().c_str());
     return kExitOk;
 }
 
@@ -156,6 +221,8 @@ int CommandRender(Args& args) {
     std::vector<std::string> sets;
     std::string dumpGraph;
     std::string reportPath;
+    std::string sceneName = "cornell_box";
+    std::string outputPath;
     bool dumpCommands = false;
 
     while (!args.Done()) {
@@ -183,6 +250,10 @@ int CommandRender(Args& args) {
             reportPath = args.Next();
         } else if (arg == "--profile") {
             desc.profile = true;
+        } else if (arg == "--scene") {
+            sceneName = args.Next();
+        } else if (arg == "--output") {
+            outputPath = args.Next();
         } else {
             AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
             return Usage();
@@ -216,7 +287,14 @@ int CommandRender(Args& args) {
         renderer::FeatureRegistry registry;
         renderer::RegisterBuiltinFeatures(registry);
         renderer::FrameRunner runner(*device, tasks, desc);
-        renderer::DemoScene scene(*device);
+        std::optional<renderer::SceneDesc> sceneDesc = renderer::MakeBuiltinScene(sceneName);
+        if (!sceneDesc) {
+            AIR_LOG(Error, "aircli", "unknown scene '{}'", sceneName);
+            return kExitUsage;
+        }
+        renderer::Scene scene(*device, std::move(*sceneDesc));
+        const renderer::Camera camera = scene.Desc().camera;
+        report["scene"] = sceneName;
 
         for (const std::string& name : featureNames) {
             auto feature = registry.Create(name);
@@ -245,7 +323,8 @@ int CommandRender(Args& args) {
         json::Value commands = json::Value::MakeArray();
         for (u32 frame = 0; frame < frames; ++frame) {
             Profiler::Get().BeginFrame();
-            renderer::FrameResult result = runner.RenderFrame(scene.Get());
+            scene.Update();
+            renderer::FrameResult result = runner.RenderFrame(scene.Get(), camera);
             Profiler::Get().EndFrame();
             if (frame == 0) {
                 std::fputs(result.graphText.c_str(), stdout);
@@ -266,6 +345,20 @@ int CommandRender(Args& args) {
             frameReports.Push(result.ToJson());
         }
         report["frames"] = std::move(frameReports);
+        if (!outputPath.empty()) {
+            // The frame output is left in SRVCompute by FrameRunner.
+            const std::optional<Image> image =
+                renderer::ReadbackTexture(*device, runner.GetOutput(), rhi::Access::SRVCompute);
+            const bool ppm = outputPath.ends_with(".ppm");
+            if (!image || !(ppm ? WritePpm(outputPath, *image) : WritePfm(outputPath, *image))) {
+                AIR_LOG(Error, "aircli", "could not write '{}'", outputPath);
+                errors.Push("could not write " + outputPath);
+                failed = true;
+            } else {
+                AIR_LOG(Info, "aircli", "wrote {}", outputPath);
+                report["output"] = outputPath;
+            }
+        }
         report["features"] = runner.DescribeFeatures();
         if (desc.profile) {
             device->WaitIdle(); // lets the last frames' GPU timings resolve
@@ -327,6 +420,9 @@ int main(int argc, char** argv) {
     }
     if (command == "features") {
         return CommandFeatures();
+    }
+    if (command == "reference") {
+        return CommandReference(args);
     }
     if (command == "compare") {
         return CommandCompare(args);

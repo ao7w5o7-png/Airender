@@ -34,6 +34,7 @@ struct float2 {
     constexpr float2() = default;
     constexpr float2(float s) : x(s), y(s) {} // NOLINT(google-explicit-constructor): HLSL scalar promotion
     constexpr float2(float x_, float y_) : x(x_), y(y_) {}
+    bool operator==(const float2&) const = default; // C++ only: whole-vector equality
 };
 
 struct float3 {
@@ -41,6 +42,7 @@ struct float3 {
     constexpr float3() = default;
     constexpr float3(float s) : x(s), y(s), z(s) {} // NOLINT(google-explicit-constructor): HLSL scalar promotion
     constexpr float3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+    bool operator==(const float3&) const = default;
 };
 
 struct float4 {
@@ -49,6 +51,7 @@ struct float4 {
     constexpr float4(float s) : x(s), y(s), z(s), w(s) {} // NOLINT(google-explicit-constructor)
     constexpr float4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
     constexpr float4(float3 v, float w_) : x(v.x), y(v.y), z(v.z), w(w_) {}
+    bool operator==(const float4&) const = default;
 };
 
 static_assert(sizeof(float2) == 8 && sizeof(float3) == 12 && sizeof(float4) == 16);

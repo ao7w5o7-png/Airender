@@ -3,7 +3,9 @@ add_library(air_renderer
     src/FeatureRegistry.cpp
     src/FrameRunner.cpp
     src/Parameters.cpp
+    src/Transfer.cpp
     src/Scene.cpp
+    src/SceneLibrary.cpp
     src/ShaderLoader.cpp
 )
 target_include_directories(air_renderer PUBLIC include)

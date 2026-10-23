@@ -59,7 +59,7 @@ public:
     // "feature.parameter" = value, e.g. SetParameter("pathtracer.maxBounces", "4", &error).
     bool SetParameter(std::string_view qualifiedName, std::string_view value, std::string* error = nullptr);
 
-    FrameResult RenderFrame(const GpuScene& scene);
+    FrameResult RenderFrame(const GpuScene& scene, const Camera& camera);
 
     rhi::TextureHandle GetOutput() const { return mOutput; }
     const FrameRunnerDesc& GetDesc() const { return mDesc; }

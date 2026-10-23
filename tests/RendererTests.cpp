@@ -64,12 +64,12 @@ TEST(FrameRunner_ReleasesAllMemoryOnShutdown) {
         TaskSystem tasks(2);
         renderer::FeatureRegistry registry;
         renderer::RegisterBuiltinFeatures(registry);
-        renderer::DemoScene scene(*device);
+        renderer::Scene scene(*device, renderer::MakeCornellBox());
         renderer::FrameRunner runner(*device, tasks, {.width = 32, .height = 32});
         runner.AddFeature("pathtracer", registry.Create("pathtracer"));
         runner.AddFeature("example", registry.Create("example"));
-        runner.RenderFrame(scene.Get());
-        runner.RenderFrame(scene.Get());
+        runner.RenderFrame(scene.Get(), scene.Desc().camera);
+        runner.RenderFrame(scene.Get(), scene.Desc().camera);
     }
     device->WaitIdle();
     const auto stats = device->GetMemoryStats();

@@ -36,11 +36,11 @@ TEST(FrameRunner_ProfileReportsPassTimingsAndMemory) {
     {
         renderer::FeatureRegistry registry;
         renderer::RegisterBuiltinFeatures(registry);
-        renderer::DemoScene scene(*device);
+        renderer::Scene scene(*device, renderer::MakeCornellBox());
         renderer::FrameRunner runner(*device, tasks, {.width = 32, .height = 16, .profile = true});
         EXPECT(runner.AddFeature("pathtracer", registry.Create("pathtracer")));
 
-        const renderer::FrameResult result = runner.RenderFrame(scene.Get());
+        const renderer::FrameResult result = runner.RenderFrame(scene.Get(), scene.Desc().camera);
         EXPECT(result.validationErrors.empty());
         EXPECT(result.passCpu.size() == 2 && result.passCpu[0].name == "PathTracer.Trace");
         // The Null GPU "finishes" immediately: the scopes of this frame are already resolved.

@@ -510,6 +510,7 @@ public:
         }
     }
     u64 GetFrameIndex() const override { return mFrameIndex.load(); }
+    u32 GetFramesInFlight() const override { return mDesc.framesInFlight; }
 
     MemoryStats GetMemoryStats() override {
         MemoryStats stats;

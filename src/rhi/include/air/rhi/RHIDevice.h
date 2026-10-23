@@ -220,6 +220,8 @@ public:
     virtual void BeginFrame() = 0;
     virtual void EndFrame() = 0;
     virtual u64 GetFrameIndex() const = 0;
+    // Frames the CPU may record ahead of the GPU. Per-frame upload rings need this many + 1 slots.
+    virtual u32 GetFramesInFlight() const = 0;
 
     virtual MemoryStats GetMemoryStats() = 0;
     virtual std::vector<ResourceInfo> GetResourceList() = 0;

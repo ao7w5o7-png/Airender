@@ -100,7 +100,7 @@ bool FrameRunner::SetParameter(std::string_view qualifiedName, std::string_view 
     return feature->Parameters().Set(qualifiedName.substr(dot + 1), value, error);
 }
 
-FrameResult FrameRunner::RenderFrame(const GpuScene& scene) {
+FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera) {
     AIR_PROFILE_SCOPE("FrameRunner.RenderFrame");
     const auto start = std::chrono::steady_clock::now();
     FrameResult result;
@@ -113,7 +113,9 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene) {
         rdg::TextureRef output = graph.ImportTexture(mOutput, mOutputAccess, finalAccess);
         mOutputAccess = finalAccess;
 
-        FrameContext context{mDevice, mTasks, graph, scene, output, mDesc.width, mDesc.height, mFrameIndex};
+        Blackboard blackboard;
+        FrameContext context{mDevice,    mTasks, graph,       scene,        camera,
+                             blackboard, output, mDesc.width, mDesc.height, mFrameIndex};
         {
             AIR_PROFILE_SCOPE("FrameRunner.AddPasses");
             for (Entry& e : mFeatures) {

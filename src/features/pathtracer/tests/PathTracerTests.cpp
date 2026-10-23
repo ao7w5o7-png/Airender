@@ -39,3 +39,48 @@ TEST(PathTracer_RejectsInvalidParameters) {
     EXPECT(!h.runner->SetParameter("pathtracer.nope", "1", &error));
     EXPECT(!h.runner->SetParameter("missing.spp", "1", &error));
 }
+
+TEST(PathTracer_CameraMoveRestartsAccumulation) {
+    Headless h({"pathtracer"});
+    h.Frame();
+    h.Frame();
+    h.camera.yaw += 0.1f;
+    h.Frame();
+    const auto status = h.runner->DescribeFeatures().Dump(0);
+    EXPECT(status.find("\"accumulatedSamples\":4") != std::string::npos);
+}
+
+TEST(PathTracer_StopsTracingWhenConverged) {
+    Headless h({"pathtracer"});
+    EXPECT(h.runner->SetParameter("pathtracer.spp", "4"));
+    EXPECT(h.runner->SetParameter("pathtracer.targetSamples", "6"));
+    EXPECT(CountLines(h.Frame().commands, "DispatchRays") == 1);
+    EXPECT(CountLines(h.Frame().commands, "DispatchRays") == 1); // the last 2 samples
+    const auto converged = h.Frame();
+    EXPECT(CountLines(converged.commands, "DispatchRays") == 0);
+    EXPECT(CountLines(converged.commands, "BeginEvent 'PathTracer.Resolve'") == 1);
+    EXPECT(converged.validationErrors.empty());
+}
+
+TEST(PathTracer_WritesGuidesForDenoisers) {
+    Headless h({"pathtracer"});
+    const auto result = h.Frame();
+    for (const char* name : {"PathTracer.DiffuseAlbedo", "PathTracer.SpecularAlbedo", "PathTracer.NormalRoughness",
+                             "PathTracer.ViewDepth", "PathTracer.MotionVectors"}) {
+        EXPECT(result.graphText.find(name) != std::string::npos);
+    }
+    EXPECT(h.runner->SetParameter("pathtracer.guides", "false"));
+    EXPECT(h.Frame().graphText.find("PathTracer.ViewDepth") == std::string::npos);
+}
+
+TEST(PathTracer_DebugViewsAndFurnaceRun) {
+    Headless h({"pathtracer", "tonemap"});
+    for (int view = 0; view < 10; ++view) {
+        EXPECT(h.runner->SetParameter("pathtracer.debugView", std::to_string(view)));
+        EXPECT(h.Frame().validationErrors.empty());
+    }
+    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "10"));
+    EXPECT(h.runner->SetParameter("pathtracer.furnace", "true"));
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "false"));
+    EXPECT(h.Frame().validationErrors.empty());
+}

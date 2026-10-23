@@ -32,7 +32,7 @@ inline size_t CountLines(const std::vector<std::string>& lines, std::string_view
                                 [&](const std::string& l) { return l.find(needle) != std::string::npos; }));
 }
 
-// Null device + task system + demo scene + FrameRunner with the named features.
+// Null device + task system + the Cornell box scene + FrameRunner with the named features.
 class Headless {
 public:
     explicit Headless(const std::vector<std::string>& features, air::u32 width = 64, air::u32 height = 32,
@@ -40,7 +40,8 @@ public:
         : device(air::rhi::CreateDevice({.backend = air::rhi::Backend::Null})), tasks(2) {
         air::renderer::FeatureRegistry registry;
         air::renderer::RegisterBuiltinFeatures(registry);
-        scene = std::make_unique<air::renderer::DemoScene>(*device);
+        scene = std::make_unique<air::renderer::Scene>(*device, air::renderer::MakeCornellBox());
+        camera = scene->Desc().camera;
         runner = std::make_unique<air::renderer::FrameRunner>(
             *device, tasks,
             air::renderer::FrameRunnerDesc{
@@ -60,11 +61,15 @@ public:
         device->WaitIdle();
     }
 
-    air::renderer::FrameResult Frame() { return runner->RenderFrame(scene->Get()); }
+    air::renderer::FrameResult Frame() {
+        scene->Update();
+        return runner->RenderFrame(scene->Get(), camera);
+    }
 
     std::unique_ptr<air::rhi::Device> device;
     air::TaskSystem tasks;
-    std::unique_ptr<air::renderer::DemoScene> scene;
+    std::unique_ptr<air::renderer::Scene> scene;
+    air::renderer::Camera camera;
     std::unique_ptr<air::renderer::FrameRunner> runner;
 };
 

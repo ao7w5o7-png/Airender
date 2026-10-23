@@ -150,7 +150,7 @@ Rgb EstimateAlbedo(const Material& material, float cosThetaO, u32 sampleCount) {
     BindLut();
     const shader::BsdfMaterial m = ToShader(material);
     const float3 wo(std::sqrt(std::max(0.0f, 1.0f - cosThetaO * cosThetaO)), 0.0f, cosThetaO);
-    uint seed = 0x9e3779b9u;
+    shader::uint seed = 0x9e3779b9u;
     double sum[3] = {};
     for (u32 i = 0; i < sampleCount; ++i) {
         const float uLobe = shader::Rand(seed);
@@ -170,7 +170,7 @@ Rgb EstimateAlbedoUniform(const Material& material, float cosThetaO, u32 sampleC
     BindLut();
     const shader::BsdfMaterial m = ToShader(material);
     const float3 wo(std::sqrt(std::max(0.0f, 1.0f - cosThetaO * cosThetaO)), 0.0f, cosThetaO);
-    uint seed = 0x85ebca6bu;
+    shader::uint seed = 0x85ebca6bu;
     double sum[3] = {};
     for (u32 i = 0; i < sampleCount; ++i) {
         const float z = shader::Rand(seed);
