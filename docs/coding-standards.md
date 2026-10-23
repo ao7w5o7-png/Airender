@@ -1,88 +1,112 @@
-# Airender 代码规范
+# Airender Coding Standards
 
-规范由工具强制执行，而不是靠人记：`python3 tools/air.py check` 通过才算符合规范。
+The standards are enforced by tools rather than memory: code conforms when
+`python3 tools/air.py check` passes.
 
-| 方面 | 工具 | 配置 |
+| Area | Tool | Configuration |
 |---|---|---|
-| 格式 | clang-format 18 | `.clang-format` |
-| 命名、常见 bug、并发、性能 | clang-tidy 18 | `.clang-tidy`（bug 类与命名规则是 error） |
-| 模块分层 | `tools/air.py layers` | 脚本里的 `LAYERS` 表 |
-| 编辑器 | EditorConfig | `.editorconfig` |
-| 行为 | 单元测试 + golden 快照 | `tests/`、`src/features/*/tests/`、`tests/golden/` |
+| Formatting | clang-format 18 | `.clang-format` |
+| Naming, common bugs, concurrency, performance | clang-tidy 18 | `.clang-tidy` (bug patterns and naming are errors) |
+| Module layering | `tools/air.py layers` | `LAYERS` table in the script |
+| Editors | EditorConfig | `.editorconfig` |
+| Behaviour | Unit tests + golden snapshots | `tests/`, `src/features/*/tests/`, `tests/golden/` |
 
-## 1. 模块与依赖（低耦合）
+## 1. Modules and dependencies (low coupling)
 
 ```
-core  ←  rhi  ←  rdg  ←  renderer  ←  features/<name>      apps / tests 可以依赖任何模块
+core  ←  rhi  ←  rdg  ←  renderer  ←  features/<name>      apps / tests may depend on anything
 ```
 
-- 只能 include 左边（下层）的模块，`tools/air.py layers` 会检查每一个 `#include "air/..."`。
-- **特性之间互不依赖**：`features/a` 不能 include `features/b`。需要共享的东西下沉到 `renderer`。
-- 每个模块一个 CMake 库，只 `target_link_libraries` 它直接依赖的库。特性库由 `air_add_feature()` 创建，只链接 `air_renderer`。
-- 公共头文件放在 `include/air/<module>/`，实现放在 `src/`；实现细节（例如后端类）只在 `.cpp` 里，用匿名命名空间。
-- 头文件里只放接口需要的 include，其余放 `.cpp`。
+- A module may only include modules to its left (lower layers); `tools/air.py layers` checks every
+  `#include "air/..."`.
+- **Features never depend on each other**: `features/a` must not include `features/b`. Move shared
+  code down into `renderer`.
+- One CMake library per module, linking only its direct dependencies. Feature libraries are created
+  by `air_add_feature()` and link only `air_renderer`.
+- Public headers go in `include/air/<module>/`, implementation in `src/`; implementation details
+  (e.g. backend classes) stay in `.cpp` files inside an anonymous namespace.
+- Headers include only what their interface needs; everything else is included in the `.cpp`.
 
-## 2. 扩展点
+## 2. Extension points
 
-| 想做的事 | 做法 | 需要改核心代码吗 |
+| Goal | How | Core code changes? |
 |---|---|---|
-| 新渲染算法 / 效果 | `python3 tools/air.py new-feature <name>`，实现 `RenderFeature` | 不需要 |
-| 新的可调参数 | 在特性构造函数里 `mParameters.Add(...)`，CLI 用 `--set <feature>.<param>=v` | 不需要 |
-| 新 RHI 后端 | 在 `src/rhi/src/<backend>/` 实现 `rhi::Device`，在 `CreateDevice()` 里加一个分支 | 只改工厂函数 |
-| 新资源格式 / 状态 | `RHITypes.h` 加枚举值，更新对应 `ToString` | 是（RHI 词汇表） |
+| New rendering algorithm / effect | `python3 tools/air.py new-feature <name>`, implement `RenderFeature` | No |
+| New tunable parameter | `mParameters.Add(...)` in the feature constructor; `--set <feature>.<param>=v` on the CLI | No |
+| New RHI backend | Implement `rhi::Device` in `src/rhi/src/<backend>/`, add a case to `CreateDevice()` | Factory function only |
+| New resource format / state | Add the enum value in `RHITypes.h` and update its `ToString` | Yes (RHI vocabulary) |
 
-## 3. 命名
+## 3. Naming
 
-| 种类 | 规则 | 例子 |
+| Kind | Rule | Example |
 |---|---|---|
-| 类型（class/struct/enum） | `PascalCase` | `RenderGraph`, `TextureDesc` |
-| 函数、方法 | `PascalCase` | `AddPass()`, `GetStats()` |
-| 局部变量、参数 | `camelCase` | `passIndex`, `heapSize` |
-| 私有/受保护成员 | `m` + `PascalCase` | `mDevice`, `mPasses` |
-| 公有结构体字段 | `camelCase` | `desc.debugName` |
-| `constexpr` 常量 | `k` + `PascalCase` | `kMinBlockSize` |
-| 枚举值 | `PascalCase`；纹理格式沿用 DXGI 写法 | `Access::UAVCompute`, `Format::RGBA16_FLOAT` |
-| 命名空间 | 小写 | `air::rdg` |
-| 特性名 | `lower_snake_case`（也是目录名、CLI 名） | `pathtracer`, `soft_shadows` |
-| 文件 | 与主类型同名 | `RenderGraph.h / RenderGraph.cpp` |
+| Types (class/struct/enum) | `PascalCase` | `RenderGraph`, `TextureDesc` |
+| Functions, methods | `PascalCase` | `AddPass()`, `GetStats()` |
+| Locals, parameters | `camelCase` | `passIndex`, `heapSize` |
+| Private/protected members | `m` + `PascalCase` | `mDevice`, `mPasses` |
+| Public struct fields | `camelCase` | `desc.debugName` |
+| `constexpr` constants | `k` + `PascalCase` | `kMinBlockSize` |
+| Enum values | `PascalCase`; texture formats keep DXGI spelling | `Access::UAVCompute`, `Format::RGBA16_FLOAT` |
+| Namespaces | lower case | `air::rdg` |
+| Feature names | `lower_snake_case` (also the directory and CLI name) | `pathtracer`, `soft_shadows` |
+| Files | Named after the main type | `RenderGraph.h / RenderGraph.cpp` |
 
-调试名（`debugName`、pass 名）统一用 `Feature.Thing` 形式，例如 `PathTracer.Accumulation`，便于在命令流和 PIX/RenderDoc 里定位。
+Debug names (`debugName`, pass names) use the `Feature.Thing` form, e.g.
+`PathTracer.Accumulation`, so they are easy to find in command streams and in PIX / RenderDoc.
 
-## 4. 所有权与生命周期
+## 4. Ownership and lifetime
 
-- GPU 资源用句柄（`TextureHandle` 等），谁创建谁销毁；`Destroy*` 是延迟的，可以在 GPU 仍在使用时调用。
-- CPU 对象用 `std::unique_ptr` 表达唯一所有权；不要用裸 `new/delete`（底层分配器除外）。
-- 渲染图里的临时资源由渲染图管理，不要在 pass 外保存 `TextureRef`。跨帧数据用 `ImportTexture` / `ExtractTexture`。
-- 禁止拷贝的类显式 `= delete` 拷贝构造和赋值。
+- GPU resources are handles (`TextureHandle`, ...); whoever creates one destroys it. `Destroy*` is
+  deferred and may be called while the GPU still uses the resource.
+- CPU objects with a single owner use `std::unique_ptr`; no raw `new/delete` (low-level
+  allocators excepted).
+- Transient resources belong to the render graph; never keep a `TextureRef` outside a pass. Use
+  `ImportTexture` / `ExtractTexture` for data that crosses frames.
+- Non-copyable classes explicitly `= delete` their copy constructor and assignment.
 
-## 5. 线程安全
+## 5. Thread safety
 
-见 `docs/architecture.md` §2.2。补充规则：
+See `docs/architecture.md` §2.2. Additional rules:
 
-- 共享可变状态优先交给 `Pipe` 串行化；必须加锁时，锁和它保护的数据放在一起并注释 "guards ..."。
-- pass 的 execute lambda 只按值捕获；不要捕获 `this` 去读会变化的成员。
-- 改动 core / rhi / rdg 的并发代码后必须跑 `python3 tools/air.py test --preset tsan`。
+- Prefer serialising shared mutable state through a `Pipe`. When a lock is unavoidable, keep the
+  mutex next to the data it protects and comment it with "guards ...".
+- Pass execute lambdas capture by value only; never capture `this` to read members that change.
+- After changing concurrent code in core / rhi / rdg, run `python3 tools/air.py test --preset tsan`.
 
-## 6. 错误处理
+## 6. Error handling
 
-- 不变量（违反会导致 GPU 状态错乱）用 `AIR_CHECK(cond, "fmt", args...)`，始终开启；消息里带上 pass 名 / 资源名。
-- 仅调试期检查用 `AIR_DCHECK`。
-- 可恢复的失败（文件缺失、参数非法、显存不足）返回 `bool` / `std::optional` / 空句柄，并用 `AIR_LOG(Error, ...)` 说明原因。
-- 不在渲染路径上抛异常；任务系统会捕获任务里的异常并记录日志。
+- Invariants whose violation would corrupt GPU state use `AIR_CHECK(cond, "fmt", args...)`, which
+  is always enabled; messages name the pass / resource involved.
+- Debug-only checks use `AIR_DCHECK`.
+- Recoverable failures (missing files, invalid parameters, out of memory) return `bool` /
+  `std::optional` / an invalid handle and explain why with `AIR_LOG(Error, ...)`.
+- No exceptions on the rendering path; the task system catches and logs exceptions thrown by tasks.
 
-## 7. 测试
+## 7. Testing
 
-- 每个新特性至少一个 Null 后端测试，断言 `validationErrors` 为空（用 `tests/TestHelpers.h` 里的 `Headless`）。
-- 改变 pass 顺序、barrier、裁剪或复用行为时，golden 快照会失败：确认是预期变化后 `python3 tools/air.py golden-update`，并在 PR 里审阅 `tests/golden/` 的 diff。
-- 测试不能依赖时间、线程调度或随机种子之外的随机性。
+- Every new feature has at least one Null backend test asserting that `validationErrors` is empty
+  (use `Headless` from `tests/TestHelpers.h`).
+- Changing pass order, barriers, culling or aliasing makes the golden snapshots fail: once the
+  change is confirmed as intended, run `python3 tools/air.py golden-update` and review the
+  `tests/golden/` diff in the PR.
+- Tests must not depend on timing, thread scheduling, or randomness other than fixed seeds.
 
-## 8. 着色器
+## 8. Shaders
 
-- HLSL，SM 6.6，bindless（`ResourceDescriptorHeap[index]`），参数走 push constants（≤128 字节）。
-- 与 C++ 共享的结构体放 `src/features/<name>/shaders/<Name>Shared.h`，两边都能编译，并用 `static_assert` 锁定大小。
-- 一个 `.hlsl` 文件一个入口（Vulkan 每个入口只能有一个 push constant 块）；编译产物命名 `<Stem>.cs.dxil|spv`、`<Stem>.lib.dxil|spv`。
+- HLSL, SM 6.6, bindless (`ResourceDescriptorHeap[index]`), parameters through push constants
+  (≤ 128 bytes).
+- Structs shared with C++ go in `src/features/<name>/shaders/<Name>Shared.h`, compile on both
+  sides, and have their sizes locked with `static_assert`.
+- One entry point per `.hlsl` file (Vulkan allows one push constant block per entry point);
+  compiled outputs are named `<Stem>.cs.dxil|spv` and `<Stem>.lib.dxil|spv`.
 
-## 9. 提交
+## 9. Language
 
-- 推送前跑 `python3 tools/air.py check`（CI 跑的是同一套检查，外加 TSAN 和 Windows 构建）。
-- 一个 PR 做一件事；提交信息第一行用英文祈使句概括改动。
+- Code comments, documentation, commit messages and pull request descriptions are written in English.
+
+## 10. Commits
+
+- Run `python3 tools/air.py check` before pushing (CI runs the same checks, plus TSAN and the
+  Windows build).
+- One pull request does one thing; the first line of a commit message is an imperative English
+  summary of the change.
