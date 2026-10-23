@@ -2,7 +2,7 @@
 
 Talk to the user in Chinese. Everything written into the repository (code comments, docs, commit
 messages, PR descriptions) is in English. Full standards: docs/coding-standards.md; architecture:
-docs/architecture.md. Do not mention Unreal Engine in README.md.
+docs/architecture.md. Do not name or reference other game engines anywhere in the repository.
 
 ## Iteration loop (run this first)
 - Gate before pushing: `python3 tools/air.py check` (format + layering + build + all tests). Add

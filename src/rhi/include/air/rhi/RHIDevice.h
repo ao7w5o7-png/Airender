@@ -2,7 +2,7 @@
 
 // RHI device and command list interfaces.
 //
-// Threading contract (same split UE uses between FRHICommandList and the dynamic RHI):
+// Threading contract:
 //   * Device: every function is thread-safe. Resource creation/destruction may happen on any thread.
 //     Destroy*() is deferred until the GPU has finished every frame that could still reference it.
 //   * CommandList: NOT thread-safe. One thread records one list at a time. Record different lists

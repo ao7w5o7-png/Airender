@@ -1,6 +1,6 @@
 #pragma once
 
-// Render graph, after UE's RDG (FRDGBuilder) and Frostbite's FrameGraph.
+// Render graph (frame graph): passes declare resource usage, the graph schedules the rest.
 //
 //   RenderGraph graph(device, &tasks);
 //   auto color = graph.CreateTexture({.format = Format::RGBA16_FLOAT, .width = w, .height = h,
@@ -125,7 +125,7 @@ public:
     TextureRef ImportTexture(rhi::TextureHandle texture, Access current, Access final);
     BufferRef ImportBuffer(rhi::BufferHandle buffer, Access current, Access final);
 
-    // Keeps a transient resource alive past Execute() (UE: QueueTextureExtraction). It gets its own
+    // Keeps a transient resource alive past Execute(). It gets its own
     // committed memory, ends in `final`, and *out receives the handle. The caller destroys it.
     void ExtractTexture(TextureRef texture, Access final, rhi::TextureHandle* out);
     void ExtractBuffer(BufferRef buffer, Access final, rhi::BufferHandle* out);

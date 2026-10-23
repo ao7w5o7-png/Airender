@@ -4,9 +4,9 @@
 > real-time rendering and film-quality offline rendering, should eventually produce cinematic
 > video from AI + renderer, and doubles as a testbed for quickly validating graphics algorithms.
 
-This document describes the architecture of the first skeleton. The design borrows heavily from
-Unreal Engine (RHI / RDG / Tasks) but is simplified, prioritising **thread safety, debuggability
-and AI friendliness**.
+This document describes the architecture of the first skeleton. The design follows established
+RHI / render graph / task system patterns, simplified to prioritise **thread safety,
+debuggability and AI friendliness**.
 
 ---
 
@@ -31,14 +31,14 @@ Dependencies point strictly downwards: a layer only depends on the layers below 
 no graphics API, and features never depend on each other. `python3 tools/air.py layers` checks
 every `#include "air/..."` against this rule and runs in CI.
 
-| Module | Directory | Unreal Engine counterpart |
+| Module | Directory | Contents |
 |---|---|---|
-| Task system | `src/core` | `UE::Tasks` (`Launch`, prerequisites, `FPipe`, `ParallelFor`) |
-| RHI | `src/rhi` | `FDynamicRHI` / `FRHICommandList` / `ERHIAccess` |
-| GPU memory | `src/rhi/GpuMemoryAllocator` | `FD3D12PoolAllocator` (D3D12), `FVulkanResourceHeap` (Vulkan) |
-| Render graph | `src/rdg` | `FRDGBuilder`, transient allocator |
-| Feature framework | `src/renderer` | `FSceneViewExtension` / renderer module plugins |
-| Path tracer | `src/features/pathtracer` | UE Path Tracer (`PathTracing.cpp`) |
+| Task system | `src/core` | `Launch`, prerequisites, `Pipe`, `ParallelFor` |
+| RHI | `src/rhi` | `Device` / `CommandList` / `Access` states, backends |
+| GPU memory | `src/rhi/GpuMemoryAllocator` | TLSF pools per memory type, dedicated heaps |
+| Render graph | `src/rdg` | `RenderGraph`, barriers, transient allocator |
+| Feature framework | `src/renderer` | `RenderFeature` plugins, `FrameRunner` |
+| Path tracer | `src/features/pathtracer` | Progressive hardware ray traced path tracer |
 
 ---
 
@@ -50,13 +50,12 @@ File: `src/core/include/air/core/TaskSystem.h`
 
 - **Task**: `TaskSystem::Launch(name, fn, prerequisites, priority)` returns a `TaskHandle`. A task
   is scheduled once all its prerequisites have completed; tasks form a DAG.
-- **Waiting helps**: while waiting, `TaskHandle::Wait()` executes other queued tasks (a simplified
-  form of UE's task retraction). Waiting for a subtask on a worker thread therefore cannot stall
+- **Waiting helps**: while waiting, `TaskHandle::Wait()` executes other queued tasks (task
+  retraction). Waiting for a subtask on a worker thread therefore cannot stall
   the pool (see `TaskSystem_NestedWaitOnSingleWorkerDoesNotDeadlock`).
 - **Pipe**: tasks launched through the same `Pipe` run **one at a time** in launch order, on any
   thread. This is the preferred way to get thread safety: hand non-thread-safe state to a pipe and
-  submit every access as a pipe task, and no lock is needed (the same reason UE replaced named
-  threads with `FPipe`).
+  submit every access as a pipe task, and no lock is needed.
 - **ParallelFor**: the calling thread participates; work is split dynamically.
 - **Priorities**: High / Normal / Background queues.
 
@@ -78,7 +77,7 @@ File: `src/core/include/air/core/TaskSystem.h`
 
 - Replace the global queue with per-thread work-stealing deques (Chase-Lev) to reduce contention.
 - Add render-thread and RHI-thread pipes for a three-stage pipeline: game logic → render command
-  building → RHI submission (UE's GameThread / RenderThread / RHIThread).
+  building → RHI submission.
 
 ---
 
@@ -96,8 +95,7 @@ Files: `src/rhi/include/air/rhi/`
    puts indices into push constants; there are no root signature or descriptor set layouts to
    manage. New passes need almost no boilerplate, and it is the binding model that AI gets wrong
    least often.
-3. **Access states + barriers**: resource state is the `rhi::Access` bit set (similar to UE's
-   `ERHIAccess`) and a barrier is `before -> after`. Backends translate them to D3D12 Enhanced
+3. **Access states + barriers**: resource state is the `rhi::Access` bit set and a barrier is `before -> after`. Backends translate them to D3D12 Enhanced
    Barriers / Vulkan synchronization2. The render graph generates barriers; pass code never
    writes them by hand.
 4. **One HLSL source, two bytecodes**: DXC compiles to DXIL (D3D12) and SPIR-V (Vulkan).
@@ -170,7 +168,7 @@ Temporary resources created inside the render graph do not use the pools above. 
 `transientBytesUnaliased` (without). The first barrier of a resource carries a `discard` flag so
 the backend can issue an aliasing barrier / drop old contents.
 
-Next: cache transient heaps across frames (UE's `FRHITransientResourceAllocator`) instead of
+Next: cache transient heaps across frames instead of
 creating one per frame.
 
 ### 4.4 Deferred release
@@ -228,10 +226,10 @@ A pass author does two things: **declare which resources are used and how**, and
 - `DumpText()`: per pass state, barriers, reads and writes; per resource lifetime and heap offset.
 - `DumpGraphviz()`: a dot graph (culled passes grey, imported resources blue, extracted resources green).
 
-### 5.3 Differences from UE's RDG
+### 5.3 Explicit dependency declaration
 
-UE uses shader parameter structs so that RDG can reflect resource dependencies. Here passes
-declare them explicitly through `PassBuilder` (Frostbite style): no macros or reflection, shorter
+Some render graphs reflect resource dependencies from shader parameter structs. Here passes
+declare them explicitly through `PassBuilder`: no macros or reflection, shorter
 code, and easier for AI to get right. Code generation on top of the shared HLSL/C++ headers can
 later keep push constant structs and declarations in sync automatically.
 
@@ -317,7 +315,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
 
 - Hardware ray tracing: DXR 1.1 / `VK_KHR_ray_tracing_pipeline`, one raygen + miss + closest-hit.
 - **The bounce loop lives in raygen** with `maxRecursionDepth = 1`: a small stack and scheduler
-  friendly, as in UE's path tracer and most GPU offline renderers.
+  friendly, as in most GPU offline renderers.
 - Progressive accumulation: a persistent `RGBA32F` accumulation buffer (rgb = radiance sum,
   a = sample count) gains `samplesPerPixelPerFrame` samples per frame; the `Resolve` pass averages,
   applies exposure and an ACES tonemap.

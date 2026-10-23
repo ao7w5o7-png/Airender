@@ -1,10 +1,10 @@
 #pragma once
 
-// Task system modelled after UE::Tasks:
+// Task system:
 //   - Launch() schedules a task that runs once all of its prerequisites have completed.
 //   - Tasks form a DAG; waiting on a task from any thread (including a worker) helps execute
 //     other tasks instead of blocking, so nested waits cannot deadlock the pool.
-//   - Pipe serialises the tasks launched through it (UE::Tasks::FPipe). Use a pipe to own
+//   - Pipe serialises the tasks launched through it. Use a pipe to own
 //     non-thread-safe state instead of a mutex: everything that touches the state runs in the pipe.
 //
 // Thread-safety: every public function of TaskSystem, TaskHandle and Pipe may be called from any thread.
@@ -54,7 +54,7 @@ public:
     TaskHandle Launch(std::string name, std::function<void()> fn, std::span<const TaskHandle> prerequisites = {},
                       TaskPriority priority = TaskPriority::Normal);
 
-    // A task that completes when all prerequisites complete (UE "task event"/join).
+    // A task that completes when all prerequisites complete (a join).
     TaskHandle WhenAll(std::span<const TaskHandle> prerequisites);
 
     // Runs fn(index) for index in [0, count), splitting into batches of at least minBatch.

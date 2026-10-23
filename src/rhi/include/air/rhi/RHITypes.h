@@ -1,7 +1,7 @@
 #pragma once
 
 // Backend-neutral RHI vocabulary: enums, handles and resource descriptions.
-// Mirrors the split in UE's RHI: the same descriptions feed D3D12, Vulkan and the Null backend.
+// The same descriptions feed the D3D12, Vulkan and Null backends.
 
 #include "air/core/HandlePool.h"
 #include "air/core/Types.h"
@@ -80,7 +80,7 @@ enum class TextureUsage : u32 {
 };
 AIR_ENUM_FLAGS(TextureUsage)
 
-// Resource access state, in the spirit of UE's ERHIAccess. Barriers are expressed as
+// Resource access state as a bit set. Barriers are expressed as
 // (before access -> after access); backends translate to D3D12 enhanced barriers / VK sync2.
 enum class Access : u32 {
     None = 0, // undefined contents (fresh / aliased transient resource)
