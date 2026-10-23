@@ -98,7 +98,8 @@ private:
     u64 mFrameIndex = 0;
     u32 mRenderWidth = 0;
     u32 mRenderHeight = 0;
-    rhi::PipelineHandle mUpscalePipeline; // fallback upscale, only when rendering below the output size
+    rhi::PipelineHandle mUpscalePipeline;              // fallback upscale, only when rendering below the output size
+    std::set<std::string, std::less<>> mConsumedSlots; // union of the features' ConsumedSlots()
 };
 
 } // namespace air::renderer

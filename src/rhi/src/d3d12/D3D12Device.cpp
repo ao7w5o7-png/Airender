@@ -234,6 +234,19 @@ public:
                     HResultToString(hr));
             return std::nullopt;
         }
+        if (location == MemoryLocation::DeviceLocal || location == MemoryLocation::DeviceLocalHost)
+        {
+            // Ask the OS to keep our heaps in video memory when other processes (graphics debuggers,
+            // IDEs) have filled it: otherwise new heaps may be placed in system memory and every pass
+            // runs at PCIe bandwidth. Their idle allocations get paged out instead.
+            ComPtr<ID3D12Device1> device1;
+            if (SUCCEEDED(mDevice.Native()->QueryInterface(IID_PPV_ARGS(&device1))))
+            {
+                ID3D12Pageable* pageable = heap;
+                const D3D12_RESIDENCY_PRIORITY priority = D3D12_RESIDENCY_PRIORITY_HIGH;
+                device1->SetResidencyPriority(1, &pageable, &priority);
+            }
+        }
         GpuHeap result;
         result.native = heap;
         result.size = size;
@@ -303,8 +316,10 @@ bool D3D12Device::Initialize()
         mTimestampFrames.push_back(std::move(frame));
     }
 
-    AIR_LOG(Info, "D3D12", "device '{}' ({} MiB VRAM, ray tracing {}, GPU upload heap {})", mCaps.adapterName,
-            mCaps.dedicatedVideoMemory >> 20, mCaps.rayTracing ? "yes" : "no", mGpuUploadHeap ? "yes" : "no");
+    AIR_LOG(Info, "D3D12", "device '{}' ({} MiB VRAM, SM {}.{}, ray tracing tier {}.{}, SER {}, GPU upload heap {})",
+            mCaps.adapterName, mCaps.dedicatedVideoMemory >> 20, mCaps.shaderModel >> 4, mCaps.shaderModel & 0xF,
+            mCaps.rayTracingTier / 10, mCaps.rayTracingTier % 10, mCaps.shaderExecutionReordering ? "yes" : "no",
+            mGpuUploadHeap ? "yes" : "no");
     return true;
 }
 
@@ -499,7 +514,19 @@ void D3D12Device::QueryCapabilities()
     if (SUCCEEDED(mDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5))))
     {
         mCaps.rayTracing = options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1;
+        mCaps.rayTracingTier = u32(options5.RaytracingTier);
     }
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = {D3D_SHADER_MODEL_6_9}; // returns the highest supported
+    if (SUCCEEDED(mDevice->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))))
+    {
+        mCaps.shaderModel = u32(shaderModel.HighestShaderModel);
+    }
+    D3D12_FEATURE_DATA_D3D12_OPTIONS22 options22 = {};
+    const bool serReorders =
+        SUCCEEDED(mDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS22, &options22, sizeof(options22))) &&
+        options22.ShaderExecutionReorderingActuallyReorders;
+    mCaps.shaderExecutionReordering = mCaps.shaderModel >= u32(D3D_SHADER_MODEL_6_9) &&
+                                      mCaps.rayTracingTier >= u32(D3D12_RAYTRACING_TIER_1_2) && serReorders;
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = {};
     if (SUCCEEDED(mDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7))))
     {

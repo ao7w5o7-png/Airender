@@ -1,19 +1,9 @@
 === frame 0 graph
-RenderGraph: 4 passes (0 culled), 12 barriers, transient heap 320 KiB (unaliased 384 KiB)
+RenderGraph: 4 passes (0 culled), 7 barriers, transient heap 64 KiB (unaliased 64 KiB)
 Passes:
   [0] PathTracer.Trace (RayTracing)
       barrier PathTracer.Accumulation: None -> UAVCompute
-      barrier PathTracer.DiffuseAlbedo: None -> UAVCompute (discard)
-      barrier PathTracer.SpecularAlbedo: None -> UAVCompute (discard)
-      barrier PathTracer.NormalRoughness: None -> UAVCompute (discard)
-      barrier PathTracer.ViewDepth: None -> UAVCompute (discard)
-      barrier PathTracer.MotionVectors: None -> UAVCompute (discard)
       write PathTracer.Accumulation as UAVCompute
-      write PathTracer.DiffuseAlbedo as UAVCompute
-      write PathTracer.SpecularAlbedo as UAVCompute
-      write PathTracer.NormalRoughness as UAVCompute
-      write PathTracer.ViewDepth as UAVCompute
-      write PathTracer.MotionVectors as UAVCompute
   [1] PathTracer.Resolve (Compute)
       barrier PathTracer.Accumulation: UAVCompute -> SRVCompute
       barrier FrameOutput: None -> UAVCompute
@@ -30,17 +20,12 @@ Passes:
 Resources:
   tex FrameOutput (imported) passes [1, 3] final SRVCompute
   tex PathTracer.Accumulation (imported) passes [0, 1] final SRVCompute
-  tex PathTracer.DiffuseAlbedo (transient) passes [0, 0] heap offset 0 size 65536
-  tex PathTracer.SpecularAlbedo (transient) passes [0, 0] heap offset 65536 size 65536
-  tex PathTracer.NormalRoughness (transient) passes [0, 0] heap offset 131072 size 65536
-  tex PathTracer.ViewDepth (transient) passes [0, 0] heap offset 196608 size 65536
-  tex PathTracer.MotionVectors (transient) passes [0, 0] heap offset 262144 size 65536
   tex Example.Pattern (transient) passes [2, 3] heap offset 0 size 65536
 === frame 0 commands
 [Graphics] Barrier [buf 'PathTracer.BsdfLut' None -> CopyDst]
 [Graphics] CopyBuffer buf 'PathTracer.BsdfLut'+0 <- buf 'PathTracer.BsdfLut.Staging'+0 (8448 bytes)
 [Graphics] Barrier [buf 'PathTracer.BsdfLut' CopyDst -> SRVCompute]
-[Graphics] Barrier [tex 'PathTracer.Accumulation' None -> UAVCompute] [tex 'PathTracer.DiffuseAlbedo' None -> UAVCompute discard] [tex 'PathTracer.SpecularAlbedo' None -> UAVCompute discard] [tex 'PathTracer.NormalRoughness' None -> UAVCompute discard] [tex 'PathTracer.ViewDepth' None -> UAVCompute discard] [tex 'PathTracer.MotionVectors' None -> UAVCompute discard]
+[Graphics] Barrier [tex 'PathTracer.Accumulation' None -> UAVCompute]
 [Graphics] BeginEvent 'PathTracer.Trace'
 [Graphics] SetPipeline pipeline 'PathTracer.Trace'
 [Graphics] PushConstants 64 bytes

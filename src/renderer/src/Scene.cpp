@@ -131,23 +131,50 @@ std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, doubl
             light.e2 = p2 - p0;
             light.area = 0.5f * hlsl::length(hlsl::cross(light.e1, light.e2));
             light.radiance = material.emission;
-            light.instance = u32(i);
             // Power of a one-sided Lambertian emitter, L * A * pi; normalized below.
             light.probability = luminance * light.area * std::numbers::pi_v<float>;
             totalPower += light.probability;
             lights.push_back(light);
         }
     }
-    double cdf = 0.0;
-    for (gpu::LightTriangle& light : lights)
+    // Normalize, then build the alias table (Vose): every entry ends up with a threshold and an alias
+    // such that drawing an entry uniformly and keeping it with probability `aliasThreshold` selects
+    // light j with exactly probability[j]. Doubles keep the redistribution exact for large lists.
+    const size_t count = lights.size();
+    std::vector<double> scaled(count);
+    std::vector<u32> small;
+    std::vector<u32> large;
+    for (size_t i = 0; i < count; ++i)
     {
-        light.probability = totalPower > 0.0 ? float(light.probability / totalPower) : 0.0f;
-        cdf += light.probability;
-        light.cdf = float(cdf);
+        const double p = totalPower > 0.0 ? lights[i].probability / totalPower : 0.0;
+        lights[i].probability = float(p);
+        lights[i].aliasThreshold = 1.0f;
+        lights[i].alias = u32(i);
+        scaled[i] = p * double(count);
+        (scaled[i] < 1.0 ? small : large).push_back(u32(i));
     }
-    if (!lights.empty() && totalPower > 0.0)
+    while (!small.empty() && !large.empty())
     {
-        lights.back().cdf = 1.0f; // no rounding gap at the end
+        const u32 s = small.back();
+        small.pop_back();
+        const u32 l = large.back();
+        lights[s].aliasThreshold = float(scaled[s]);
+        lights[s].alias = l;
+        scaled[l] -= 1.0 - scaled[s];
+        if (scaled[l] < 1.0)
+        {
+            large.pop_back();
+            small.push_back(l);
+        }
+    }
+    // Whatever is left is 1 up to rounding: keep itself.
+    for (u32 i : small)
+    {
+        lights[i].aliasThreshold = 1.0f;
+    }
+    for (u32 i : large)
+    {
+        lights[i].aliasThreshold = 1.0f;
     }
     if (totalPowerOut)
     {
@@ -167,7 +194,7 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
         mMaterialRing.push_back(mDevice.CreateBuffer({.size = mDesc.materials.size() * sizeof(gpu::MaterialData),
                                                       .stride = sizeof(gpu::MaterialData),
                                                       .usage = BufferUsage::ShaderResource,
-                                                      .memory = MemoryLocation::Upload,
+                                                      .memory = MemoryLocation::DeviceLocalHost,
                                                       .debugName = std::format("{}.Materials[{}]", mDesc.name, i)}));
     }
     mLightRing.assign(slots, {});
@@ -178,7 +205,7 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
             mDevice.CreateBuffer({.size = mDesc.instances.size() * sizeof(u32),
                                   .stride = sizeof(u32),
                                   .usage = BufferUsage::ShaderResource,
-                                  .memory = MemoryLocation::Upload,
+                                  .memory = MemoryLocation::DeviceLocalHost,
                                   .debugName = std::format("{}.InstanceLights[{}]", mDesc.name, i)}));
     }
     mGpu.environment = mDesc.environment;
@@ -375,7 +402,7 @@ void Scene::WriteDynamicData()
             mDevice.CreateBuffer({.size = bytes,
                                   .stride = sizeof(gpu::LightTriangle),
                                   .usage = BufferUsage::ShaderResource,
-                                  .memory = MemoryLocation::Upload,
+                                  .memory = MemoryLocation::DeviceLocalHost,
                                   .debugName = std::format("{}.Lights[{}]", mDesc.name, mRingSlot)});
         mLightRingCapacity[mRingSlot] = u32(lights.size());
     }

@@ -24,7 +24,8 @@ public:
                         "Samples per pixel at which the image is final and tracing stops", 1, 1u << 20);
         mParameters.Add("accumulate", &mSettings.accumulate,
                         "Average samples across frames (off: per-frame noisy input for a denoiser)");
-        mParameters.Add("guides", &mSettings.guides, "Write denoiser guide textures (albedo, normals, depth, motion)");
+        mParameters.Add("guides", &mSettings.guides,
+                        "Write denoiser guide textures (albedo, normals, depth, motion) when a feature reads them");
         mParameters.Add("nee", &mSettings.nextEventEstimation,
                         "Next event estimation with MIS (off: BSDF sampling only, for comparison)");
         mParameters.Add("furnace", &mSettings.furnace,
@@ -33,6 +34,9 @@ public:
                         "0 lit, 1 normals, 2 base color, 3 roughness, 4 metallic, 5 depth, 6 intersection heatmap, "
                         "7 bounce heatmap, 8 direct light, 9 indirect light",
                         0, gpu::kDebugViewCount - 1);
+        mParameters.Add(
+            "ser", &mSettings.shaderExecutionReordering,
+            "Shader execution reordering (DXR 1.2) where the GPU reorders; slower with today's cheap shading");
         mParameters.Add("debugScale", &mSettings.debugScale,
                         "Full scale of the depth (metres) and intersection heatmap views", 1e-3f, 1e6f);
     }
@@ -61,6 +65,8 @@ public:
         live.width = width;
         live.height = height;
         live.jitterPhases = phases;
+        // The guides cost about a tenth of the trace: only write them for a consumer (dlss).
+        live.guides = mSettings.guides && context.Consumes(renderer::slots::kDiffuseAlbedo);
         mTracer->AddPasses(context.graph, context.scene, context.camera, context.blackboard, context.sceneColor);
     }
 
@@ -71,6 +77,7 @@ public:
         json::Value status = json::Value::MakeObject();
         status["accumulatedSamples"] = mTracer ? mTracer->GetAccumulatedSamples() : 0u;
         status["converged"] = mTracer && mTracer->IsConverged();
+        status["ser"] = mTracer && mTracer->UsesShaderExecutionReordering();
         return status;
     }
 

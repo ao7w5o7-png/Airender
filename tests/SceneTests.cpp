@@ -3,6 +3,8 @@
 
 #include "TestHelpers.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 using namespace air;
@@ -87,12 +89,7 @@ TEST(Scene_LightListHoldsOnlyEmitters)
     {
         const bool emits = desc.materials[desc.instances[i].material].emissionNits > 0.0f;
         EXPECT(emits == (first[i] != gpu::kInvalidIndex));
-        if (emits)
-        {
-            EXPECT(lights[first[i]].instance == u32(i));
-        }
     }
-    EXPECT(lights.back().cdf == 1.0f);
 
     auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
     {
@@ -105,4 +102,33 @@ TEST(Scene_LightListHoldsOnlyEmitters)
         EXPECT(scene.Get().lightCount > 2);
     }
     device->WaitIdle();
+}
+
+// The light list's alias table selects every light with exactly its probability: entry i is drawn
+// with 1/N and kept with aliasThreshold, otherwise it hands the draw to its alias.
+TEST(Scene_LightAliasTableReproducesProbabilities)
+{
+    const renderer::SceneDesc desc = *renderer::MakeBuiltinScene("many_lights");
+    const std::vector<gpu::LightTriangle> lights = renderer::BuildLightTriangles(desc);
+    EXPECT(lights.size() > 10000);
+    const double n = double(lights.size());
+    std::vector<double> selected(lights.size(), 0.0);
+    double total = 0.0;
+    for (const gpu::LightTriangle& light : lights)
+    {
+        EXPECT(light.aliasThreshold >= 0.0f && light.aliasThreshold <= 1.0f && light.alias < lights.size());
+        total += light.probability;
+    }
+    for (size_t i = 0; i < lights.size(); ++i)
+    {
+        selected[i] += double(lights[i].aliasThreshold) / n;
+        selected[lights[i].alias] += (1.0 - double(lights[i].aliasThreshold)) / n;
+    }
+    double worst = 0.0;
+    for (size_t i = 0; i < lights.size(); ++i)
+    {
+        worst = std::max(worst, std::abs(selected[i] - double(lights[i].probability)) / (1.0 / n));
+    }
+    EXPECT(std::abs(total - 1.0) < 1e-4);
+    EXPECT(worst < 1e-5); // relative to the mean probability 1/N
 }

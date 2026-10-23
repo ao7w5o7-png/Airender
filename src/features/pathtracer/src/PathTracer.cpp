@@ -79,7 +79,7 @@ PathTracer::~PathTracer()
             mDevice.DestroyBuffer(buffer);
         }
     }
-    for (rhi::PipelineHandle pipeline : {mTracePipeline, mResolvePipeline})
+    for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mResolvePipeline})
     {
         if (pipeline.IsValid())
         {
@@ -106,6 +106,18 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     trace.pushConstantBytes = sizeof(gpu::TraceConstants);
     trace.debugName = "PathTracer.Trace";
     mTracePipeline = mDevice.CreateRayTracingPipeline(trace);
+    if (mDevice.GetCapabilities().shaderExecutionReordering)
+    {
+        // Same entry points, built from the same kernel with AIR_PT_SER.
+        trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerSer.lib", "");
+        trace.debugName = "PathTracer.TraceSer";
+        if (!trace.library.bytecode.empty())
+        {
+            mTracePipelineSer = mDevice.CreateRayTracingPipeline(trace);
+        }
+        AIR_LOG(Info, "PathTracer", "shader execution reordering {}",
+                mTracePipelineSer.IsValid() ? "available" : "unavailable (PathTracerSer.lib missing)");
+    }
 
     rhi::ComputePipelineDesc resolve;
     resolve.shader = renderer::LoadShader(mDevice, shaderDir, "Resolve.cs", "Main");
@@ -131,7 +143,7 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     mFrameRing = mDevice.CreateBuffer({.size = mFrameRingSize * sizeof(gpu::FrameData),
                                        .stride = sizeof(gpu::FrameData),
                                        .usage = rhi::BufferUsage::ShaderResource,
-                                       .memory = rhi::MemoryLocation::Upload,
+                                       .memory = rhi::MemoryLocation::DeviceLocalHost,
                                        .debugName = "PathTracer.FrameData"});
 
     return mTracePipeline.IsValid() && mResolvePipeline.IsValid() && mAccumulation.IsValid() && mBsdfLut.IsValid() &&
@@ -260,7 +272,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             blackboard.SetTexture(slots::kMotionVectors, guides.motionVectors);
         }
 
-        const rhi::PipelineHandle pipeline = mTracePipeline;
+        const rhi::PipelineHandle pipeline = UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline;
         graph.AddPass(
             "PathTracer.Trace", rdg::PassFlags::RayTracing,
             [&](rdg::PassBuilder& b)

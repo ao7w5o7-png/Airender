@@ -33,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -123,6 +124,10 @@ struct FrameContext
     u32 renderHeight = 0;
     // Set by an Upscale feature that writes `output` from `sceneColor` this frame.
     bool outputWritten = false;
+    // Blackboard slots some active feature reads (RenderFeature::ConsumedSlots()). Producers skip
+    // work nobody consumes, e.g. the path tracer's denoiser guides without a denoiser.
+    const std::set<std::string, std::less<>>* consumedSlots = nullptr;
+    bool Consumes(std::string_view slot) const { return consumedSlots && consumedSlots->contains(slot); }
 };
 
 class RenderFeature
@@ -138,6 +143,8 @@ public:
     virtual json::Value GetStatus() const { return {}; }
     // Fixed for the feature's lifetime. Post is right for anything that works on the output.
     virtual FeatureStage GetStage() const { return FeatureStage::Post; }
+    // Blackboard slots this feature reads, so their producers know someone needs them.
+    virtual std::vector<std::string_view> ConsumedSlots() const { return {}; }
 
     ParameterSet& Parameters() { return mParameters; }
     const ParameterSet& Parameters() const { return mParameters; }

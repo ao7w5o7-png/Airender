@@ -68,9 +68,31 @@ TEST(PathTracer_StopsTracingWhenConverged)
     EXPECT(converged.validationErrors.empty());
 }
 
+namespace
+{
+
+// Stands in for a denoiser: declares the guides as consumed and reads them.
+class GuideReader final : public air::renderer::RenderFeature
+{
+public:
+    bool Initialize(const air::renderer::FeatureInitContext&) override { return true; }
+    void AddPasses(air::renderer::FrameContext&) override {}
+    std::vector<std::string_view> ConsumedSlots() const override
+    {
+        namespace slots = air::renderer::slots;
+        return {slots::kDiffuseAlbedo, slots::kSpecularAlbedo, slots::kNormalRoughness, slots::kViewDepth,
+                slots::kMotionVectors};
+    }
+};
+
+} // namespace
+
+// Guides cost about a tenth of the trace, so they are written only when a feature consumes them.
 TEST(PathTracer_WritesGuidesForDenoisers)
 {
     Headless h({"pathtracer"});
+    EXPECT(h.Frame().graphText.find("PathTracer.DiffuseAlbedo") == std::string::npos); // nobody reads them
+    EXPECT(h.runner->AddFeature("denoiser", std::make_unique<GuideReader>()));
     const auto result = h.Frame();
     for (const char* name : {"PathTracer.DiffuseAlbedo", "PathTracer.SpecularAlbedo", "PathTracer.NormalRoughness",
                              "PathTracer.ViewDepth", "PathTracer.MotionVectors"})

@@ -3,7 +3,7 @@
 // so the two produce the same estimator and can be compared image to image.
 //
 // The including code defines, before including this file:
-//   HitInfo       TraceClosest(float3 origin, float3 direction)
+//   HitInfo       TraceClosest(float3 origin, float3 direction, uint bounce)
 //   bool          TraceVisible(float3 origin, float3 direction, float tMax)
 //   InstanceData  LoadInstance(uint instance)
 //   uint          LoadInstanceLight(uint instance)   first light-list entry, kInvalidIndex if none
@@ -101,24 +101,18 @@ float2 CameraProject(CameraData c, float3 p, float w, float2 size)
 
 // --- Lights --------------------------------------------------------------------------------------
 
-// Index of the light whose CDF interval contains u (skips zero-probability entries).
-uint SampleLightIndex(float u, uint count)
+// Chooses a light with its `probability` in O(1) from the alias table in the light list: one load
+// when the drawn entry is kept, two when it defers to its alias. uAlias must be independent of
+// uSelect (using the fraction of uSelect * count would quantize the choice for large lists).
+LightTriangle SampleLight(float uSelect, float uAlias, uint count)
 {
-    uint lo = 0;
-    uint hi = count - 1;
-    while (lo < hi)
+    uint i = min(uint(uSelect * float(count)), count - 1u);
+    LightTriangle light = LoadLight(i);
+    if (uAlias >= light.aliasThreshold)
     {
-        uint mid = (lo + hi) / 2;
-        if (LoadLight(mid).cdf > u)
-        {
-            hi = mid;
-        }
-        else
-        {
-            lo = mid + 1;
-        }
+        light = LoadLight(light.alias);
     }
-    return lo;
+    return light;
 }
 
 // Solid angle pdf of NEE choosing the point at distance `dist` on `light`, seen under cosLight.
@@ -194,7 +188,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
 
     for (uint bounce = 0u; bounce <= params.maxBounces; ++bounce)
     {
-        HitInfo hit = TraceClosest(origin, direction);
+        HitInfo hit = TraceClosest(origin, direction, bounce);
         bool direct = bounce <= 1u;
         if (!hit.hit)
         {
@@ -256,8 +250,9 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         if (useNee)
         {
             float uLight = Rand(seed);
+            float uAlias = Rand(seed);
             float2 uPoint = float2(Rand(seed), Rand(seed));
-            LightTriangle light = LoadLight(SampleLightIndex(uLight, params.lightCount));
+            LightTriangle light = SampleLight(uLight, uAlias, params.lightCount);
             float2 b = SampleTriangle(uPoint);
             float3 lightPoint = light.p0 + light.e1 * b.x + light.e2 * b.y;
             float3 toLight = lightPoint - rayOrigin;

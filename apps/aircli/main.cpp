@@ -4,7 +4,7 @@
 //
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
 //                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
-//                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]
+//                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
@@ -53,6 +53,7 @@ int Usage()
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
                "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
+               "                [--no-validation]\n"
                "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee]\n"
@@ -292,6 +293,7 @@ int CommandCompare(Args& args)
 int CommandRender(Args& args)
 {
     rhi::Backend backend = rhi::Backend::Null;
+    bool validation = true;
     u32 frames = 4;
     renderer::FrameRunnerDesc desc;
     std::vector<std::string> featureNames = {"pathtracer"};
@@ -354,6 +356,10 @@ int CommandRender(Args& args)
         {
             desc.profile = true;
         }
+        else if (arg == "--no-validation")
+        {
+            validation = false; // no D3D12 debug layer / DRED: timings like a release run
+        }
         else if (arg == "--scene")
         {
             sceneName = args.Next();
@@ -377,7 +383,7 @@ int CommandRender(Args& args)
     Profiler::Get().SetEnabled(desc.profile);
     Profiler::Get().SetThreadName("Main");
 
-    auto device = rhi::CreateDevice({.backend = backend});
+    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = validation});
     if (!device)
     {
         return kExitUsage;

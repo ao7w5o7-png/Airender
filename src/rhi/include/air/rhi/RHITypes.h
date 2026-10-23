@@ -308,8 +308,13 @@ struct DeviceCaps
 {
     bool rayTracing = false; // DXR 1.1 / VK_KHR_ray_tracing_pipeline + ray_query
     bool meshShaders = false;
-    bool bindless = false; // SM 6.6 dynamic resources / descriptor indexing
-    bool rebar = false;    // DeviceLocalHost memory available
+    bool bindless = false;  // SM 6.6 dynamic resources / descriptor indexing
+    bool rebar = false;     // DeviceLocalHost memory available
+    u32 shaderModel = 0;    // highest supported, 0x66 = 6.6
+    u32 rayTracingTier = 0; // 10 = DXR 1.0, 11 = 1.1, 12 = 1.2
+    // DXR 1.2 shader execution reordering (SM 6.9 HitObject + MaybeReorderThread) is available and
+    // the hardware actually reorders (elsewhere the calls are legal no-ops).
+    bool shaderExecutionReordering = false;
     u64 dedicatedVideoMemory = 0;
     std::string adapterName;
 };

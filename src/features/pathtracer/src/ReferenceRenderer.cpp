@@ -209,7 +209,7 @@ struct Kernel
     Vertex LoadVertex(InstanceData instance, uint index) const { return tables.vertices[instance.vertexBuffer][index]; }
     MaterialData LoadMaterial(uint material) const { return tables.materials[material]; }
     LightTriangle LoadLight(uint light) const { return tables.lights[light]; }
-    HitInfo TraceClosest(float3 origin, float3 direction) const
+    HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/) const
     {
         HitInfo hit{};
         tables.bvh->Intersect(origin, direction, 1e30f, false, hit);

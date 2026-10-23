@@ -197,6 +197,12 @@ public:
 
     renderer::FeatureStage GetStage() const override { return renderer::FeatureStage::Upscale; }
 
+    std::vector<std::string_view> ConsumedSlots() const override
+    {
+        return {slots::kDiffuseAlbedo, slots::kSpecularAlbedo, slots::kNormalRoughness, slots::kViewDepth,
+                slots::kMotionVectors};
+    }
+
     void AddPasses(renderer::FrameContext& context) override
     {
         {

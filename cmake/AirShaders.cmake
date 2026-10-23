@@ -4,7 +4,10 @@
 #
 # Each .hlsl file holds one entry point (docs/coding-standards.md §8). Its kind is detected from the
 # source: files with [shader("...")] attributes are ray tracing libraries (lib_6_6), files with
-# [numthreads(...)] are compute shaders with entry point Main (cs_6_6). Outputs:
+# [numthreads(...)] are compute shaders with entry point Main (cs_6_6). A line
+# `// air-shader-target: lib_6_9` (or cs_6_x) sets the kind and profile explicitly, for variants that
+# include a shared kernel or need a newer shader model; `// air-shader-dxil-only` skips SPIR-V.
+# Outputs:
 #   <build>/shaders/<feature>/<Stem>.lib.dxil | <Stem>.cs.dxil      (always)
 #   <build>/shaders/<feature>/<Stem>.lib.spv  | <Stem>.cs.spv       (AIR_RHI_VULKAN only)
 # Every .h / .hlsli next to the sources or in an include dir is a dependency, so editing shared
@@ -74,14 +77,25 @@ function(air_compile_shaders)
         get_filename_component(stem "${source}" NAME_WE)
         get_filename_component(dir "${source}" DIRECTORY)
         file(READ "${source}" text)
-        if(text MATCHES "\\[shader\\(\"")
+        if(text MATCHES "// air-shader-target: (lib|cs)_([0-9]+_[0-9]+)")
+            set(kind ${CMAKE_MATCH_1})
+            set(profile ${CMAKE_MATCH_1}_${CMAKE_MATCH_2})
+        elseif(text MATCHES "\\[shader\\(\"")
             set(kind lib)
-            set(profileArgs -T lib_6_6)
+            set(profile lib_6_6)
         elseif(text MATCHES "\\[numthreads\\(")
             set(kind cs)
-            set(profileArgs -T cs_6_6 -E Main)
+            set(profile cs_6_6)
         else()
             message(FATAL_ERROR "${source}: no [shader(...)] or [numthreads(...)] entry point found")
+        endif()
+        set(profileArgs -T ${profile})
+        if(kind STREQUAL "cs")
+            list(APPEND profileArgs -E Main)
+        elseif(profile STREQUAL "lib_6_6")
+            # Payload access qualifiers are always on from 6.7; on for 6.6 libraries too, so a payload
+            # struct compiles the same way for every target.
+            list(APPEND profileArgs -enable-payload-qualifiers)
         endif()
         file(GLOB localHeaders CONFIGURE_DEPENDS "${dir}/*.h" "${dir}/*.hlsli")
         # Hot reload watches the source, its directory and the shader headers it can include (not the
@@ -108,7 +122,7 @@ function(air_compile_shaders)
         air_add_shader_manifest_entry(NAME ${ARG_NAME} SOURCE "${source}" OUTPUT "${dxil}" FORMAT dxil
                                       ARGS ${common} -Qembed_debug -Zi WATCH ${watch})
 
-        if(AIR_RHI_VULKAN)
+        if(AIR_RHI_VULKAN AND NOT text MATCHES "// air-shader-dxil-only")
             set(spv "${outDir}/${stem}.${kind}.spv")
             add_custom_command(
                 OUTPUT "${spv}"

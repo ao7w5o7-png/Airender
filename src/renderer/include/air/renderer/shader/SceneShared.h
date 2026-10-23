@@ -48,6 +48,8 @@ struct InstanceData
 };
 
 // An emissive triangle in world space, chosen for next event estimation proportionally to power.
+// The list doubles as a Walker/Vose alias table, so choosing a light is O(1): draw entry i
+// uniformly, keep it if a second uniform is below aliasThreshold, otherwise take entry `alias`.
 struct LightTriangle
 {
     float3 p0;
@@ -55,9 +57,9 @@ struct LightTriangle
     float3 e1;         // p1 - p0; the emitting side is cross(e1, e2)
     float probability; // of being chosen
     float3 e2;         // p2 - p0
-    float cdf;         // inclusive prefix sum of probability
+    float aliasThreshold;
     float3 radiance;
-    uint instance;
+    uint alias;
 };
 
 #ifdef __cplusplus

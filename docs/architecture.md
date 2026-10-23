@@ -359,10 +359,44 @@ differ.
   The albedo tables are built on the CPU at startup (`GetBsdfLut`) and uploaded once.
 - **Light transport**: next event estimation over emissive triangles chosen by power, combined
   with BSDF sampling by the power heuristic (MIS). Emitters are one sided (front = `cross(e1, e2)`).
-  Russian roulette from the third bounce.
-- **Hardware ray tracing**: DXR raygen + closest hit for primary and bounce rays (20 byte payload,
-  bounce loop in raygen, recursion depth 1); inline `RayQuery` for shadow rays and the intersection
-  heatmap. Push constants only carry bindless indices; per-frame data comes from an upload ring.
+  The light list is also a Walker/Vose alias table, so choosing a light is O(1) (one or two loads)
+  whatever the light count; the alias decision uses its own random number, so the selection
+  probability is exactly `probability`, as MIS assumes. Russian roulette from the third bounce.
+- **Hardware ray tracing**: DXR raygen + closest hit for primary and bounce rays (20 byte payload
+  with access qualifiers, bounce loop in raygen, recursion depth 1); inline `RayQuery` for shadow
+  rays and the intersection heatmap. Push constants only carry bindless indices; per-frame data comes
+  from rings in the GPU upload heap (`DeviceLocalHost`) where available.
+- **Kernel variants**: `PathTracer.hlsl` (SM 6.6) and `PathTracerSer.hlsl` (SM 6.9, DXR 1.2 shader
+  execution reordering: bounce rays trace into hit objects, threads regroup by hit instance, the
+  hit is read from the object without a closest-hit call) share `PathTracerKernel.hlsli`. SER is
+  chosen with `pathtracer.ser=1` on GPUs that reorder (`DeviceCaps::shaderExecutionReordering`).
+- **Guides** (albedos, normal/roughness, depth, motion) are written only when an active feature
+  lists them in `RenderFeature::ConsumedSlots()` (dlss does): they cost about a tenth of the trace.
+
+#### Performance notes (RTX 5070, 1280x720, 1 spp, `aircli render --profile --no-validation`)
+
+| Scene | Before | Alias table + guides on demand | Change |
+|---|---|---|---|
+| cornell_box | 0.914 ms | 0.807 ms | -12% |
+| veach_mis | 0.694 ms | 0.516 ms | -26% |
+| material_grid | 0.940 ms | 0.793 ms | -16% |
+| sphere_field | 0.773 ms | 0.627 ms | -19% |
+| many_lights | 2.389 ms | 1.700 ms | -29% |
+| door | 1.694 ms | 1.555 ms | -8% |
+| terrain | 0.671 ms | 0.572 ms | -15% |
+
+- SER measured slower everywhere (+4% to +48%, still +3% to +46% when primary rays skip the
+  reorder): shading here is cheap and uniform, and each reorder moves the whole path state of the
+  megakernel. That is why it is off by default; revisit it when materials get expensive (textures,
+  layered BSDFs) or with a wavefront split that keeps the reordered state small.
+- `door` and `many_lights` are dominated by long paths in closed, bright rooms (halving
+  `maxBounces` halves the time), not by per-bounce cost.
+- Measure on an idle machine. With other processes holding most of the VRAM (two graphics
+  debugger sessions held 8 GB here), WDDM pages continuously (the System process shows on a copy
+  engine in `\GPU Engine(*)\Utilization Percentage`) and every pass slows down 4x to 180x:
+  the same Cornell frame measured 3.17 ms of trace and 1.85 ms of resolve, against 0.91 ms and
+  0.010 ms once that memory was freed. Device-local heaps get a high residency priority, which
+  helps a little, not enough.
 - **Accumulation**: a persistent `RGBA32F` buffer averages samples until `targetSamples`, then
   tracing stops. Camera, scene version or image-affecting setting changes reset it. With
   `accumulate=0` the camera is jittered (Halton) every frame for a temporal denoiser.

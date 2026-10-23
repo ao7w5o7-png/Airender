@@ -131,3 +131,48 @@ TEST(FrameRunner_NativeResolutionHasNoUpscale)
     EXPECT(result.graphText.find("FrameRunner.Upscale") == std::string::npos);
     EXPECT(result.graphText.find("FrameRunner.SceneColor") == std::string::npos);
 }
+
+namespace
+{
+
+// Reads the diffuse albedo guide, like a denoiser would.
+class GuideConsumer final : public renderer::RenderFeature
+{
+public:
+    bool Initialize(const renderer::FeatureInitContext&) override { return true; }
+    void AddPasses(renderer::FrameContext& context) override
+    {
+        found = context.blackboard.FindTexture(renderer::slots::kDiffuseAlbedo).has_value();
+    }
+    std::vector<std::string_view> ConsumedSlots() const override { return {renderer::slots::kDiffuseAlbedo}; }
+    bool found = false;
+};
+
+} // namespace
+
+// The path tracer writes its denoiser guides only when an active feature consumes them.
+TEST(FrameRunner_GuidesOnlyForConsumers)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    renderer::FeatureRegistry registry;
+    renderer::RegisterBuiltinFeatures(registry);
+    renderer::Scene scene(*device, renderer::MakeCornellBox());
+    {
+        renderer::FrameRunner runner(*device, tasks, {.width = 32, .height = 18, .captureGraph = true});
+        EXPECT(runner.AddFeature("pathtracer", registry.Create("pathtracer")));
+        const renderer::FrameResult result = runner.RenderFrame(scene.Get(), scene.Desc().camera);
+        EXPECT(result.graphText.find("PathTracer.DiffuseAlbedo") == std::string::npos);
+    }
+    {
+        renderer::FrameRunner runner(*device, tasks, {.width = 32, .height = 18, .captureGraph = true});
+        EXPECT(runner.AddFeature("pathtracer", registry.Create("pathtracer")));
+        auto consumer = std::make_unique<GuideConsumer>();
+        GuideConsumer* view = consumer.get();
+        EXPECT(runner.AddFeature("consumer", std::move(consumer)));
+        const renderer::FrameResult result = runner.RenderFrame(scene.Get(), scene.Desc().camera);
+        EXPECT(view->found && result.graphText.find("PathTracer.DiffuseAlbedo") != std::string::npos);
+        EXPECT(result.validationErrors.empty());
+    }
+    device->WaitIdle();
+}
