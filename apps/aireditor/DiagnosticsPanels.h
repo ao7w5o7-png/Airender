@@ -11,6 +11,7 @@
 
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace air::editor
@@ -37,6 +38,10 @@ public:
     void SetPaused(bool paused);
     void StepFrame() { mStepFrames = 1; }
     u64 GetCapturedFrame() const { return mCapturedUpdate; } // Update() count of the shown data
+
+    // The profiler's "Export HTML" button: the editor takes the request and reports progress.
+    bool TakeReportRequest() { return std::exchange(mReportRequested, false); }
+    void SetReportStatus(std::string status) { mReportStatus = std::move(status); }
 
 private:
     struct ScopeStats
@@ -71,6 +76,8 @@ private:
     std::map<std::string, ScopeStats> mGpuScopes;
     bool mPaused = false;
     u32 mStepFrames = 0;
+    bool mReportRequested = false;
+    std::string mReportStatus;
 
     // Memory window.
     rhi::MemoryStats mMemory;

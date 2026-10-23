@@ -7,9 +7,6 @@
 namespace air::renderer
 {
 
-namespace
-{
-
 const char* HeapCategoryName(u32 memoryTypeKey)
 {
     // Key encoding shared by the Null and D3D12 backends: location * 4 + category.
@@ -21,8 +18,6 @@ const char* HeapCategoryName(u32 memoryTypeKey)
     default: return "Mixed (transient)";
     }
 }
-
-} // namespace
 
 std::string FormatBytes(u64 bytes)
 {

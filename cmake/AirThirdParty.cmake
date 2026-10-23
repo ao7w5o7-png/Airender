@@ -9,12 +9,14 @@
 #   DirectX Shader Compiler     1.9.2609.5      AIR_DXC_EXECUTABLE     HLSL -> DXIL / SPIR-V at build time
 #   Dear ImGui (docking)        1.93.0          AIR_IMGUI_DIR          editor
 #   NVIDIA DLSS SDK             310.9.1         AIR_DLSS_SDK_DIR       dlss feature (Ray Reconstruction)
+#   Microsoft WebView2 SDK      1.0.4314.35     AIR_WEBVIEW2_SDK_DIR   editor's HTML profiler panel (Windows)
 #
 # Targets / functions defined here:
 #   air_agility_sdk               INTERFACE: Agility SDK headers (must win over the Windows SDK ones)
 #   air_imgui_core                STATIC: ImGui core (editor UI library, any platform)
 #   air_imgui                     STATIC: Win32 + DX12 backends (editor executable, Windows)
 #   air_dlss                      INTERFACE: NGX headers + import library
+#   air_webview2                  INTERFACE: WebView2 headers + static loader (the runtime ships with Windows)
 #   air_target_d3d12_runtime(t)   exports the Agility SDK version from executable t and copies the runtime DLLs
 #   air_target_dlss_runtime(t)    copies the DLSS DLLs next to executable t
 
@@ -26,6 +28,8 @@ set(AIR_DXC_VERSION 1.9.2609.5)
 set(AIR_DXC_SHA256 73cfa082245918c2cc1ec6740250eb7377e83a757b3b3a3e16e0d71535bfbfc3)
 set(AIR_IMGUI_TAG v1.93.0-docking)
 set(AIR_DLSS_TAG v310.9.1)
+set(AIR_WEBVIEW2_VERSION 1.0.4314.35)
+set(AIR_WEBVIEW2_SHA256 90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4)
 
 # Downloads url to dest unless it already exists. Sets <outVar> to TRUE on success.
 function(air_download url dest outVar)
@@ -185,6 +189,28 @@ if(AIR_BUILD_EDITOR)
             ${AIR_IMGUI_DIR}/backends/imgui_impl_dx12.cpp
             ${AIR_IMGUI_DIR}/backends/imgui_impl_win32.cpp)
         target_link_libraries(air_imgui PUBLIC air_imgui_core air_agility_sdk d3d12 dxgi d3dcompiler dwmapi)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Microsoft WebView2 SDK: the editor shows the HTML profile report in a panel. Only the static
+# loader is linked; the browser runtime itself is part of Windows 11.
+# ---------------------------------------------------------------------------
+if(AIR_BUILD_EDITOR AND AIR_RHI_D3D12)
+    set(AIR_WEBVIEW2_SDK_DIR "" CACHE PATH "Local WebView2 SDK (unpacked Microsoft.Web.WebView2 package)")
+    if(NOT AIR_WEBVIEW2_SDK_DIR)
+        air_fetch_nuget(Microsoft.Web.WebView2 ${AIR_WEBVIEW2_VERSION} ${AIR_WEBVIEW2_SHA256} webviewDir)
+        if(webviewDir)
+            set(AIR_WEBVIEW2_SDK_DIR "${webviewDir}" CACHE PATH "" FORCE)
+        endif()
+    endif()
+    if(AIR_WEBVIEW2_SDK_DIR AND EXISTS "${AIR_WEBVIEW2_SDK_DIR}/build/native/include/WebView2.h")
+        add_library(air_webview2 INTERFACE)
+        target_include_directories(air_webview2 SYSTEM INTERFACE "${AIR_WEBVIEW2_SDK_DIR}/build/native/include")
+        target_link_libraries(air_webview2 INTERFACE "${AIR_WEBVIEW2_SDK_DIR}/build/native/x64/WebView2LoaderStatic.lib"
+                                                     version)
+    else()
+        message(WARNING "Airender: WebView2 SDK not available; the editor opens profile reports in the browser")
     endif()
 endif()
 

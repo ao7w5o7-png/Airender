@@ -34,6 +34,23 @@ struct FrameRunnerDesc
     bool profile = false;
 };
 
+// Everything a profile report needs from one frame (ProfileReport.h), kept when
+// FrameRunner::RequestCapture() asked for it. GPU timings resolve a few frames later: the frame's
+// are the GpuFrameTimings whose frameIndex equals deviceFrame.
+struct FrameCapture
+{
+    u64 frameIndex = 0;  // FrameRunner frame
+    u64 deviceFrame = 0; // rhi::Device::GetFrameIndex() while it was recorded
+    u32 width = 0;       // output resolution
+    u32 height = 0;
+    u32 renderWidth = 0; // Scene stage resolution
+    u32 renderHeight = 0;
+    json::Value graph;                        // rdg::RenderGraph::DumpJson()
+    std::vector<std::string> commands;        // the command stream, "[Graphics] Dispatch 8x4x1"
+    std::vector<rhi::ResourceInfo> resources; // live resources after the frame was submitted
+    rhi::MemoryStats memory;                  // idem
+};
+
 struct FrameResult
 {
     u64 frameIndex = 0;
@@ -48,6 +65,7 @@ struct FrameResult
     rhi::GpuFrameTimings gpu;                          // latest frame the GPU finished (a few frames back)
     rhi::MemoryStats memory;                           // after this frame
     ProcessMemory processMemory;
+    std::shared_ptr<const FrameCapture> capture; // when FrameRunner::RequestCapture() asked for this frame
 
     json::Value ToJson() const;
 };
@@ -71,6 +89,8 @@ public:
     // into the swapchain while reading the output).
     FrameResult RenderFrame(const GpuScene& scene, const Camera& camera,
                             const std::function<void(FrameContext&)>& extraPasses = {});
+    // The next RenderFrame() fills FrameResult::capture, for a profile report.
+    void RequestCapture() { mCaptureRequested = true; }
 
     rhi::TextureHandle GetOutput() const { return mOutput; }
     const FrameRunnerDesc& GetDesc() const { return mDesc; }
@@ -98,6 +118,7 @@ private:
     rhi::TextureHandle mOutput;
     rhi::Access mOutputAccess = rhi::Access::None;
     u64 mFrameIndex = 0;
+    bool mCaptureRequested = false;
     u32 mRenderWidth = 0;
     u32 mRenderHeight = 0;
     rhi::PipelineHandle mUpscalePipeline;              // fallback upscale, only when rendering below the output size

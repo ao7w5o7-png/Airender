@@ -167,6 +167,89 @@ TEST(Editor_ProfilerPauseFreezesCapturedFrame)
     EXPECT(diagnostics.GetCapturedFrame() == captured + 6);
 }
 
+// Export HTML captures the next frame and writes its report once the frame's GPU timings arrive (on
+// the Null device right away), then opens it.
+TEST(Editor_ExportsAProfileReport)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorOptions options = SmallOptions();
+    options.profileDirectory = std::filesystem::temp_directory_path() / "airender_editor_profiles";
+    std::filesystem::path opened;
+    options.openFile = [&](const std::filesystem::path& path) { opened = path; };
+    editor::EditorApp app(*device, tasks, options);
+    ui.Frame(app);
+    EXPECT(app.GetLastProfileReport().empty());
+    app.ExportProfileReport();
+    for (int i = 0; i < 4 && app.GetLastProfileReport().empty(); ++i)
+    {
+        ui.Frame(app);
+    }
+    EXPECT(!app.GetLastProfileReport().empty() && std::filesystem::exists(app.GetLastProfileReport()));
+    EXPECT(opened == app.GetLastProfileReport());
+    EXPECT(app.GetLastResult().validationErrors.empty());
+}
+
+// The HTML profiler panel shows the report in the platform's web view: the page loads once, then a
+// report is posted per capture while the panel is visible and live; the profiler's Pause holds it.
+TEST(Editor_HtmlProfilerPanelPostsLiveReports)
+{
+    struct FakeView final : editor::HtmlView
+    {
+        void SetBounds(int, int, int width, int height, bool visible) override
+        {
+            shown = visible && width > 0 && height > 0;
+        }
+        void LoadPage(const std::string& html) override { pages.push_back(html); }
+        void PostJson(const std::string& json) override { posts.push_back(json); }
+        std::string GetStatus() const override { return "fake"; }
+        bool shown = false;
+        std::vector<std::string> pages;
+        std::vector<std::string> posts;
+    };
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorOptions options = SmallOptions();
+    FakeView* view = nullptr;
+    options.createHtmlView = [&]
+    {
+        auto fake = std::make_unique<FakeView>();
+        view = fake.get();
+        return fake;
+    };
+    options.htmlProfilerInterval = 0.0f;               // capture whenever no capture is waiting
+    options.focusWindow = editor::kHtmlProfilerWindow; // its dock tab is selected, so it is visible
+    editor::EditorApp app(*device, tasks, options);
+    for (int i = 0; i < 6; ++i)
+    {
+        ui.Frame(app);
+    }
+    EXPECT(view != nullptr);
+    if (!view)
+    {
+        return;
+    }
+    EXPECT(view->shown);
+    EXPECT(view->pages.size() == 1 && view->pages[0].find("report-data") != std::string::npos);
+    EXPECT(view->posts.size() >= 2);
+    if (!view->posts.empty())
+    {
+        const std::optional<json::Value> report = json::Parse(view->posts.back());
+        EXPECT(report && report->Find("graph") && report->Find("frame")->Find("scene")->AsString() == "cornell_box");
+    }
+    app.Diagnostics().SetPaused(true);
+    ui.Frame(app);
+    const size_t posts = view->posts.size();
+    for (int i = 0; i < 3; ++i)
+    {
+        ui.Frame(app);
+    }
+    EXPECT(view->posts.size() == posts);
+    EXPECT(app.GetLastResult().validationErrors.empty());
+}
+
 TEST(Editor_VsyncOption)
 {
     auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});

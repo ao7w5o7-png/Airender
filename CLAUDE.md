@@ -16,6 +16,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
     code 0 = passed, 1 = validation errors or leaks, 2 = usage or environment error.
   - `--dump-commands` prints the full command stream; `--dump-graph x.dot` writes the render
     graph; `aircli features` lists every feature and its parameters.
+- Profile one frame as an HTML page: `aircli render --backend d3d12 ... --html out/profile.html`
+  (GPU timeline per queue with async overlap and waits, the pipeline stages of every command,
+  barriers, transient aliasing and heap offsets; docs/architecture.md §9.2). The data is the JSON
+  in its `<script id="report-data">` element. The editor shows the same page live in its
+  Profiler (HTML) panel; `aireditor --focus "Profiler (HTML)"` opens with that tab selected.
 - Image comparison: `aircli compare ref.pfm test.pfm --diff diff.ppm` prints rmse / psnr /
   differing pixels as JSON.
 - A failing golden snapshot (`tests/golden/`) means the command stream or render graph changed:

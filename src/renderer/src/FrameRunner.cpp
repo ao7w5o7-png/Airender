@@ -169,6 +169,16 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
     const auto start = std::chrono::steady_clock::now();
     FrameResult result;
     result.frameIndex = mFrameIndex;
+    std::shared_ptr<FrameCapture> capture;
+    if (std::exchange(mCaptureRequested, false))
+    {
+        capture = std::make_shared<FrameCapture>();
+        capture->frameIndex = mFrameIndex;
+        capture->width = mDesc.width;
+        capture->height = mDesc.height;
+        capture->renderWidth = mRenderWidth;
+        capture->renderHeight = mRenderHeight;
+    }
 
     mDevice.BeginFrame();
     {
@@ -228,6 +238,10 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
             result.graphText = graph.DumpText();
             result.graphviz = graph.DumpGraphviz();
         }
+        if (capture)
+        {
+            capture->graph = graph.DumpJson();
+        }
     }
     for (std::string& line : mDevice.TakeCapturedCommands())
     {
@@ -235,10 +249,21 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
         {
             result.validationErrors.push_back(line);
         }
+        if (capture)
+        {
+            capture->commands.push_back(line);
+        }
         if (mDesc.captureCommands)
         {
             result.commands.push_back(std::move(line));
         }
+    }
+    if (capture)
+    {
+        capture->deviceFrame = mDevice.GetFrameIndex();
+        capture->resources = mDevice.GetResourceList();
+        capture->memory = mDevice.GetMemoryStats();
+        result.capture = std::move(capture);
     }
     mDevice.EndFrame();
     ++mFrameIndex;

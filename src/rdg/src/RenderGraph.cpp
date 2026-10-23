@@ -672,7 +672,7 @@ u64 RenderGraph::Execute()
         const Batch& batch = mBatches[b];
         if (batch.begin == batch.end)
         {
-            if (!batch.barriersAfter.empty() || batch.finalBarriers || batch.fork)
+            if (batch.IsSubmitted())
             {
                 chunks.push_back({b, batch.begin, batch.end, true}); // barriers only (or nothing: the fork)
             }
@@ -819,13 +819,11 @@ std::string RenderGraph::DumpText() const
     // The queue schedule, only when it is more than one graphics submission.
     if (mStats.asyncComputePassCount > 0)
     {
-        auto submitted = [&](const Batch& batch)
-        { return batch.begin != batch.end || !batch.barriersAfter.empty() || batch.finalBarriers || batch.fork; };
         out << "Submissions:\n";
         for (u32 b = 0; b < mBatches.size(); ++b)
         {
             const Batch& batch = mBatches[b];
-            if (!submitted(batch))
+            if (!batch.IsSubmitted())
             {
                 continue;
             }
@@ -838,7 +836,7 @@ std::string RenderGraph::DumpText() const
             for (size_t q = 0; q < size_t(rhi::QueueType::Count); ++q)
             {
                 const u32 wait = batch.waitFor[q];
-                if (wait != ~0u && submitted(mBatches[wait]))
+                if (wait != ~0u && mBatches[wait].IsSubmitted())
                 {
                     line += std::format(", waits for ({})", wait);
                 }
@@ -874,6 +872,165 @@ std::string RenderGraph::DumpText() const
         }
     }
     return out.str();
+}
+
+json::Value RenderGraph::DumpJson() const
+{
+    auto barrierJson = [](const Barrier& b, u32 resource)
+    {
+        json::Value out = json::Value::MakeObject();
+        out["resource"] = resource;
+        out["before"] = rhi::ToString(b.before);
+        out["after"] = rhi::ToString(b.after);
+        if (b.discard)
+        {
+            out["discard"] = true;
+        }
+        return out;
+    };
+    json::Value out = json::Value::MakeObject();
+    json::Value& stats = out["stats"];
+    stats["passes"] = mStats.passCount;
+    stats["culledPasses"] = mStats.culledPassCount;
+    stats["barriers"] = mStats.barrierCount;
+    stats["transientResources"] = mStats.transientResourceCount;
+    stats["transientHeapBytes"] = mStats.transientHeapSize;
+    stats["transientBytesUnaliased"] = mStats.transientBytesUnaliased;
+    stats["commandLists"] = mStats.commandListCount;
+    stats["asyncComputePasses"] = mStats.asyncComputePassCount;
+    stats["submissions"] = mStats.submissionCount;
+    stats["queueWaits"] = mStats.queueWaitCount;
+
+    json::Value passes = json::Value::MakeArray();
+    for (u32 p = 0; p < mPasses.size(); ++p)
+    {
+        const Pass& pass = mPasses[p];
+        json::Value item = json::Value::MakeObject();
+        item["index"] = p;
+        item["name"] = pass.name;
+        item["flags"] = FlagsToString(pass.flags);
+        item["culled"] = pass.culled;
+        if (!pass.culled)
+        {
+            item["queue"] = rhi::ToString(pass.queue);
+            item["batch"] = pass.batch;
+            item["cpuMs"] = pass.cpuMs;
+        }
+        json::Value accesses = json::Value::MakeArray();
+        for (const ResourceAccess& a : pass.accesses)
+        {
+            json::Value access = json::Value::MakeObject();
+            access["resource"] = a.resource;
+            access["access"] = rhi::ToString(a.access);
+            access["write"] = IsWriteAccess(a.access);
+            accesses.Push(std::move(access));
+        }
+        item["accesses"] = std::move(accesses);
+        json::Value barriers = json::Value::MakeArray();
+        for (size_t i = 0; i < pass.barriersBefore.size(); ++i)
+        {
+            barriers.Push(barrierJson(pass.barriersBefore[i], pass.barrierResources[i]));
+        }
+        item["barriers"] = std::move(barriers);
+        passes.Push(std::move(item));
+    }
+    out["passes"] = std::move(passes);
+
+    json::Value submissions = json::Value::MakeArray();
+    for (u32 b = 0; b < mBatches.size(); ++b)
+    {
+        const Batch& batch = mBatches[b];
+        if (!batch.IsSubmitted())
+        {
+            continue;
+        }
+        json::Value item = json::Value::MakeObject();
+        item["batch"] = b;
+        item["queue"] = rhi::ToString(batch.queue);
+        json::Value batchPasses = json::Value::MakeArray();
+        for (u32 i = batch.begin; i < batch.end; ++i)
+        {
+            batchPasses.Push(mLivePasses[i]);
+        }
+        item["passes"] = std::move(batchPasses);
+        json::Value waits = json::Value::MakeArray();
+        for (size_t q = 0; q < size_t(rhi::QueueType::Count); ++q)
+        {
+            const u32 wait = batch.waitFor[q];
+            if (wait != ~0u && mBatches[wait].IsSubmitted())
+            {
+                json::Value w = json::Value::MakeObject();
+                w["queue"] = rhi::ToString(rhi::QueueType(q));
+                w["batch"] = wait;
+                waits.Push(std::move(w));
+            }
+        }
+        item["waits"] = std::move(waits);
+        item["fork"] = batch.fork;
+        item["finalBarriers"] = batch.finalBarriers;
+        json::Value after = json::Value::MakeArray();
+        for (size_t i = 0; i < batch.barriersAfter.size(); ++i)
+        {
+            after.Push(barrierJson(batch.barriersAfter[i], batch.barriersAfterResources[i]));
+        }
+        item["barriersAfter"] = std::move(after);
+        submissions.Push(std::move(item));
+    }
+    out["submissions"] = std::move(submissions);
+    json::Value finalBarriers = json::Value::MakeArray();
+    for (size_t i = 0; i < mFinalBarriers.size(); ++i)
+    {
+        finalBarriers.Push(barrierJson(mFinalBarriers[i], mFinalBarrierResources[i]));
+    }
+    out["finalBarriers"] = std::move(finalBarriers);
+
+    json::Value resources = json::Value::MakeArray();
+    for (u32 i = 0; i < mResources.size(); ++i)
+    {
+        const Resource& r = mResources[i];
+        json::Value item = json::Value::MakeObject();
+        item["index"] = i;
+        item["name"] = r.name;
+        item["origin"] = r.imported ? "imported" : r.extracted ? "extracted" : "transient";
+        item["used"] = r.used;
+        if (r.kind == ResourceKind::Texture)
+        {
+            item["kind"] = "texture";
+            item["format"] = rhi::ToString(r.textureDesc.format);
+            item["width"] = r.textureDesc.width;
+            item["height"] = r.textureDesc.height;
+            item["depthOrArraySize"] = r.textureDesc.depthOrArraySize;
+            item["mips"] = r.textureDesc.mipLevels;
+        }
+        else
+        {
+            item["kind"] = "buffer";
+            item["bytes"] = r.bufferDesc.size;
+        }
+        if (r.used)
+        {
+            item["firstPass"] = r.firstPass;
+            item["lastPass"] = r.lastPass;
+        }
+        if (r.used && r.IsTransient())
+        {
+            item["heapOffset"] = r.heapOffset;
+            item["size"] = r.allocation.size;
+            item["alignment"] = r.allocation.alignment;
+            item["async"] = r.asyncUse;
+        }
+        if (r.imported)
+        {
+            item["initialAccess"] = rhi::ToString(r.initialAccess);
+        }
+        if (!r.IsTransient())
+        {
+            item["finalAccess"] = rhi::ToString(r.finalAccess);
+        }
+        resources.Push(std::move(item));
+    }
+    out["resources"] = std::move(resources);
+    return out;
 }
 
 std::string RenderGraph::DumpGraphviz() const

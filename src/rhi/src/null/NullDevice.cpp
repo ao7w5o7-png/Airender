@@ -665,6 +665,7 @@ public:
     std::vector<ResourceInfo> GetResourceList() override
     {
         std::vector<ResourceInfo> list;
+        auto heapId = [](const GpuAllocation& allocation) { return reinterpret_cast<u64>(allocation.nativeHeap); };
         mBuffers.ForEach(
             [&](BufferHandle, const NullBuffer& b)
             {
@@ -672,8 +673,8 @@ public:
                 {
                     return;
                 }
-                list.push_back(
-                    {ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory, b.placed});
+                list.push_back({ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory,
+                                b.placed, heapId(b.allocation), b.allocation.offset});
             });
         mTextures.ForEach(
             [&](TextureHandle, const NullTexture& tex)
@@ -683,7 +684,8 @@ public:
                     return;
                 }
                 list.push_back({ResourceInfo::Kind::Texture, tex.desc.debugName, tex.allocation.size,
-                                MemoryLocation::DeviceLocal, tex.placed});
+                                MemoryLocation::DeviceLocal, tex.placed, heapId(tex.allocation),
+                                tex.allocation.offset});
             });
         mHeaps.ForEach(
             [&](HeapHandle, const NullHeap& h)
@@ -692,7 +694,8 @@ public:
                 {
                     return;
                 }
-                list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.location, false});
+                list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.location, false, heapId(h.allocation),
+                                h.allocation.offset});
             });
         mAccelStructs.ForEach(
             [&](AccelStructHandle, const NullAccelStruct& as)

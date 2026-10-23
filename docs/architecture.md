@@ -558,11 +558,13 @@ Panels: Viewport (fly camera: hold right mouse to look, WASD/QE to move, wheel f
 for fast; F12 saves a screenshot), Scene (scene picker, camera,
 EV100, materials), Render (VSync, DLSS toggle and mode, shader hot reload, feature parameters),
 Debug (debug views, furnace, NEE), Profiler (GPU pass timeline with one lane per queue, per-thread CPU scopes,
-frame/GPU/CPU/samples-per-second history; pause with P or Pause and step frame by frame), Memory
-(VRAM budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
+frame/GPU/CPU/samples-per-second history; pause with P or Pause and step frame by frame; Export
+HTML writes the profile report of §9.2), Profiler (HTML) (that report, live, inside the editor),
+Memory (VRAM budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
 Command line: `aireditor [--scene NAME] [--features pathtracer,example,tonemap] [--no-vsync] [--dlss]
-[--dlss-mode quality|...]`; `--features` replaces the feature chain, e.g. to try a new feature or
-an async compute pass in the editor.
+[--dlss-mode quality|...] [--focus WINDOW]`; `--features` replaces the feature chain, e.g. to try a
+new feature or an async compute pass in the editor; `--focus "Profiler (HTML)"` selects that
+window's dock tab at startup (handy for screenshots, as nothing else selects a tab without a click).
 
 ### 9.1 Shader hot reload
 
@@ -585,6 +587,53 @@ that use it and shows the result within about 100 ms:
 `python3 tools/air.py shaders [filter]` compiles every shader from the same manifest into
 `<build>/shader-check/`, a quick HLSL check that needs no C++ build and leaves a running editor's
 shaders alone.
+
+### 9.2 Profile report (HTML)
+
+`aircli render ... --html out/profile.html` (the last frame; implies `--profile`) or the editor's
+Profiler > Export HTML (also File > Export frame profile; written to
+`out/profiles/<scene>-frame<N>.html` under the working directory, then opened in the browser)
+writes one self-contained page about one frame, with no network access needed:
+
+- **Overview**: GPU busy time and span, async overlap, CPU recording, passes, submissions,
+  barriers, transient heap, VRAM.
+- **GPU timeline**: one lane per queue; colour is the kind of work (ray tracing, compute, raster,
+  copy), brackets are the submissions, arrows the cross-queue waits (the fork, the join), shaded
+  bands where queues overlap. Wheel zooms, drag pans, clicking a pass selects it on every view.
+- **GPU pipeline**: every captured command mapped to the stages and units it occupies
+  (`renderer::CommandStages`): the command processor (front end, queue waits, barriers), copy,
+  the raster stages, compute shader, ray generation / traversal (ray tracing units) / hit and
+  miss shaders, AS build. A pass x stage matrix; a selected pass lists its commands and barriers.
+- **Submissions & barriers**: every submission with its waits; every barrier with the stages it
+  waits for and the stages it unblocks (`renderer::AccessStages`), narrowed to the passes that use
+  the resource before and after it.
+- **Memory**: the transient heap over the frame (offset against pass: aliased resources share
+  rows in disjoint columns); every allocator heap with its resources at their offsets
+  (`ResourceInfo::heapId` / `heapOffset`, `GpuMemoryAllocator::HeapUsage::id`), heaps released but
+  still waiting for the GPU, memory outside the allocator.
+- **Graph resources**. Every chart has a table view; Download JSON saves the data.
+
+How it is built: `FrameRunner::RequestCapture()` makes the next `RenderFrame()` fill
+`FrameResult::capture`: `rdg::RenderGraph::DumpJson()`, the command stream, the resource list and
+pool statistics after submission, and the device frame index. That frame's GPU timings arrive a
+few frames later (`GpuFrameTimings::frameIndex == capture->deviceFrame`; aircli waits for the GPU).
+`renderer::MakeProfileReport()` joins them, splitting the command stream per pass
+(`SplitCommandsByPass()`: a queue's waits and barriers between two passes count for the next), and
+`WriteProfileHtml()` puts the JSON into `src/renderer/report/ProfileReport.html`, which
+`cmake/AirEmbed.cmake` compiles into the binary. The page's address keeps the view
+(`#pass=3&theme=light`). Tools read the data from the page's `<script id="report-data">` element.
+To change the page, edit the HTML and rebuild; the data contract is `ProfileReport.h`.
+
+Inside the editor, the **Profiler (HTML)** panel shows the same page live. `EditorOptions::
+createHtmlView` supplies an `HtmlView` (`apps/aireditor/HtmlView.h`); on Windows that is
+`WebViewHost.cpp`, a WebView2 control (the runtime is part of Windows 11; the SDK is downloaded,
+see `cmake/AirThirdParty.cmake`) in a child window kept over the panel's content rectangle and
+hidden while the tab is not shown or an ImGui popup is open (it would cover it). The page loads
+once without data; then, while the panel is visible, Live is on and the profiler is not paused, the
+editor captures a frame every `htmlProfilerInterval` seconds (1 s) and posts its report with
+`PostWebMessageAsJson`; the page's `window.chrome.webview` message listener redraws everything,
+keeping the selected pass and a zoomed timeline. Capture takes one now, Open in browser writes
+the file of the export. Without a web view (other platforms, tests) the panel offers the browser.
 
 ---
 

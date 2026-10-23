@@ -32,6 +32,7 @@ if(NOT AIR_RHI_D3D12)
 endif()
 
 include(cmake/AirCompileOptions.cmake)
+include(cmake/AirEmbed.cmake)
 include(cmake/AirThirdParty.cmake)
 include(cmake/AirShaders.cmake)
 include(cmake/AirFeatures.cmake)

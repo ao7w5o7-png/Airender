@@ -1523,6 +1523,7 @@ MemoryStats D3D12Device::GetMemoryStats()
 std::vector<ResourceInfo> D3D12Device::GetResourceList()
 {
     std::vector<ResourceInfo> list;
+    auto heapId = [](const GpuAllocation& allocation) { return reinterpret_cast<u64>(allocation.nativeHeap); };
     mBuffers.ForEach(
         [&](BufferHandle, const D3D12Buffer& b)
         {
@@ -1530,8 +1531,8 @@ std::vector<ResourceInfo> D3D12Device::GetResourceList()
             {
                 return;
             }
-            list.push_back(
-                {ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory, !b.ownsAllocation});
+            list.push_back({ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory,
+                            !b.ownsAllocation, heapId(b.allocation), b.allocation.offset});
         });
     mTextures.ForEach(
         [&](TextureHandle, const D3D12Texture& t)
@@ -1541,7 +1542,8 @@ std::vector<ResourceInfo> D3D12Device::GetResourceList()
                 return;
             }
             list.push_back({ResourceInfo::Kind::Texture, t.desc.debugName, t.allocation.size,
-                            MemoryLocation::DeviceLocal, !t.ownsAllocation && t.allocation.IsValid()});
+                            MemoryLocation::DeviceLocal, !t.ownsAllocation && t.allocation.IsValid(),
+                            heapId(t.allocation), t.allocation.offset});
         });
     mHeaps.ForEach(
         [&](HeapHandle, const D3D12Heap& h)
@@ -1550,7 +1552,8 @@ std::vector<ResourceInfo> D3D12Device::GetResourceList()
             {
                 return;
             }
-            list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.allocation.location, false});
+            list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.allocation.location, false,
+                            heapId(h.allocation), h.allocation.offset});
         });
     mAccelStructs.ForEach(
         [&](AccelStructHandle, const D3D12AccelStruct& as)
@@ -1560,7 +1563,8 @@ std::vector<ResourceInfo> D3D12Device::GetResourceList()
                 return;
             }
             list.push_back({ResourceInfo::Kind::AccelStruct, as.isTlas ? as.tlas.debugName : as.blas.debugName,
-                            as.allocation.size, MemoryLocation::DeviceLocal, false});
+                            as.allocation.size, MemoryLocation::DeviceLocal, false, heapId(as.allocation),
+                            as.allocation.offset});
         });
     return list;
 }

@@ -1,0 +1,1263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Airender frame profile</title>
+<!--
+  The page of renderer::MakeProfileHtml (src/renderer/include/air/renderer/ProfileReport.h). The C++
+  side replaces the marker in the report-data element with the report JSON; everything else is
+  static. No network access: plain DOM and SVG.
+-->
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink-1: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.10);
+  --wash: rgba(11, 11, 11, 0.045);
+  --band: rgba(11, 11, 11, 0.07);
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --on-s4: #0b0b0b; /* label ink inside a slot 4 (yellow) fill */
+  --neutral: #b9b7af;
+  --warning: #fab219;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink-1: #f0efec;
+    --ink-2: #c3c2b7;
+    --ink-3: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255, 255, 255, 0.10);
+    --wash: rgba(255, 255, 255, 0.05);
+    --band: rgba(255, 255, 255, 0.08);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --s4: #c98500;
+    --on-s4: #ffffff;
+    --neutral: #5f5e59;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink-1: #f0efec;
+  --ink-2: #c3c2b7;
+  --ink-3: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --ring: rgba(255, 255, 255, 0.10);
+  --wash: rgba(255, 255, 255, 0.05);
+  --band: rgba(255, 255, 255, 0.08);
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --s4: #c98500;
+  --on-s4: #ffffff;
+  --neutral: #5f5e59;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink-1);
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+header { padding: 20px 24px 10px; display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.meta { color: var(--ink-2); max-width: 1100px; }
+.actions { display: flex; gap: 8px; }
+nav {
+  position: sticky; top: 0; z-index: 5;
+  background: var(--page); border-bottom: 1px solid var(--grid);
+  padding: 8px 24px; display: flex; gap: 18px; flex-wrap: wrap;
+}
+nav a { color: var(--ink-2); text-decoration: none; }
+nav a:hover { color: var(--ink-1); }
+main { padding: 16px 24px 48px; display: grid; gap: 20px; max-width: 1680px; }
+section.card { background: var(--surface); border: 1px solid var(--ring); border-radius: 8px; padding: 16px 20px; min-width: 0; scroll-margin-top: 48px; }
+h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+h3 { font-size: 13px; font-weight: 600; margin: 16px 0 6px; }
+.sub { color: var(--ink-2); margin: 0 0 12px; max-width: 980px; }
+.muted { color: var(--ink-3); }
+.banner { border-left: 3px solid var(--warning); background: var(--wash); padding: 6px 10px; margin: 0 0 12px; max-width: 980px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 12px; }
+.tile { border: 1px solid var(--ring); border-radius: 8px; padding: 10px 12px; }
+.tile .label { color: var(--ink-2); font-size: 12px; }
+.tile .value { font-size: 22px; font-weight: 600; margin: 2px 0; }
+.tile .note { color: var(--ink-3); font-size: 12px; }
+
+.legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--ink-2); font-size: 12px; margin: 0 0 8px; align-items: center; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; vertical-align: -1px; margin-right: 6px; }
+.key-line { width: 16px; height: 0; border-top: 2px solid var(--ink-2); display: inline-block; vertical-align: 3px; margin-right: 6px; }
+.toolbar { display: flex; gap: 8px; align-items: center; margin: 0 0 8px; flex-wrap: wrap; }
+.toolbar .hint { color: var(--ink-3); font-size: 12px; }
+button {
+  font: inherit; color: var(--ink-1); background: var(--surface);
+  border: 1px solid var(--axis); border-radius: 6px; padding: 3px 10px; cursor: pointer;
+}
+button:hover { background: var(--wash); }
+button[aria-pressed="true"] { background: var(--band); border-color: var(--ink-3); }
+
+.chart { width: 100%; position: relative; }
+svg { display: block; }
+svg text { font-family: inherit; font-size: 11px; fill: var(--ink-2); }
+.grid { stroke: var(--grid); stroke-width: 1; }
+.lane-rule { stroke: var(--axis); stroke-width: 1; }
+.lane-label { fill: var(--ink-1); font-weight: 600; font-size: 12px; }
+.lane-note { fill: var(--ink-3); }
+.overlap { fill: var(--band); }
+.bracket { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+.bracket-label, .fork-label { fill: var(--ink-3); font-size: 10px; }
+.wait { stroke: var(--ink-2); stroke-width: 1.5; fill: none; }
+.wait-hit { stroke: transparent; stroke-width: 10; fill: none; }
+.arrowhead { fill: var(--ink-2); }
+.bar { cursor: pointer; }
+.bar:hover { opacity: 0.82; }
+.bar.nested { opacity: 0.55; }
+.bar.sel, .alloc.sel { stroke: var(--ink-1); stroke-width: 2; }
+.bar-label { pointer-events: none; font-size: 11px; }
+.on-fill { fill: #ffffff; }
+.on-copy { fill: var(--on-s4); }
+.on-neutral { fill: var(--ink-1); }
+.k-rt { fill: var(--s1); }
+.k-compute { fill: var(--s2); }
+.k-raster { fill: var(--s3); }
+.k-copy { fill: var(--s4); }
+.k-other { fill: var(--neutral); }
+.bg-rt { background: var(--s1); }
+.bg-compute { background: var(--s2); }
+.bg-raster { background: var(--s3); }
+.bg-copy { background: var(--s4); }
+.bg-other { background: var(--neutral); }
+.bg-band { background: var(--band); border: 1px solid var(--axis); }
+.free { fill: var(--wash); stroke: var(--grid); }
+.released { fill: var(--band); }
+.heap-outline { fill: none; stroke: var(--axis); }
+.col-sel { fill: var(--band); }
+
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--ink-2); font-weight: 600; font-size: 12px; white-space: nowrap; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+td.mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+.scroll { overflow-x: auto; }
+details > summary { cursor: pointer; color: var(--ink-2); margin: 10px 0 6px; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td, tr.clickable:focus td { background: var(--wash); }
+tr.sel td { background: var(--band); }
+tr.group td { color: var(--ink-3); font-size: 12px; padding-top: 10px; }
+
+.chip { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11px; border: 1px solid var(--ring); color: var(--ink-2); background: var(--wash); margin: 0 4px 2px 0; white-space: nowrap; }
+.cnt { display: inline-block; min-width: 22px; padding: 1px 5px; border-radius: 4px; font-size: 11px; text-align: center; color: #ffffff; }
+.cnt.bg-copy { color: var(--on-s4); }
+.cnt.bg-other { color: var(--ink-1); }
+.matrix td.cell { text-align: center; padding: 3px 4px; }
+.matrix th.stage { text-align: center; font-weight: 500; font-size: 11px; color: var(--ink-2); padding: 3px 4px; }
+.matrix th.groupcell { text-align: center; color: var(--ink-3); font-weight: 500; font-size: 11px; border-bottom: 1px solid var(--axis); }
+
+.pipe { display: flex; gap: 10px; flex-wrap: wrap; align-items: stretch; margin: 0 0 12px; }
+.pgroup { border: 1px solid var(--ring); border-radius: 8px; padding: 6px 8px; }
+.pgroup .gl { font-size: 11px; color: var(--ink-3); margin-bottom: 4px; }
+.pstages { display: flex; gap: 4px; align-items: center; }
+.pstage { border: 1px solid var(--grid); border-radius: 6px; padding: 4px 8px; min-width: 92px; background: var(--surface); }
+.pstage .n { font-weight: 600; }
+.pstage .u { font-size: 11px; color: var(--ink-3); }
+.pstage.on { border-color: var(--axis); }
+.pstage.on.w-rt { background: color-mix(in srgb, var(--s1) 16%, var(--surface)); border-color: var(--s1); }
+.pstage.on.w-compute { background: color-mix(in srgb, var(--s2) 16%, var(--surface)); border-color: var(--s2); }
+.pstage.on.w-raster { background: color-mix(in srgb, var(--s3) 16%, var(--surface)); border-color: var(--s3); }
+.pstage.on.w-copy { background: color-mix(in srgb, var(--s4) 18%, var(--surface)); border-color: var(--s4); }
+.pstage.on.w-other { background: var(--band); }
+.arrow { color: var(--ink-3); }
+.detail { border-top: 1px solid var(--grid); padding-top: 10px; }
+
+.tip {
+  position: fixed; pointer-events: none; z-index: 10; display: none;
+  background: var(--surface); color: var(--ink-1);
+  border: 1px solid var(--ring); border-radius: 6px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+  padding: 8px 10px; font-size: 12px; max-width: 440px;
+}
+.tip .tt { font-weight: 600; margin-bottom: 4px; overflow-wrap: anywhere; }
+.tip .row { display: flex; gap: 8px; align-items: baseline; }
+.tip .row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tip .k { color: var(--ink-2); }
+.tip .x { color: var(--ink-3); margin-top: 4px; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  header, nav, main { padding-left: 16px; padding-right: 16px; }
+  section.card { padding: 12px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1 id="title">Frame profile</h1>
+    <div class="meta" id="meta"></div>
+  </div>
+  <div class="actions">
+    <button id="theme" type="button" title="Switch between the system, light and dark theme">Theme: system</button>
+    <button id="download" type="button" title="The report data this page shows">Download JSON</button>
+  </div>
+</header>
+<nav>
+  <a href="#overview">Overview</a>
+  <a href="#timeline">GPU timeline</a>
+  <a href="#pipeline">GPU pipeline</a>
+  <a href="#sync">Submissions &amp; barriers</a>
+  <a href="#memory">Memory</a>
+  <a href="#resources">Graph resources</a>
+</nav>
+<main>
+  <section class="card" id="overview">
+    <h2>Overview</h2>
+    <p class="sub">GPU times come from per-queue timestamps; busy time counts the moments some queue ran a pass, span runs from the first timestamp to the last.</p>
+    <div id="banners"></div>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section class="card" id="timeline">
+    <h2>GPU timeline</h2>
+    <p class="sub">One lane per queue. Brackets above a lane are its submissions; arrows are cross-queue waits (from the end of the submission waited for to the start of the waiting one); shaded bands are where both queues ran passes at once.</p>
+    <div class="legend" id="timeline-legend"></div>
+    <div class="toolbar">
+      <button type="button" id="zoom-in">Zoom in</button>
+      <button type="button" id="zoom-out">Zoom out</button>
+      <button type="button" id="zoom-fit">Fit</button>
+      <span class="hint">Wheel to zoom, drag to pan, double-click to fit. Click a pass to inspect it.</span>
+    </div>
+    <div class="chart" id="timeline-chart"></div>
+    <details><summary>Table view</summary><div class="scroll" id="timeline-table"></div></details>
+  </section>
+
+  <section class="card" id="pipeline">
+    <h2>Where the commands run in the GPU pipeline</h2>
+    <p class="sub">Each captured command maps to the pipeline stages and hardware units it occupies: dispatches to the shader cores, ray dispatches to ray generation, the ray tracing units' traversal and the hit / miss shaders, copies to the copy path, and barriers and queue waits to the command processor. Select a pass to light up its stages.</p>
+    <div class="pipe" id="pipe"></div>
+    <div class="detail" id="pass-detail"></div>
+    <h3>Stages per pass</h3>
+    <p class="sub">Commands per stage; the commands a queue executes between two of its passes (waits, barriers) count for the pass after them.</p>
+    <div class="scroll" id="matrix"></div>
+  </section>
+
+  <section class="card" id="sync">
+    <h2>Submissions &amp; barriers</h2>
+    <p class="sub">The render graph's schedule: every submission with the submissions of other queues it waits for, and every barrier with the stages it waits for and the stages it unblocks (from its before and after states).</p>
+    <h3>Submissions</h3>
+    <div class="scroll" id="submissions"></div>
+    <h3>Barriers</h3>
+    <div class="scroll" id="barriers"></div>
+  </section>
+
+  <section class="card" id="memory">
+    <h2>Memory</h2>
+    <p class="sub">Transient resources live in one placed heap per frame and share memory when their lifetimes do not overlap. Persistent resources are sub-allocated from the allocator's heaps; each heap is drawn to its own scale, every resource at its offset.</p>
+    <div class="tiles" id="memory-tiles"></div>
+    <h3>Transient heap over the frame</h3>
+    <p class="sub">Columns are the live passes in submission order, rows the heap offset. Rectangles stacked at the same offset with disjoint columns are aliased: the same memory reused.</p>
+    <div class="legend" id="alias-legend"></div>
+    <div class="chart" id="alias-chart"></div>
+    <details><summary>Table view</summary><div class="scroll" id="alias-table"></div></details>
+    <h3>Heaps</h3>
+    <div class="toolbar">
+      <button type="button" id="scale-range" aria-pressed="true">Scale to the allocated range</button>
+      <button type="button" id="scale-heap" aria-pressed="false">Scale to the whole heap</button>
+    </div>
+    <div class="legend" id="heap-legend"></div>
+    <div class="chart" id="heap-chart"></div>
+    <details><summary>Table view</summary><div class="scroll" id="heap-table"></div></details>
+    <div id="unplaced"></div>
+  </section>
+
+  <section class="card" id="resources">
+    <h2>Graph resources</h2>
+    <p class="sub">Every resource the frame's render graph declared, with its lifetime in passes and, for transients, its place in the transient heap.</p>
+    <div class="scroll" id="resource-table"></div>
+  </section>
+</main>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script id="report-data" type="application/json">/*AIR_REPORT_DATA*/</script>
+<script>
+'use strict';
+
+const NS = 'http://www.w3.org/2000/svg';
+
+// ---------------------------------------------------------------------------------------------
+// DOM helpers. Names from the report (passes, resources) are inserted as text, never as markup.
+// ---------------------------------------------------------------------------------------------
+function setProps(e, props) {
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'text') e.textContent = v;
+    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? '' : String(v));
+  }
+}
+function append(e, kids) {
+  for (const k of [kids].flat(Infinity)) {
+    if (k === undefined || k === null || k === false) continue;
+    e.append(k instanceof Node ? k : document.createTextNode(String(k)));
+  }
+}
+function h(tag, props, ...kids) { const e = document.createElement(tag); setProps(e, props); append(e, kids); return e; }
+function s(tag, props, ...kids) { const e = document.createElementNS(NS, tag); setProps(e, props); append(e, kids); return e; }
+const $ = (id) => document.getElementById(id);
+
+function fmtMs(ms) {
+  if (!Number.isFinite(ms)) return '–';
+  const a = Math.abs(ms);
+  if (a >= 100) return ms.toFixed(0) + ' ms';
+  if (a >= 1) return ms.toFixed(2) + ' ms';
+  const us = ms * 1000;
+  return (Math.abs(us) >= 10 ? us.toFixed(0) : us.toFixed(1)) + ' µs';
+}
+function fmtBytes(b) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let v = b, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; ++i; }
+  return i === 0 ? b + ' B' : v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2) + ' ' + units[i];
+}
+const fmtPct = (x) => (x * 100).toFixed(x >= 0.1 || x === 0 ? 0 : 1) + '%';
+const hex = (n) => '0x' + Number(n).toString(16);
+const sum = (list, f) => list.reduce((t, x) => t + f(x), 0);
+
+function niceTicks(a, b, count) {
+  const span = b - a;
+  if (!(span > 0)) return { ticks: [a], step: 1 };
+  const raw = span / Math.max(1, count);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const err = raw / mag;
+  const step = (err >= 7.5 ? 10 : err >= 3.5 ? 5 : err >= 1.5 ? 2 : 1) * mag;
+  const ticks = [];
+  for (let t = Math.ceil(a / step) * step; t <= b + step * 1e-9; t += step) ticks.push(+t.toPrecision(12));
+  return { ticks, step };
+}
+function fmtTick(t, step) {
+  if (step >= 1) return t.toFixed(step >= 10 ? 0 : 1).replace(/\.0$/, '') + ' ms';
+  if (step >= 0.01) return t.toFixed(step >= 0.1 ? 1 : 2) + ' ms';
+  return (t * 1000).toFixed(step >= 0.001 ? 0 : 1) + ' µs';
+}
+
+// Tooltip: values lead (bold), labels follow (muted).
+const tip = $('tip');
+function tipRow(value, label) { return h('div', { class: 'row' }, h('b', { text: value }), h('span', { class: 'k', text: label })); }
+function moveTip(e) {
+  const pad = 14;
+  const r = tip.getBoundingClientRect();
+  let x = e.clientX + pad, y = e.clientY + pad;
+  if (x + r.width > innerWidth - 8) x = Math.max(8, e.clientX - r.width - pad);
+  if (y + r.height > innerHeight - 8) y = Math.max(8, e.clientY - r.height - pad);
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+}
+function showTip(nodes, e) { tip.textContent = ''; append(tip, nodes); tip.style.display = 'block'; moveTip(e); }
+function hideTip() { tip.style.display = 'none'; }
+function hover(el, content) {
+  el.addEventListener('pointerenter', (e) => showTip(content(), e));
+  el.addEventListener('pointermove', moveTip);
+  el.addEventListener('pointerleave', hideTip);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Report data. load() derives everything below from a report; the editor's HTML profiler panel
+// sends a new report every second, so the page can be redrawn from any of them.
+// ---------------------------------------------------------------------------------------------
+let R = {};
+let graph = {}, passes = [], resources = [], submissions = [], stats = {}, stages = [], stageById = {}, accessStages = {}, gpu = {}, memory = {};
+let livePasses = [], commandsByPass = new Map(), trailing = [];
+let scopes = [], hasTimings = false, scopeOfPass = new Map(), queues = [], batchTime = new Map();
+let busyByQueue = {}, overlap = [], transients = [], fullSpan = 1;
+const QUEUES = ['Graphics', 'Compute', 'Copy'];
+const COMMAND_STAGES = ['frontend', 'wait', 'sync', 'copy', 'clear', 'ia', 'vs', 'raster', 'ps', 'om', 'cs', 'raygen', 'traversal', 'hitmiss', 'asbuild'];
+const CONTROL_STAGES = new Set(['frontend', 'wait', 'sync']);
+
+// Colour encodes the kind of work (categorical slots 1-4 in fixed order); lanes encode the queue.
+const KINDS = [
+  { id: 'rt', label: 'Ray tracing' },
+  { id: 'compute', label: 'Compute' },
+  { id: 'raster', label: 'Raster' },
+  { id: 'copy', label: 'Copy' },
+];
+function passKind(pass) {
+  const f = (pass && pass.flags) || '';
+  if (f.includes('RayTracing')) return 'rt';
+  if (f.includes('Raster')) return 'raster';
+  if (f.includes('Copy')) return 'copy';
+  if (f.includes('Compute')) return 'compute';
+  return 'other';
+}
+const onFill = (kind) => (kind === 'copy' ? 'on-copy' : kind === 'other' ? 'on-neutral' : 'on-fill');
+
+const passName = (i) => (i >= 0 && passes[i] ? passes[i].name : '–');
+
+function scopeKind(sc) {
+  if (sc.pass >= 0) return passKind(passes[sc.pass]);
+  const parent = scopes.find((o) => o.depth === 0 && o.pass >= 0 && o.queue === sc.queue && o.beginMs <= sc.beginMs && o.end >= sc.end);
+  return parent ? passKind(passes[parent.pass]) : 'other';
+}
+
+function load(report) {
+  R = report || {};
+  graph = R.graph || {};
+  passes = graph.passes || [];
+  resources = graph.resources || [];
+  submissions = graph.submissions || [];
+  stats = graph.stats || {};
+  stages = R.stages || [];
+  stageById = Object.fromEntries(stages.map((st) => [st.id, st]));
+  accessStages = R.accessStages || {};
+  gpu = R.gpu || {};
+  memory = R.memory || {};
+  livePasses = passes.filter((p) => !p.culled);
+
+  commandsByPass = new Map();
+  trailing = [];
+  for (const c of R.commands || []) {
+    if (c.pass >= 0) {
+      if (!commandsByPass.has(c.pass)) commandsByPass.set(c.pass, []);
+      commandsByPass.get(c.pass).push(c);
+    } else {
+      trailing.push(c);
+    }
+  }
+
+  // GPU scopes, matched to passes by queue and name in order (BeginEvent names the pass).
+  scopes = (gpu.scopes || []).map((sc, i) => ({ ...sc, id: i, end: sc.beginMs + sc.ms, pass: -1 }));
+  hasTimings = !!gpu.available && gpu.frameMs > 0;
+  const byName = new Map();
+  for (const p of livePasses) {
+    const key = p.queue + '|' + p.name;
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(p.index);
+  }
+  const used = new Map();
+  for (const sc of [...scopes].sort((a, b) => a.beginMs - b.beginMs)) {
+    if (sc.depth !== 0) continue;
+    const key = sc.queue + '|' + sc.name;
+    const list = byName.get(key);
+    const n = used.get(key) || 0;
+    if (list && n < list.length) {
+      sc.pass = list[n];
+      used.set(key, n + 1);
+    }
+  }
+  scopeOfPass = new Map(scopes.filter((sc) => sc.pass >= 0).map((sc) => [sc.pass, sc]));
+  queues = QUEUES.filter((q) => scopes.some((sc) => sc.queue === q) || submissions.some((b) => b.queue === q) || livePasses.some((p) => p.queue === q));
+
+  // Submission times: from their passes' scopes; a submission without timed passes (the fork, a
+  // barrier-only one) sits at the end of its queue's previous submission, or the start of the next.
+  batchTime = new Map();
+  for (const b of submissions) {
+    const sc = b.passes.map((p) => scopeOfPass.get(p)).filter(Boolean);
+    if (sc.length) batchTime.set(b.batch, { begin: Math.min(...sc.map((x) => x.beginMs)), end: Math.max(...sc.map((x) => x.end)), timed: true });
+  }
+  for (const b of submissions) {
+    if (batchTime.has(b.batch)) continue;
+    const same = submissions.filter((o) => o.queue === b.queue && batchTime.get(o.batch) && batchTime.get(o.batch).timed);
+    const prev = same.filter((o) => o.batch < b.batch).pop();
+    const next = same.find((o) => o.batch > b.batch);
+    const t = prev ? batchTime.get(prev.batch).end : next ? batchTime.get(next.batch).begin : 0;
+    batchTime.set(b.batch, { begin: t, end: t, timed: false });
+  }
+
+  busyByQueue = Object.fromEntries(queues.map((q) => [q, union(scopes.filter((sc) => sc.queue === q && sc.depth === 0).map((sc) => [sc.beginMs, sc.end]))]));
+  overlap = union(queues.flatMap((q, i) => queues.slice(i + 1).flatMap((r) => intersect(busyByQueue[q], busyByQueue[r]))));
+  transients = resources.filter((r) => r.origin === 'transient' && r.used && r.size > 0);
+  fullSpan = hasTimings ? Math.max(gpu.frameMs, ...scopes.map((sc) => sc.end)) : 1;
+}
+
+function union(intervals) {
+  const sorted = intervals.filter((i) => i[1] > i[0]).sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [a, b] of sorted) {
+    if (out.length && a <= out[out.length - 1][1]) out[out.length - 1][1] = Math.max(out[out.length - 1][1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+function intersect(A, B) {
+  const out = [];
+  let i = 0, j = 0;
+  while (i < A.length && j < B.length) {
+    const a = Math.max(A[i][0], B[j][0]), b = Math.min(A[i][1], B[j][1]);
+    if (b > a) out.push([a, b]);
+    if (A[i][1] < B[j][1]) ++i; else ++j;
+  }
+  return out;
+}
+const total = (intervals) => sum(intervals, ([a, b]) => b - a);
+
+function stageIdsOfAccess(access) {
+  const set = new Set();
+  for (const name of String(access || 'None').split('|')) for (const id of accessStages[name] || []) set.add(id);
+  return set;
+}
+const stageLabels = (ids) => stages.filter((st) => ids.has(st.id)).map((st) => st.label);
+const stagesOfAccess = (access) => stageLabels(stageIdsOfAccess(access));
+const syncText = (labels) => (labels.length ? labels.join(', ') : 'nothing');
+
+// What a barrier really orders: the stages of its `before` state the previous user of the resource
+// ran, against the stages of its `after` state the next user runs.
+const KIND_STAGES = { rt: ['raygen', 'traversal', 'hitmiss', 'asbuild'], compute: ['cs'], raster: ['ia', 'vs', 'raster', 'ps', 'om'], copy: ['copy', 'clear'] };
+function usedBy(pass, resource) { return (pass.accesses || []).some((a) => a.resource === resource); }
+function previousUser(resource, beforeIndex) { return [...livePasses].reverse().find((q) => q.index < beforeIndex && usedBy(q, resource)) || null; }
+function nextUser(resource, afterIndex) { return livePasses.find((q) => q.index > afterIndex && usedBy(q, resource)) || null; }
+function stagesFor(access, pass) {
+  const ids = stageIdsOfAccess(access);
+  if (!pass) return stageLabels(ids);
+  const kind = new Set(KIND_STAGES[passKind(pass)] || []);
+  const both = new Set([...ids].filter((id) => kind.has(id)));
+  return stageLabels(both.size ? both : ids);
+}
+function waitsFor(row) {
+  if (row.b.before === 'None') return 'nothing: contents are undefined';
+  return syncText(stagesFor(row.b.before, row.prev)) + (row.prev ? ' · ' + row.prev.name : ' · previous frame');
+}
+function unblocks(row) {
+  return syncText(stagesFor(row.b.after, row.next)) + (row.next ? ' · ' + row.next.name : ' · next frame');
+}
+const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+
+let selected = null;
+
+// ---------------------------------------------------------------------------------------------
+// Header, overview
+// ---------------------------------------------------------------------------------------------
+// Containers the render functions fill from scratch on every report.
+function clear(...ids) { for (const id of ids) $(id).textContent = ''; }
+
+function renderHeader() {
+  const f = R.frame;
+  const d = R.device || {};
+  if (!f) {
+    $('title').textContent = 'Waiting for a frame';
+    $('meta').textContent = 'The editor sends a capture of the current frame every second while this panel is visible.';
+    return;
+  }
+  $('title').textContent = 'Frame ' + f.index + (f.scene ? ' · ' + f.scene : '');
+  document.title = 'Airender frame ' + f.index + (f.scene ? ' · ' + f.scene : '');
+  const parts = [(d.adapter || 'unknown adapter') + ' (' + (d.backend || '?') + ')', 'output ' + f.width + '×' + f.height];
+  if (f.renderWidth && (f.renderWidth !== f.width || f.renderHeight !== f.height)) parts.push('scene ' + f.renderWidth + '×' + f.renderHeight);
+  const names = (R.features || []).map((x) => x.name);
+  if (names.length) parts.push('features ' + names.join(', '));
+  parts.push('device frame ' + f.deviceFrame);
+  if (R.generated) {
+    const time = new Date(R.generated);
+    parts.push(Number.isNaN(time.getTime()) ? R.generated : time.toLocaleString());
+  }
+  $('meta').textContent = parts.join(' · ');
+}
+
+function tile(label, value, note) {
+  return h('div', { class: 'tile' }, h('div', { class: 'label', text: label }), h('div', { class: 'value', text: value }), note ? h('div', { class: 'note', text: note }) : null);
+}
+
+function renderOverview() {
+  clear('banners', 'tiles');
+  const banners = $('banners');
+  if (!R.graph) {
+    return; // nothing captured yet
+  }
+  if (!hasTimings) {
+    banners.append(h('p', { class: 'banner', text: 'No GPU timings in this report: the Null backend has no GPU, or GPU profiling was off. The pipeline, barrier and memory views are complete.' }));
+  } else if (gpu.matchesCapture === false) {
+    banners.append(h('p', { class: 'banner', text: 'The GPU timings are from device frame ' + gpu.frame + ', the capture from device frame ' + (R.frame || {}).deviceFrame + ': passes match by name, times may differ a little.' }));
+  }
+  const tiles = $('tiles');
+  if (hasTimings) {
+    tiles.append(tile('GPU busy', fmtMs(gpu.busyMs), 'some queue running a pass'));
+    tiles.append(tile('GPU span', fmtMs(gpu.frameMs), 'first to last timestamp'));
+    const compute = busyByQueue.Compute ? total(busyByQueue.Compute) : 0;
+    tiles.append(tile('Async overlap', fmtMs(total(overlap)), compute > 0 ? fmtPct(total(overlap) / compute) + ' of compute queue work ran beside graphics' : 'one queue only'));
+  }
+  tiles.append(tile('CPU recording', fmtMs(sum(livePasses, (p) => p.cpuMs || 0)), 'all passes, recorded in parallel'));
+  tiles.append(tile('Passes', String(livePasses.length), (stats.culledPasses || 0) + ' culled, ' + (stats.asyncComputePasses || 0) + ' async compute'));
+  tiles.append(tile('Submissions', String(stats.submissions || 0), (stats.queueWaits || 0) + ' cross-queue waits'));
+  tiles.append(tile('Barriers', String(stats.barriers || 0), (stats.commandLists || 0) + ' command lists'));
+  const heap = stats.transientHeapBytes || 0, unaliased = stats.transientBytesUnaliased || 0;
+  tiles.append(tile('Transient heap', fmtBytes(heap), unaliased > heap ? fmtBytes(unaliased) + ' without aliasing (−' + fmtPct(1 - heap / unaliased) + ')' : 'nothing aliased'));
+  if (memory.vramBudgetBytes) tiles.append(tile('VRAM in use', fmtBytes(memory.vramUsageBytes || 0), 'of a ' + fmtBytes(memory.vramBudgetBytes) + ' budget (whole process)'));
+}
+
+// ---------------------------------------------------------------------------------------------
+// GPU timeline
+// ---------------------------------------------------------------------------------------------
+const TL = { left: 116, right: 18, top: 30, bracket: 14, row0: 22, rowN: 12, laneGap: 16 };
+const view = { start: 0, end: 1, fitted: true }; // fitted: follows the frame's span on new reports
+const tlSvg = s('svg', { role: 'img', 'aria-label': 'GPU timeline: one lane per queue' });
+let drag = null;
+let dragged = false; // the last press panned: its click does not select
+
+function laneLayout() {
+  let y = TL.top;
+  const lanes = [];
+  for (const q of queues) {
+    const depths = scopes.filter((sc) => sc.queue === q).map((sc) => sc.depth);
+    const maxDepth = depths.length ? Math.max(...depths) : 0;
+    const height = TL.bracket + TL.row0 + maxDepth * (TL.rowN + 2) + 26;
+    lanes.push({ queue: q, y, height });
+    y += height + TL.laneGap;
+  }
+  return { lanes, height: y };
+}
+
+function scopeTip(sc) {
+  const p = sc.pass >= 0 ? passes[sc.pass] : null;
+  const nodes = [h('div', { class: 'tt', text: sc.name }), tipRow(fmtMs(sc.ms), 'on the GPU'), tipRow(fmtMs(sc.beginMs) + ' → ' + fmtMs(sc.end), 'start → end'), tipRow(sc.queue, 'queue')];
+  if (p) {
+    nodes.push(tipRow('(' + p.batch + ')', 'submission'));
+    nodes.push(tipRow(fmtMs(p.cpuMs || 0), 'CPU recording'));
+    const work = (commandsByPass.get(p.index) || []).filter((c) => c.phase === 'in' && c.op !== 'SetPipeline' && c.op !== 'PushConstants');
+    if (work.length) nodes.push(h('div', { class: 'x', text: work.slice(0, 3).map((c) => c.text).join(' · ') + (work.length > 3 ? ' · …' : '') }));
+  }
+  return nodes;
+}
+
+function clampView() {
+  const span = Math.min(Math.max(view.end - view.start, fullSpan / 2000), fullSpan * 1.1);
+  view.start = Math.min(Math.max(view.start, -fullSpan * 0.05), fullSpan * 1.05 - span);
+  view.end = view.start + span;
+}
+
+function drawTimeline() {
+  const box = $('timeline-chart');
+  if (!hasTimings) {
+    box.textContent = '';
+    box.append(h('p', { class: 'muted', text: 'No GPU timings to draw.' }));
+    return;
+  }
+  if (!tlSvg.isConnected) {
+    box.textContent = '';
+    box.append(tlSvg);
+  }
+  tlSvg.textContent = '';
+  const W = Math.max(520, box.clientWidth);
+  const plotW = W - TL.left - TL.right;
+  const { lanes, height } = laneLayout();
+  setProps(tlSvg, { width: W, height, viewBox: '0 0 ' + W + ' ' + height });
+  const x = (ms) => TL.left + ((ms - view.start) / (view.end - view.start)) * plotW;
+
+  tlSvg.append(s('defs', {},
+    s('marker', { id: 'arrow', viewBox: '0 0 8 8', refX: 7, refY: 4, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, s('path', { d: 'M0,0 L8,4 L0,8 z', class: 'arrowhead' })),
+    s('clipPath', { id: 'plot-clip' }, s('rect', { x: TL.left, y: 0, width: plotW, height }))));
+
+  const { ticks, step } = niceTicks(view.start, view.end, Math.max(2, Math.floor(plotW / 96)));
+  for (const t of ticks) {
+    const X = x(t);
+    tlSvg.append(s('line', { x1: X, x2: X, y1: TL.top - 6, y2: height - 6, class: 'grid' }));
+    tlSvg.append(s('text', { x: X, y: TL.top - 12, 'text-anchor': 'middle', text: fmtTick(t, step) }));
+  }
+  const plot = s('g', { 'clip-path': 'url(#plot-clip)' });
+  tlSvg.append(plot);
+  for (const [a, b] of overlap) plot.append(s('rect', { x: x(a), y: TL.top - 6, width: Math.max(1, x(b) - x(a)), height: height - TL.top, class: 'overlap' }));
+
+  const laneOf = {};
+  for (const lane of lanes) {
+    laneOf[lane.queue] = lane;
+    const mid = lane.y + TL.bracket + TL.row0 / 2;
+    tlSvg.append(s('text', { x: 8, y: mid + 4, class: 'lane-label', text: lane.queue }));
+    tlSvg.append(s('text', { x: 8, y: mid + 19, class: 'lane-note', text: 'busy ' + fmtMs(total(busyByQueue[lane.queue] || [])) }));
+    tlSvg.append(s('line', { x1: 8, x2: W - TL.right, y1: lane.y + lane.height + TL.laneGap / 2, y2: lane.y + lane.height + TL.laneGap / 2, class: 'grid' }));
+
+    for (const b of submissions.filter((o) => o.queue === lane.queue)) {
+      const t = batchTime.get(b.batch);
+      const X0 = x(t.begin), X1 = x(t.end), y = lane.y + 6;
+      if (t.timed) {
+        plot.append(s('path', { d: 'M' + X0 + ',' + (y + 6) + ' V' + y + ' H' + X1 + ' V' + (y + 6), class: 'bracket' }));
+        if (X1 - X0 > 30) plot.append(s('text', { x: (X0 + X1) / 2, y: y - 2, 'text-anchor': 'middle', class: 'bracket-label', text: '(' + b.batch + ')' }));
+      } else {
+        plot.append(s('path', { d: 'M' + X0 + ',' + y + ' v' + (TL.bracket + TL.row0 - 6), class: 'bracket' }));
+      }
+    }
+
+    for (const sc of scopes.filter((o) => o.queue === lane.queue)) {
+      const y = lane.y + TL.bracket + (sc.depth === 0 ? 0 : TL.row0 + 2 + (sc.depth - 1) * (TL.rowN + 2));
+      const barH = sc.depth === 0 ? TL.row0 : TL.rowN;
+      let X0 = x(sc.beginMs), X1 = x(sc.end);
+      if (X1 < TL.left - 50 || X0 > W + 50) continue;
+      if (X1 - X0 > 4) { X0 += 1; X1 -= 1; } // a 2px surface gap between touching passes
+      const w = Math.max(1, X1 - X0);
+      const kind = scopeKind(sc);
+      const cls = 'bar k-' + kind + (sc.depth ? ' nested' : '') + (sc.pass >= 0 && sc.pass === selected ? ' sel' : '');
+      const rect = s('rect', { x: X0, y, width: w, height: barH, rx: Math.min(3, w / 2), class: cls });
+      hover(rect, () => scopeTip(sc));
+      if (sc.pass >= 0) rect.addEventListener('click', (e) => { e.stopPropagation(); if (!dragged) select(sc.pass); });
+      plot.append(rect);
+      if (sc.depth === 0 && w > 36) {
+        const visible0 = Math.max(X0, TL.left), visible1 = Math.min(X1, W - TL.right);
+        const chars = Math.floor((visible1 - visible0 - 8) / 6.4);
+        if (chars >= 3) {
+          const label = sc.name.length <= chars ? sc.name : sc.name.slice(0, chars - 1) + '…';
+          plot.append(s('text', { x: visible0 + 4, y: y + barH / 2 + 4, class: 'bar-label ' + onFill(kind), text: label }));
+        }
+      }
+    }
+  }
+
+  for (const b of submissions) {
+    for (const wait of b.waits || []) {
+      const src = submissions.find((o) => o.batch === wait.batch);
+      const ls = src && laneOf[src.queue], ld = laneOf[b.queue];
+      if (!ls || !ld) continue;
+      const ts = batchTime.get(src.batch), td = batchTime.get(b.batch);
+      const X0 = x(ts.end), X1 = x(td.begin);
+      const down = ld.y > ls.y;
+      const ys = ls.y + TL.bracket + (down ? TL.row0 : 0);
+      const yd = ld.y + TL.bracket + (down ? -2 : TL.row0 + 2);
+      const d = 'M' + X0 + ',' + ys + ' C' + X0 + ',' + (ys + yd) / 2 + ' ' + X1 + ',' + (ys + yd) / 2 + ' ' + X1 + ',' + yd;
+      const tipNodes = () => [
+        h('div', { class: 'tt', text: b.queue + ' waits for ' + src.queue }),
+        tipRow('(' + b.batch + ') ← (' + src.batch + ')', 'waiting ← waited for'),
+        tipRow(fmtMs(Math.max(0, td.begin - ts.end)), 'from the signal to the start'),
+        src.fork ? h('div', { class: 'x', text: 'The fork: the compute queue starts the frame here, after the graphics queue finished the previous one.' }) : null,
+      ];
+      const hit = s('path', { d, class: 'wait-hit' });
+      hover(hit, tipNodes);
+      plot.append(s('path', { d, class: 'wait', 'marker-end': 'url(#arrow)' }), hit);
+      if (src.fork) plot.append(s('text', { x: X0 + 4, y: ys + (down ? 12 : -4), class: 'fork-label', text: 'fork' }));
+    }
+  }
+}
+
+function zoomAt(ms, factor) {
+  view.start = ms - (ms - view.start) * factor;
+  view.end = ms + (view.end - ms) * factor;
+  view.fitted = false;
+  clampView();
+  drawTimeline();
+}
+function fitView() {
+  view.start = 0;
+  view.end = fullSpan;
+  view.fitted = true;
+  drawTimeline();
+}
+function msAtPointer(e) {
+  const rect = tlSvg.getBoundingClientRect();
+  const plotW = rect.width - TL.left - TL.right;
+  return view.start + ((e.clientX - rect.left - TL.left) / plotW) * (view.end - view.start);
+}
+tlSvg.addEventListener('wheel', (e) => { e.preventDefault(); zoomAt(msAtPointer(e), Math.exp(e.deltaY * 0.0015)); }, { passive: false });
+tlSvg.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  drag = { x: e.clientX, start: view.start, end: view.end, moved: false };
+  dragged = false;
+});
+window.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  const rect = tlSvg.getBoundingClientRect();
+  const dx = e.clientX - drag.x;
+  if (Math.abs(dx) > 2) drag.moved = true;
+  if (!drag.moved) return;
+  const dt = (dx / (rect.width - TL.left - TL.right)) * (drag.end - drag.start);
+  view.start = drag.start - dt;
+  view.end = drag.end - dt;
+  view.fitted = false;
+  clampView();
+  hideTip();
+  drawTimeline();
+});
+window.addEventListener('pointerup', () => { dragged = !!drag && drag.moved; drag = null; });
+tlSvg.addEventListener('dblclick', fitView);
+$('zoom-in').addEventListener('click', () => zoomAt((view.start + view.end) / 2, 0.5));
+$('zoom-out').addEventListener('click', () => zoomAt((view.start + view.end) / 2, 2));
+$('zoom-fit').addEventListener('click', fitView);
+
+function renderTimelineExtras() {
+  clear('timeline-legend', 'timeline-table');
+  const legend = $('timeline-legend');
+  const kinds = new Set(scopes.map(scopeKind));
+  for (const k of KINDS) if (kinds.has(k.id)) legend.append(h('span', {}, h('span', { class: 'swatch bg-' + k.id }), k.label));
+  if (kinds.has('other')) legend.append(h('span', {}, h('span', { class: 'swatch bg-other' }), 'Other scope'));
+  legend.append(h('span', {}, h('span', { class: 'key-line' }), 'Cross-queue wait'));
+  if (overlap.length) legend.append(h('span', {}, h('span', { class: 'swatch bg-band' }), 'Queues overlap'));
+
+  const rows = [...scopes].sort((a, b) => a.beginMs - b.beginMs || a.depth - b.depth);
+  $('timeline-table').append(h('table', {},
+    h('thead', {}, h('tr', {}, h('th', { text: 'Scope' }), h('th', { text: 'Queue' }), h('th', { class: 'num', text: 'Start' }), h('th', { class: 'num', text: 'GPU time' }), h('th', { class: 'num', text: 'Share of busy' }))),
+    h('tbody', {}, rows.map((sc) => h('tr', {},
+      h('td', { text: ' '.repeat(sc.depth) + sc.name }), h('td', { text: sc.queue }), h('td', { class: 'num', text: fmtMs(sc.beginMs) }),
+      h('td', { class: 'num', text: fmtMs(sc.ms) }), h('td', { class: 'num', text: gpu.busyMs > 0 ? fmtPct(sc.ms / gpu.busyMs) : '–' }))))));
+}
+
+// ---------------------------------------------------------------------------------------------
+// GPU pipeline
+// ---------------------------------------------------------------------------------------------
+// Work outside the capture: the pass records on the native command list (NGX, ImGui), so only its
+// barriers and markers show; its GPU time is measured all the same.
+function hasNativeWork(pass) {
+  const commands = commandsByPass.get(pass.index) || [];
+  return !commands.some((c) => c.phase === 'in' && (c.stages || []).some((id) => !CONTROL_STAGES.has(id)));
+}
+
+function stageCounts(commands) {
+  const counts = {};
+  for (const c of commands) for (const id of c.stages || []) counts[id] = (counts[id] || 0) + 1;
+  return counts;
+}
+
+function renderPipe() {
+  const box = $('pipe');
+  box.textContent = '';
+  const commands = selected === null ? R.commands || [] : commandsByPass.get(selected) || [];
+  const counts = stageCounts(commands);
+  const kind = selected === null ? 'other' : passKind(passes[selected]);
+  const groups = [];
+  for (const id of COMMAND_STAGES) {
+    const st = stageById[id];
+    if (!st) continue;
+    if (!groups.length || groups[groups.length - 1].name !== st.group) groups.push({ name: st.group, stages: [] });
+    groups[groups.length - 1].stages.push(st);
+  }
+  const flows = new Set(['Raster pipeline', 'Ray tracing']);
+  for (const g of groups) {
+    const row = h('div', { class: 'pstages' });
+    g.stages.forEach((st, i) => {
+      if (i > 0) row.append(h('span', { class: 'arrow', text: flows.has(g.name) && st.id !== 'asbuild' ? '→' : '·' }));
+      const n = counts[st.id] || 0;
+      const box2 = h('div', { class: 'pstage' + (n ? ' on w-' + (CONTROL_STAGES.has(st.id) ? 'other' : kind) : '') },
+        h('div', {}, h('span', { text: st.label + ' ' }), n ? h('span', { class: 'n', text: '×' + n }) : null),
+        h('div', { class: 'u', text: st.unit }));
+      hover(box2, () => [h('div', { class: 'tt', text: st.label }), tipRow(String(n), selected === null ? 'commands this frame' : 'commands of ' + passName(selected)), h('div', { class: 'x', text: st.note })]);
+      row.append(box2);
+    });
+    box.append(h('div', { class: 'pgroup' }, h('div', { class: 'gl', text: g.name }), row));
+  }
+}
+
+function renderDetail() {
+  const box = $('pass-detail');
+  box.textContent = '';
+  if (selected === null) {
+    box.append(h('p', { class: 'muted', text: 'The stages above count the whole frame. Select a pass in the timeline or in the table below to see its commands and barriers.' }));
+    return;
+  }
+  const p = passes[selected];
+  const sc = scopeOfPass.get(p.index);
+  box.append(h('h3', { text: p.name }));
+  const facts = [p.queue + ' queue', 'submission (' + p.batch + ')', p.flags];
+  if (sc) facts.push(fmtMs(sc.ms) + ' on the GPU');
+  facts.push(fmtMs(p.cpuMs || 0) + ' CPU recording');
+  box.append(h('p', { class: 'sub', text: facts.join(' · ') }), h('button', { type: 'button', text: 'Clear selection', onclick: () => select(null) }));
+
+  const commands = commandsByPass.get(p.index) || [];
+  box.append(h('h3', { text: 'Commands' }));
+  if (hasNativeWork(p)) {
+    box.append(h('p', { class: 'sub', text: 'No captured work: this pass records it on the native command list (an SDK such as NGX, or ImGui), which the capture does not see, so its stages are unknown. Its GPU time above is measured all the same.' }));
+  }
+  box.append(h('div', { class: 'scroll' }, h('table', {},
+    h('thead', {}, h('tr', {}, h('th', { text: 'When' }), h('th', { text: 'Command' }), h('th', { text: 'Pipeline stages' }))),
+    h('tbody', {}, commands.length ? commands.map((c) => h('tr', {},
+      h('td', { class: 'muted', text: c.phase === 'before' ? 'before the pass' : 'in the pass' }),
+      h('td', { class: 'mono', text: c.text }),
+      h('td', {}, (c.stages || []).map((id) => h('span', { class: 'chip', text: stageById[id] ? stageById[id].label : id }))))) :
+      h('tr', {}, h('td', { colspan: 3, class: 'muted', text: 'No captured commands.' }))))));
+
+  if ((p.barriers || []).length) {
+    box.append(h('h3', { text: 'Barriers before the pass' }));
+    box.append(h('div', { class: 'scroll' }, barrierTable(p.barriers.map((b) => ({ b, when: '', queue: p.queue, prev: previousUser(b.resource, p.index), next: p })), false)));
+  }
+  box.append(h('h3', { text: 'Resources' }));
+  box.append(h('div', { class: 'scroll' }, h('table', {},
+    h('thead', {}, h('tr', {}, h('th', { text: 'Resource' }), h('th', { text: 'Access' }), h('th', { text: 'Used by' }))),
+    h('tbody', {}, (p.accesses || []).map((a) => h('tr', {},
+      h('td', { text: (resources[a.resource] || {}).name }),
+      h('td', { text: (a.write ? 'write ' : 'read ') + a.access }),
+      h('td', { text: syncText(stagesOfAccess(a.access)) })))))));
+}
+
+function renderMatrix() {
+  const box = $('matrix');
+  box.textContent = '';
+  const columns = COMMAND_STAGES.map((id) => stageById[id]).filter(Boolean);
+  const groupRow = h('tr', {}, h('th', {}), h('th', {}), h('th', {}));
+  let last = null, span = null;
+  for (const st of columns) {
+    if (st.group !== last) {
+      span = h('th', { class: 'groupcell', colspan: 1, text: st.group });
+      groupRow.append(span);
+      last = st.group;
+    } else {
+      span.setAttribute('colspan', Number(span.getAttribute('colspan')) + 1);
+    }
+  }
+  const headRow = h('tr', {}, h('th', { text: 'Pass' }), h('th', { text: 'Queue' }), h('th', { class: 'num', text: 'GPU' }), columns.map((st) => h('th', { class: 'stage', text: st.label })));
+  const body = h('tbody');
+  const row = (label, queue, gpuText, commands, kind, passIndex, name = label) => {
+    const counts = stageCounts(commands);
+    const tr = h('tr', { class: passIndex !== null ? 'clickable' + (passIndex === selected ? ' sel' : '') : '', tabindex: passIndex !== null ? 0 : null },
+      h('td', {}, h('span', { class: 'swatch bg-' + kind }), label), h('td', { text: queue }), h('td', { class: 'num', text: gpuText }),
+      columns.map((st) => {
+        const n = counts[st.id] || 0;
+        const td = h('td', { class: 'cell' }, n ? h('span', { class: 'cnt bg-' + (CONTROL_STAGES.has(st.id) ? 'other' : kind), text: String(n) }) : null);
+        if (n) hover(td, () => [h('div', { class: 'tt', text: st.label + ' · ' + name }), ...commands.filter((c) => (c.stages || []).includes(st.id)).slice(0, 8).map((c) => h('div', { class: 'x', text: c.text }))]);
+        return td;
+      }));
+    if (passIndex !== null) {
+      tr.addEventListener('click', () => select(passIndex));
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(passIndex); } });
+    }
+    return tr;
+  };
+  for (const p of livePasses) {
+    const sc = scopeOfPass.get(p.index);
+    const label = hasNativeWork(p) ? [p.name, ' ', h('span', { class: 'chip', title: 'Work recorded on the native command list, not captured', text: 'native work' })] : p.name;
+    body.append(row(label, p.queue, sc ? fmtMs(sc.ms) : '–', commandsByPass.get(p.index) || [], passKind(p), p.index, p.name));
+  }
+  for (const q of queues) {
+    const tail = trailing.filter((c) => c.queue === q);
+    if (tail.length) body.append(row('after the last pass', q, '', tail, 'other', null));
+  }
+  box.append(h('table', { class: 'matrix' }, h('thead', {}, groupRow, headRow), body));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Submissions and barriers
+// ---------------------------------------------------------------------------------------------
+function barrierTable(rows, withWhen) {
+  return h('table', {},
+    h('thead', {}, h('tr', {}, withWhen ? h('th', { text: 'When' }) : null, h('th', { text: 'Queue' }), h('th', { text: 'Resource' }), h('th', { text: 'Transition' }), h('th', { text: 'Waits for' }), h('th', { text: 'Unblocks' }))),
+    h('tbody', {}, rows.map((row) => h('tr', {},
+      withWhen ? h('td', { text: row.when }) : null,
+      h('td', { text: row.queue }),
+      h('td', { text: (resources[row.b.resource] || {}).name }),
+      h('td', { class: 'mono', text: row.b.before + ' → ' + row.b.after + (row.b.discard ? ' (discard)' : '') }),
+      h('td', { text: waitsFor(row) }),
+      h('td', { text: unblocks(row) })))));
+}
+
+function renderSync() {
+  clear('submissions', 'barriers');
+  const subs = submissions.map((b) => h('tr', {},
+    h('td', { class: 'num', text: '(' + b.batch + ')' }),
+    h('td', { text: b.queue }),
+    h('td', { text: b.passes.length ? b.passes.map(passName).join(', ') : b.fork ? 'none: the fork the compute queue starts from' : 'none: barriers only' }),
+    h('td', { text: (b.waits || []).map((w) => w.queue + ' (' + w.batch + ')').join(', ') || '–' }),
+    h('td', { class: 'num', text: batchTime.get(b.batch) && batchTime.get(b.batch).timed ? fmtMs(batchTime.get(b.batch).begin) + ' → ' + fmtMs(batchTime.get(b.batch).end) : '–' }),
+    h('td', { text: [(b.barriersAfter || []).length ? (b.barriersAfter.length + ' hand-over barrier' + (b.barriersAfter.length > 1 ? 's' : '')) : '', b.finalBarriers ? 'final barriers' : ''].filter(Boolean).join(', ') }),
+  ));
+  $('submissions').append(h('table', {},
+    h('thead', {}, h('tr', {}, h('th', { class: 'num', text: '#' }), h('th', { text: 'Queue' }), h('th', { text: 'Passes' }), h('th', { text: 'Waits for' }), h('th', { class: 'num', text: 'GPU' }), h('th', { text: 'Ends with' }))),
+    h('tbody', {}, subs)));
+
+  const rows = [];
+  for (const p of livePasses) for (const b of p.barriers || []) rows.push({ b, when: 'before ' + p.name, queue: p.queue, prev: previousUser(b.resource, p.index), next: p });
+  for (const sub of submissions) {
+    const last = sub.passes.length ? Math.max(...sub.passes) : -1;
+    for (const b of sub.barriersAfter || []) rows.push({ b, when: 'end of (' + sub.batch + '), for another queue', queue: sub.queue, prev: previousUser(b.resource, last + 1), next: nextUser(b.resource, last) });
+  }
+  const holder = submissions.find((o) => o.finalBarriers);
+  for (const b of graph.finalBarriers || []) rows.push({ b, when: 'end of the frame', queue: holder ? holder.queue : 'Graphics', prev: previousUser(b.resource, Infinity), next: null });
+  $('barriers').append(rows.length ? barrierTable(rows, true) : h('p', { class: 'muted', text: 'No barriers.' }));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Memory
+// ---------------------------------------------------------------------------------------------
+function renderMemoryTiles() {
+  clear('memory-tiles');
+  const box = $('memory-tiles');
+  const heaps = memory.heaps || [];
+  const reserved = sum(heaps, (x) => x.size), used = sum(heaps, (x) => x.used);
+  const released = heaps.filter((x) => x.dedicated && !(x.resources || []).length);
+  box.append(tile('Allocator heaps', fmtBytes(reserved), plural(heaps.length, 'heap') + ', ' + fmtBytes(used) + ' allocated'));
+  if (released.length) box.append(tile('Waiting for the GPU', fmtBytes(sum(released, (x) => x.size)), plural(released.length, 'released heap') + ' of frames in flight'));
+  const heap = stats.transientHeapBytes || 0;
+  box.append(tile('Transient heap', fmtBytes(heap), plural(stats.transientResources || 0, 'resource') + ', ' + fmtBytes(stats.transientBytesUnaliased || 0) + ' unaliased'));
+  if (memory.vramBudgetBytes) box.append(tile('VRAM budget', fmtBytes(memory.vramBudgetBytes), fmtBytes(memory.vramUsageBytes || 0) + ' in use by the process'));
+}
+
+function drawAliasing() {
+  const box = $('alias-chart');
+  box.textContent = '';
+  const heapSize = stats.transientHeapBytes || 0;
+  if (!transients.length || !heapSize) {
+    box.append(h('p', { class: 'muted', text: 'No transient resources this frame.' }));
+    return;
+  }
+  const columns = livePasses.map((p) => p.index);
+  const col = new Map(columns.map((p, i) => [p, i]));
+  const W = Math.max(520, box.clientWidth), left = 72, right = 18, top = 8, plotH = 260, bottom = 30;
+  const plotW = W - left - right, colW = plotW / Math.max(1, columns.length);
+  const X = (i) => left + i * colW;
+  const Y = (offset) => top + (offset / heapSize) * plotH;
+  const svgEl = s('svg', { width: W, height: top + plotH + bottom, viewBox: '0 0 ' + W + ' ' + (top + plotH + bottom), role: 'img', 'aria-label': 'Transient heap: resources by offset over the passes' });
+  for (const t of niceTicks(0, heapSize, 4).ticks) {
+    svgEl.append(s('line', { x1: left, x2: W - right, y1: Y(t), y2: Y(t), class: 'grid' }));
+    svgEl.append(s('text', { x: left - 6, y: Y(t) + 4, 'text-anchor': 'end', text: fmtBytes(t) }));
+  }
+  if (selected !== null && col.has(selected)) svgEl.append(s('rect', { x: X(col.get(selected)), y: top, width: colW, height: plotH, class: 'col-sel' }));
+  const every = Math.max(1, Math.ceil(26 / colW));
+  columns.forEach((p, i) => {
+    if (i % every === 0) {
+      const t = s('text', { x: X(i) + colW / 2, y: top + plotH + 16, 'text-anchor': 'middle', text: String(p) });
+      hover(t, () => [h('div', { class: 'tt', text: passes[p].name }), tipRow('[' + p + ']', 'pass')]);
+      svgEl.append(t);
+    }
+  });
+  const touched = new Set(selected !== null ? (passes[selected].accesses || []).map((a) => a.resource) : []);
+  for (const r of transients) {
+    const i0 = col.get(r.firstPass), i1 = col.get(r.lastPass);
+    if (i0 === undefined || i1 === undefined) continue;
+    const x0 = X(i0) + 1, x1 = X(i1 + 1) - 1, y0 = Y(r.heapOffset) + 1, y1 = Y(r.heapOffset + r.size) - 1;
+    const w = Math.max(2, x1 - x0), hgt = Math.max(3, y1 - y0);
+    const kind = r.async ? 'compute' : 'rt';
+    const rect = s('rect', { x: x0, y: y0, width: w, height: hgt, rx: 3, class: 'alloc k-' + kind + (touched.has(r.index) ? ' sel' : '') });
+    hover(rect, () => [h('div', { class: 'tt', text: r.name }), tipRow(fmtBytes(r.size), 'size'), tipRow(hex(r.heapOffset) + ' – ' + hex(r.heapOffset + r.size), 'offset'),
+      tipRow('[' + r.firstPass + '] → [' + r.lastPass + ']', 'lifetime: ' + passName(r.firstPass) + ' → ' + passName(r.lastPass)),
+      r.async ? h('div', { class: 'x', text: 'Used by an async compute pass: never shares memory.' }) : null]);
+    svgEl.append(rect);
+    if (w > 60 && hgt >= 14) {
+      const chars = Math.floor((w - 8) / 6.4);
+      svgEl.append(s('text', { x: x0 + 4, y: y0 + Math.min(hgt, 22) / 2 + 4, class: 'bar-label ' + onFill(kind), text: r.name.length <= chars ? r.name : r.name.slice(0, chars - 1) + '…' }));
+    }
+  }
+  box.append(svgEl);
+}
+
+function renderAliasExtras() {
+  clear('alias-legend', 'alias-table');
+  const legend = $('alias-legend');
+  if (transients.some((r) => !r.async)) legend.append(h('span', {}, h('span', { class: 'swatch bg-rt' }), 'Graphics queue only (may alias)'));
+  if (transients.some((r) => r.async)) legend.append(h('span', {}, h('span', { class: 'swatch bg-compute' }), 'Used by async compute (never aliased)'));
+  const rows = [...transients].sort((a, b) => a.heapOffset - b.heapOffset || a.firstPass - b.firstPass);
+  $('alias-table').append(h('table', {},
+    h('thead', {}, h('tr', {}, h('th', { text: 'Resource' }), h('th', { class: 'num', text: 'Offset' }), h('th', { class: 'num', text: 'Size' }), h('th', { text: 'Lifetime' }), h('th', { text: 'Async' }))),
+    h('tbody', {}, rows.map((r) => h('tr', {}, h('td', { text: r.name }), h('td', { class: 'num', text: hex(r.heapOffset) }), h('td', { class: 'num', text: fmtBytes(r.size) }),
+      h('td', { text: '[' + r.firstPass + '] ' + passName(r.firstPass) + ' → [' + r.lastPass + '] ' + passName(r.lastPass) }), h('td', { text: r.async ? 'yes' : '' }))))));
+}
+
+const RESOURCE_KINDS = [
+  { id: 'Texture', label: 'Texture', cls: 'rt' },
+  { id: 'Buffer', label: 'Buffer', cls: 'compute' },
+  { id: 'AccelStruct', label: 'Acceleration structure', cls: 'raster' },
+  { id: 'Heap', label: 'Placed heap', cls: 'other' },
+];
+const resourceKindClass = (kind) => (RESOURCE_KINDS.find((k) => k.id === kind) || { cls: 'other' }).cls;
+
+function sortedHeaps() {
+  return [...(memory.heaps || [])].sort((a, b) => (a.location < b.location ? -1 : a.location > b.location ? 1 : 0) || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0) || b.size - a.size);
+}
+
+// 'range': each heap drawn from 0 to the end of its last resource, so small resources in a big
+// heap stay visible; 'heap': drawn to its whole size, so the free space shows.
+let heapScale = 'range';
+function setHeapScale(scale) {
+  heapScale = scale;
+  $('scale-range').setAttribute('aria-pressed', String(scale === 'range'));
+  $('scale-heap').setAttribute('aria-pressed', String(scale === 'heap'));
+  drawHeaps();
+}
+$('scale-range').addEventListener('click', () => setHeapScale('range'));
+$('scale-heap').addEventListener('click', () => setHeapScale('heap'));
+
+function drawHeaps() {
+  const box = $('heap-chart');
+  box.textContent = '';
+  const heaps = sortedHeaps();
+  if (!heaps.length) {
+    box.append(h('p', { class: 'muted', text: 'No allocator heaps.' }));
+    return;
+  }
+  const W = Math.max(520, box.clientWidth), left = 220, right = 18, trackH = 14, gap = 10;
+  const plotW = W - left - right;
+  let y = 4;
+  const layout = heaps.map((heap) => {
+    const tracks = [];
+    const items = (heap.resources || []).map((r) => {
+      let t = tracks.findIndex((end) => end <= r.offset);
+      if (t < 0) { t = tracks.length; tracks.push(0); }
+      tracks[t] = r.offset + r.size;
+      return { r, track: t };
+    });
+    const rows = Math.max(1, tracks.length);
+    const entry = { heap, items, y, height: rows * (trackH + 2) + 4 };
+    y += entry.height + 18 + gap;
+    return entry;
+  });
+  const svgEl = s('svg', { width: W, height: y, viewBox: '0 0 ' + W + ' ' + y, role: 'img', 'aria-label': 'Allocator heaps with their resources at their offsets' });
+  for (const { heap, items, y: top, height } of layout) {
+    const released = heap.dedicated && !items.length;
+    const lastEnd = items.length ? Math.max(...items.map(({ r }) => r.offset + r.size)) : heap.size;
+    const extent = heapScale === 'heap' ? heap.size : Math.min(heap.size, lastEnd);
+    svgEl.append(s('text', { x: 4, y: top + 12, class: 'lane-label', text: heap.category + (heap.dedicated ? ' · dedicated' : '') }));
+    svgEl.append(s('text', { x: 4, y: top + 27, class: 'lane-note', text: heap.location + ' · ' + fmtBytes(heap.size) + (released ? '' : ' · ' + fmtPct(heap.used / heap.size) + ' used') }));
+    if (extent < heap.size) svgEl.append(s('text', { x: W - right, y: top + height + 13, 'text-anchor': 'end', class: 'lane-note', text: 'shows 0 – ' + fmtBytes(extent) + ' of ' + fmtBytes(heap.size) }));
+    const bg = s('rect', { x: left, y: top, width: plotW, height, rx: 4, class: released ? 'released' : 'free' });
+    hover(bg, () => [h('div', { class: 'tt', text: heap.category + ' heap ' + heap.id }), tipRow(fmtBytes(heap.size), 'size'), tipRow(fmtBytes(heap.used), 'allocated'), tipRow(String(heap.allocations), 'allocations'),
+      released ? h('div', { class: 'x', text: 'No live resource: a released heap (a past frame’s transient heap) that is freed once the GPU is done with that frame.' }) : null]);
+    svgEl.append(bg);
+    if (released) svgEl.append(s('text', { x: left + 8, y: top + height / 2 + 4, class: 'lane-note', text: 'released: waits for the GPU to finish its frame' }));
+    for (const { r, track } of items) {
+      const x0 = left + (r.offset / extent) * plotW, x1 = left + ((r.offset + r.size) / extent) * plotW;
+      const w = Math.max(1.5, x1 - x0 - (x1 - x0 > 4 ? 2 : 0));
+      const ty = top + 2 + track * (trackH + 2);
+      const rect = s('rect', { x: x0 + (x1 - x0 > 4 ? 1 : 0), y: ty, width: w, height: trackH, rx: Math.min(3, w / 2), class: 'alloc k-' + resourceKindClass(r.kind) });
+      hover(rect, () => [h('div', { class: 'tt', text: r.name || '(unnamed)' }), tipRow(r.kind, 'kind'), tipRow(fmtBytes(r.size), 'size'), tipRow(hex(r.offset) + ' – ' + hex(r.offset + r.size), 'offset in heap ' + heap.id),
+        r.placed ? h('div', { class: 'x', text: 'Placed inside a heap resource (render graph memory).' }) : null]);
+      svgEl.append(rect);
+      if (w > 70) {
+        const chars = Math.floor((w - 8) / 6.4);
+        const name = r.name || '';
+        svgEl.append(s('text', { x: x0 + 5, y: ty + trackH / 2 + 4, class: 'bar-label ' + onFill(resourceKindClass(r.kind)), text: name.length <= chars ? name : name.slice(0, chars - 1) + '…' }));
+      }
+    }
+  }
+  box.append(svgEl);
+}
+
+function renderHeapExtras() {
+  clear('heap-legend', 'heap-table', 'unplaced');
+  const legend = $('heap-legend');
+  const kinds = new Set((memory.heaps || []).flatMap((x) => (x.resources || []).map((r) => r.kind)));
+  for (const k of RESOURCE_KINDS) if (kinds.has(k.id)) legend.append(h('span', {}, h('span', { class: 'swatch bg-' + k.cls }), k.label));
+  legend.append(h('span', {}, h('span', { class: 'swatch bg-band' }), 'Free or released'));
+
+  const rows = [];
+  for (const heap of sortedHeaps()) {
+    rows.push(h('tr', { class: 'group' }, h('td', { colspan: 4, text: heap.category + ' · ' + heap.location + ' · ' + heap.id + ' · ' + fmtBytes(heap.size) + (heap.dedicated ? ' · dedicated' : '') })));
+    for (const r of heap.resources || []) rows.push(h('tr', {}, h('td', { text: r.name }), h('td', { text: r.kind }), h('td', { class: 'num', text: hex(r.offset) }), h('td', { class: 'num', text: fmtBytes(r.size) })));
+  }
+  $('heap-table').append(h('table', {}, h('thead', {}, h('tr', {}, h('th', { text: 'Resource' }), h('th', { text: 'Kind' }), h('th', { class: 'num', text: 'Offset' }), h('th', { class: 'num', text: 'Size' }))), h('tbody', {}, rows)));
+
+  const unplaced = memory.unplaced || [];
+  if (unplaced.length) {
+    $('unplaced').append(h('h3', { text: 'Not in an allocator heap' }), h('p', { class: 'sub', text: 'Memory the allocator does not manage, such as swapchain buffers.' }),
+      h('div', { class: 'scroll' }, h('table', {}, h('thead', {}, h('tr', {}, h('th', { text: 'Resource' }), h('th', { text: 'Kind' }), h('th', { text: 'Location' }), h('th', { class: 'num', text: 'Size' }))),
+        h('tbody', {}, unplaced.map((r) => h('tr', {}, h('td', { text: r.name }), h('td', { text: r.kind }), h('td', { text: r.location }), h('td', { class: 'num', text: fmtBytes(r.size) })))))));
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Graph resources
+// ---------------------------------------------------------------------------------------------
+function renderResources() {
+  clear('resource-table');
+  const rows = resources.map((r) => h('tr', {},
+    h('td', { text: r.name }),
+    h('td', { text: r.kind === 'texture' ? r.format + ' ' + r.width + '×' + r.height + (r.depthOrArraySize > 1 ? '×' + r.depthOrArraySize : '') + (r.mips > 1 ? ', ' + r.mips + ' mips' : '') : 'buffer ' + fmtBytes(r.bytes || 0) }),
+    h('td', { text: r.origin + (r.async ? ', async' : '') }),
+    h('td', { text: r.used ? '[' + r.firstPass + '] ' + passName(r.firstPass) + ' → [' + r.lastPass + '] ' + passName(r.lastPass) : 'unused' }),
+    h('td', { class: 'num', text: r.heapOffset !== undefined ? hex(r.heapOffset) : '' }),
+    h('td', { class: 'num', text: r.size ? fmtBytes(r.size) : '' }),
+    h('td', { text: r.finalAccess || '' })));
+  $('resource-table').append(h('table', {},
+    h('thead', {}, h('tr', {}, h('th', { text: 'Resource' }), h('th', { text: 'Description' }), h('th', { text: 'Origin' }), h('th', { text: 'Lifetime' }), h('th', { class: 'num', text: 'Heap offset' }), h('th', { class: 'num', text: 'Size' }), h('th', { text: 'Final state' }))),
+    h('tbody', {}, rows)));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Selection, theme, download, resize
+// ---------------------------------------------------------------------------------------------
+function select(passIndex) {
+  selected = passIndex === selected ? null : passIndex;
+  drawTimeline();
+  renderPipe();
+  renderDetail();
+  renderMatrix();
+  drawAliasing();
+  writeHash();
+}
+
+// The address keeps the view: #pass=3&theme=light selects a pass and a theme when the page opens.
+function writeHash() {
+  const parts = [];
+  if (selected !== null) parts.push('pass=' + selected);
+  if (THEMES[theme] !== 'system') parts.push('theme=' + THEMES[theme]);
+  try {
+    history.replaceState(null, '', parts.length ? '#' + parts.join('&') : location.pathname + location.search);
+  } catch (e) {
+    // A page loaded from a string (the editor's panel) has no address to keep the view in.
+  }
+}
+function readHash() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  const t = THEMES.indexOf(params.get('theme'));
+  if (t > 0) applyTheme(t);
+  const p = Number(params.get('pass'));
+  if (params.has('pass') && passes[p] && !passes[p].culled) select(p);
+}
+
+const THEMES = ['system', 'light', 'dark'];
+let theme = 0;
+function applyTheme(index) {
+  theme = index;
+  if (THEMES[theme] === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = THEMES[theme];
+  $('theme').textContent = 'Theme: ' + THEMES[theme];
+}
+$('theme').addEventListener('click', () => { applyTheme((theme + 1) % THEMES.length); writeHash(); });
+$('download').addEventListener('click', () => {
+  const url = URL.createObjectURL(new Blob([JSON.stringify(R, null, 2)], { type: 'application/json' }));
+  const a = h('a', { href: url, download: 'airender-frame-' + ((R.frame || {}).index ?? 'profile') + '.json' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+let resizeQueued = false;
+window.addEventListener('resize', () => {
+  if (resizeQueued) return;
+  resizeQueued = true;
+  requestAnimationFrame(() => { resizeQueued = false; drawTimeline(); drawAliasing(); drawHeaps(); });
+});
+
+function renderAll() {
+  renderHeader();
+  renderOverview();
+  renderTimelineExtras();
+  drawTimeline();
+  renderPipe();
+  renderDetail();
+  renderMatrix();
+  renderSync();
+  renderMemoryTiles();
+  renderAliasExtras();
+  drawAliasing();
+  renderHeapExtras();
+  drawHeaps();
+  renderResources();
+}
+
+// Shows a report: the embedded one when the page opens, then every one the editor's HTML profiler
+// panel sends. The selected pass (by name) and a zoomed timeline view carry over.
+function show(report) {
+  const selectedName = selected !== null && passes[selected] ? passes[selected].name : null;
+  load(report);
+  const again = selectedName !== null ? livePasses.find((p) => p.name === selectedName) : null;
+  selected = again ? again.index : null;
+  if (view.fitted) {
+    view.start = 0;
+    view.end = fullSpan;
+  } else {
+    clampView();
+  }
+  hideTip();
+  renderAll();
+}
+
+show(JSON.parse(document.getElementById('report-data').textContent));
+readHash();
+if (window.chrome && window.chrome.webview) {
+  window.chrome.webview.addEventListener('message', (e) => show(e.data));
+}
+</script>
+</body>
+</html>

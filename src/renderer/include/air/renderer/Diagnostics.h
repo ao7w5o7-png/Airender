@@ -20,5 +20,7 @@ json::Value ToJson(const CpuFrame& frame);
 // "1.50 GiB", "640.0 KiB", ...
 std::string FormatBytes(u64 bytes);
 const char* ToString(rhi::ResourceInfo::Kind kind);
+// What an allocator pool holds: "Buffers", "RT/DS textures", "Textures", "Mixed (transient)".
+const char* HeapCategoryName(u32 memoryTypeKey);
 
 } // namespace air::renderer

@@ -139,6 +139,19 @@ void DiagnosticsPanels::BuildProfiler(bool* open)
         return;
     }
     BuildPauseControls();
+    ImGui::SameLine();
+    if (ImGui::Button("Export HTML"))
+    {
+        mReportRequested = true;
+    }
+    ImGui::SetItemTooltip("Write an HTML report of the next frame and open it: GPU timeline per queue with async "
+                          "overlap and cross-queue waits, the pipeline stages of every command, barriers, and "
+                          "the memory map (transient aliasing, heaps with resource offsets).");
+    if (!mReportStatus.empty())
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", mReportStatus.c_str());
+    }
     const float averageMs = mWallMs.Average(); // of the captured frames, not the live ones
     ImGui::Text("%.1f fps   frame %s   GPU %s   CPU record %s", averageMs > 0.0f ? 1000.0f / averageMs : 0.0f,
                 FormatMs(mWallMs.Last()).c_str(), FormatMs(mLastGpu.busyMs).c_str(), FormatMs(mCpuMs.Last()).c_str());

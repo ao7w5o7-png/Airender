@@ -532,6 +532,7 @@ std::vector<GpuMemoryAllocator::PoolStats> GpuMemoryAllocator::GetPoolStats() co
                 continue;
             }
             HeapUsage heap;
+            heap.id = reinterpret_cast<u64>(block.heap.native);
             heap.size = block.heap.size;
             heap.dedicated = !block.tlsf;
             heap.usedBytes = block.tlsf ? block.tlsf->GetUsedBytes() : block.heap.size;

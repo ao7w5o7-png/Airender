@@ -23,6 +23,7 @@
 // Execute lambdas may run concurrently with each other on worker threads, so they must only use
 // their PassContext and data captured by value (or immutable data).
 
+#include "air/core/Json.h"
 #include "air/core/TaskSystem.h"
 #include "air/rhi/RHIDevice.h"
 
@@ -173,6 +174,10 @@ public:
     std::vector<PassTiming> GetPassTimings() const;
     // Human readable dump of the compiled graph: passes, accesses, barriers, lifetimes, heap offsets.
     std::string DumpText() const;
+    // The same as data, for profile reports and tools: passes (queue, submission, barriers, CPU
+    // recording time), submissions with their cross-queue waits, final barriers, and resources with
+    // their lifetimes and transient heap offsets. Pass and resource fields are indices.
+    json::Value DumpJson() const;
     // Graphviz dot of passes and resources (culled passes are grey).
     std::string DumpGraphviz() const;
 
@@ -251,6 +256,8 @@ private:
         std::vector<u32> barriersAfterResources;
         bool finalBarriers = false; // the graph's final barriers are recorded at the end of this batch
         bool fork = false;          // the prologue is submitted, even empty: the compute queue waits for it
+
+        bool IsSubmitted() const { return begin != end || !barriersAfter.empty() || finalBarriers || fork; }
     };
 
     u32 AddPassInternal(std::string name, PassFlags flags, std::function<void(PassContext&)> execute);

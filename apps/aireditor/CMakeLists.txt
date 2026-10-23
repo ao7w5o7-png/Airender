@@ -1,7 +1,8 @@
 # The editor is split in two:
 #   air_editor_ui  platform-independent UI and frame logic (Dear ImGui core only). Builds everywhere
 #                  and is exercised headless by tests/EditorTests.cpp on the Null backend.
-#   aireditor      the Windows executable: Win32 window, DXGI swapchain, ImGui Win32 + DX12 backends.
+#   aireditor      the Windows executable: Win32 window, DXGI swapchain, ImGui Win32 + DX12 backends,
+#                  and the WebView2 host of the HTML profiler panel.
 add_library(air_editor_ui
     EditorApp.cpp
     DiagnosticsPanels.cpp
@@ -15,6 +16,11 @@ air_target_defaults(air_editor_ui)
 if(AIR_RHI_D3D12)
     add_executable(aireditor WIN32 MainWin32.cpp)
     target_link_libraries(aireditor PRIVATE air_editor_ui air_imgui)
+    if(TARGET air_webview2)
+        target_sources(aireditor PRIVATE WebViewHost.cpp)
+        target_link_libraries(aireditor PRIVATE air_webview2)
+        target_compile_definitions(aireditor PRIVATE AIR_WITH_WEBVIEW2=1)
+    endif()
     if(MINGW)
         target_link_options(aireditor PRIVATE -municode) # entry point is wWinMain
     endif()
