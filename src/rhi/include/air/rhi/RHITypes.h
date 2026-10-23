@@ -41,6 +41,8 @@ enum class Format : u16 {
 u32 FormatBytesPerPixel(Format format);
 bool IsDepthFormat(Format format);
 const char* ToString(Format format);
+// Row pitch of a texture <-> buffer copy: rows are padded to 256 bytes (the D3D12 requirement).
+u32 TextureCopyRowPitch(Format format, u32 width);
 
 // Where a resource lives. Backends map these onto D3D12 heap types / Vulkan memory types.
 enum class MemoryLocation : u8 {
@@ -259,7 +261,7 @@ struct Barrier {
     }
 };
 
-struct DeviceCapabilities {
+struct DeviceCaps {
     bool rayTracing = false; // DXR 1.1 / VK_KHR_ray_tracing_pipeline + ray_query
     bool meshShaders = false;
     bool bindless = false; // SM 6.6 dynamic resources / descriptor indexing

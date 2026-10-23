@@ -59,6 +59,10 @@ u32 FormatBytesPerPixel(Format format) {
     return 0;
 }
 
+u32 TextureCopyRowPitch(Format format, u32 width) {
+    return u32(AlignUp(u64(width) * FormatBytesPerPixel(format), 256));
+}
+
 bool IsDepthFormat(Format format) {
     return format == Format::D32_FLOAT || format == Format::D24_UNORM_S8_UINT;
 }

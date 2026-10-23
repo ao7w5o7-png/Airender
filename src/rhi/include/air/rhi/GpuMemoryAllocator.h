@@ -143,8 +143,23 @@ public:
     std::optional<GpuAllocation> Allocate(const Request& request);
     void Free(const GpuAllocation& allocation);
 
+    // Per heap block usage, for memory visualisation (fragmentation, dedicated heaps).
+    struct HeapUsage {
+        u64 size = 0;
+        u64 usedBytes = 0;
+        u32 allocationCount = 0;
+        bool dedicated = false;
+    };
+    struct PoolStats {
+        u32 memoryTypeKey = 0;
+        MemoryLocation location = MemoryLocation::DeviceLocal;
+        Stats stats;
+        std::vector<HeapUsage> heaps;
+    };
+
     Stats GetStats(MemoryLocation location) const;
     Stats GetTotalStats() const;
+    std::vector<PoolStats> GetPoolStats() const; // sorted by memory type key
 
 private:
     struct Block {

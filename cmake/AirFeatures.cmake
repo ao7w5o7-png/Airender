@@ -2,17 +2,19 @@
 #
 # Each directory under src/features/ with a CMakeLists.txt is a feature. It calls:
 #
-#   air_add_feature(NAME pathtracer SOURCES src/PathTracer.cpp ... TESTS tests/PathTracerTests.cpp)
+#   air_add_feature(NAME pathtracer SOURCES src/PathTracer.cpp ... TESTS tests/PathTracerTests.cpp
+#                   [LIBRARIES <extra third-party targets>])
 #
 # which creates the library air_feature_<NAME> (linked against air_renderer only), adds the
-# feature's include/ and shaders/ directories, and records it so that RegisterBuiltinFeatures()
-# calls `air::features::Register_<NAME>(registry)`. The feature must define that function.
-# TESTS sources are compiled into the shared air_tests executable.
+# feature's include/ and shaders/ directories, compiles every shaders/*.hlsl with DXC into
+# <build>/shaders/<NAME>/ (cmake/AirShaders.cmake), and records the feature so that
+# RegisterBuiltinFeatures() calls `air::features::Register_<NAME>(registry)`. The feature must
+# define that function. TESTS sources are compiled into the shared air_tests executable.
 
 set_property(GLOBAL PROPERTY AIR_FEATURE_NAMES "")
 
 function(air_add_feature)
-    cmake_parse_arguments(ARG "" "NAME" "SOURCES;TESTS" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME" "SOURCES;TESTS;LIBRARIES" ${ARGN})
     if(NOT ARG_NAME MATCHES "^[a-z][a-z0-9_]*$")
         message(FATAL_ERROR "air_add_feature: NAME '${ARG_NAME}' must be lower_snake_case")
     endif()
@@ -22,8 +24,11 @@ function(air_add_feature)
         PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shaders  # *Shared.h headers shared with HLSL
     )
-    target_link_libraries(${target} PUBLIC air_renderer)
+    target_link_libraries(${target} PUBLIC air_renderer ${ARG_LIBRARIES})
     air_target_defaults(${target})
+    file(GLOB shaders CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.hlsl)
+    air_compile_shaders(TARGET ${target} NAME ${ARG_NAME} SOURCES ${shaders}
+                        INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
     set_property(GLOBAL APPEND PROPERTY AIR_FEATURE_NAMES ${ARG_NAME})
     foreach(test IN LISTS ARG_TESTS)
         set_property(GLOBAL APPEND PROPERTY AIR_FEATURE_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/${test})

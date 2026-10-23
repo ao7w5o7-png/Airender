@@ -7,3 +7,4 @@ out/
 *.dxil
 *.spv
 compile_commands.json
+.deps/

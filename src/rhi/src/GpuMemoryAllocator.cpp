@@ -435,6 +435,37 @@ GpuMemoryAllocator::Stats GpuMemoryAllocator::GetStats(MemoryLocation location) 
     return stats;
 }
 
+std::vector<GpuMemoryAllocator::PoolStats> GpuMemoryAllocator::GetPoolStats() const {
+    std::vector<PoolStats> result;
+    std::lock_guard lock(mPoolsMutex);
+    for (const auto& [key, pool] : mPools) {
+        PoolStats out;
+        out.memoryTypeKey = key;
+        out.location = pool->location;
+        std::lock_guard poolLock(pool->mutex);
+        for (const Block& block : pool->blocks) {
+            if (!block.alive) {
+                continue;
+            }
+            HeapUsage heap;
+            heap.size = block.heap.size;
+            heap.dedicated = !block.tlsf;
+            heap.usedBytes = block.tlsf ? block.tlsf->GetUsedBytes() : block.heap.size;
+            heap.allocationCount = block.tlsf ? block.tlsf->GetAllocationCount() : 1;
+            out.stats.reservedBytes += heap.size;
+            ++out.stats.heapCount;
+            out.heaps.push_back(heap);
+        }
+        out.stats.usedBytes = pool->usedBytes;
+        out.stats.allocationCount = pool->allocationCount;
+        out.stats.dedicatedCount = pool->dedicatedCount;
+        result.push_back(std::move(out));
+    }
+    std::sort(result.begin(), result.end(),
+              [](const PoolStats& a, const PoolStats& b) { return a.memoryTypeKey < b.memoryTypeKey; });
+    return result;
+}
+
 GpuMemoryAllocator::Stats GpuMemoryAllocator::GetTotalStats() const {
     Stats total;
     for (u32 i = 0; i < u32(MemoryLocation::Count); ++i) {

@@ -60,6 +60,17 @@ public:
         return slot && slot->value.has_value() ? &slot->value.value() : nullptr;
     }
 
+    // Calls fn(handle, value) for every live element while holding the pool lock: fn must not
+    // call back into this pool.
+    template <typename Fn> void ForEach(Fn&& fn) const {
+        std::lock_guard lock(mMutex);
+        for (u32 i = 0; i < mSlots.size(); ++i) {
+            if (mSlots[i].value) {
+                fn(HandleType{i, mSlots[i].generation}, *mSlots[i].value);
+            }
+        }
+    }
+
     u32 LiveCount() const {
         std::lock_guard lock(mMutex);
         return mLiveCount;

@@ -44,6 +44,16 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      # Agility SDK, DXC, ImGui and the DLSS SDK are downloaded by CMake into .deps/.
+      - uses: actions/cache@v4
+        with:
+          path: .deps
+          key: deps-${{ hashFiles('cmake/AirThirdParty.cmake') }}
+      # Builds the D3D12 backend, the editor, the DLSS feature and compiles every HLSL shader with DXC
+      # (-WX), so shader errors fail CI even though the runner has no GPU.
       - run: cmake -S . -B build -DAIR_RHI_D3D12=ON
-      - run: cmake --build build --config Debug
+      - run: cmake --build build --config Debug --parallel
       - run: ctest --test-dir build -C Debug --output-on-failure
+      - name: List compiled shaders
+        shell: bash
+        run: ls -la build/shaders/*

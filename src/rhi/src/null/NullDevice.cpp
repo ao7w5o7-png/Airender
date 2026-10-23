@@ -84,9 +84,18 @@ struct NullPipeline {
 
 class NullDevice;
 
+// A texture state a command relies on (e.g. a render pass target must be in RenderTarget).
+struct StateRequirement {
+    TextureHandle texture;
+    Access access = Access::None;
+};
+
 struct RecordedCommand {
     std::string text;
-    std::vector<Barrier> barriers; // non-empty for barrier batches, validated at submit
+    std::vector<Barrier> barriers;              // non-empty for barrier batches, validated at submit
+    std::vector<StateRequirement> requirements; // validated at submit
+    enum class Event : u8 { None, Begin, End } event = Event::None;
+    std::string eventName;
 };
 
 class NullCommandList final : public CommandList {
@@ -103,6 +112,7 @@ public:
     void End() override {
         AIR_CHECK(mRecording, "End() without Begin()");
         AIR_CHECK(mEventDepth == 0, "{} unbalanced BeginEvent()", mEventDepth);
+        AIR_CHECK(!mRenderPassTarget.IsValid(), "End() inside a render pass");
         mRecording = false;
     }
 
@@ -110,6 +120,7 @@ public:
     void CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size) override;
     void CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) override;
     void CopyTexture(TextureHandle dst, TextureHandle src) override;
+    void CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) override;
     void ClearTexture(TextureHandle texture, const float color[4]) override;
     void SetPipeline(PipelineHandle pipeline) override;
     void PushConstants(const void* data, u32 size) override {
@@ -126,22 +137,32 @@ public:
     }
     void BuildBlas(AccelStructHandle blas, BufferHandle scratch) override;
     void BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) override;
+    void BeginRenderPass(TextureHandle target, const float* clearColor) override;
+    void EndRenderPass() override {
+        AIR_CHECK(mRenderPassTarget.IsValid(), "EndRenderPass without BeginRenderPass");
+        mRenderPassTarget = {};
+        Record("EndRenderPass");
+    }
+    void* GetNativeHandle() override { return nullptr; }
     void BeginEvent(std::string_view name) override {
         ++mEventDepth;
         Record(std::format("BeginEvent '{}'", name));
+        mCommands.back().event = RecordedCommand::Event::Begin;
+        mCommands.back().eventName = std::string(name);
     }
     void EndEvent() override {
         AIR_CHECK(mEventDepth > 0, "EndEvent without BeginEvent");
         --mEventDepth;
         Record("EndEvent");
+        mCommands.back().event = RecordedCommand::Event::End;
     }
 
     std::vector<RecordedCommand>& Commands() { return mCommands; }
 
 private:
-    void Record(std::string text, std::vector<Barrier> barriers = {}) {
+    void Record(std::string text, std::vector<Barrier> barriers = {}, std::vector<StateRequirement> requirements = {}) {
         AIR_CHECK(mRecording, "recording into a command list outside Begin()/End()");
-        mCommands.push_back({std::move(text), std::move(barriers)});
+        mCommands.push_back({std::move(text), std::move(barriers), std::move(requirements)});
     }
 
     NullDevice& mDevice;
@@ -149,7 +170,29 @@ private:
     bool mRecording = false;
     u32 mEventDepth = 0;
     PipelineHandle mPipeline;
+    TextureHandle mRenderPassTarget;
     std::vector<RecordedCommand> mCommands;
+};
+
+class NullSwapchain final : public Swapchain {
+public:
+    NullSwapchain(NullDevice& device, const SwapchainDesc& desc);
+    ~NullSwapchain() override { DestroyBuffers(); }
+
+    TextureHandle GetCurrentTexture() override { return mBuffers[mCurrent]; }
+    bool Present() override;
+    void Resize(u32 width, u32 height) override;
+    void SetVsync(bool vsync) override { mDesc.vsync = vsync; }
+    const SwapchainDesc& GetDesc() const override { return mDesc; }
+
+private:
+    void CreateBuffers();
+    void DestroyBuffers();
+
+    NullDevice& mDevice;
+    SwapchainDesc mDesc;
+    std::vector<TextureHandle> mBuffers;
+    u32 mCurrent = 0;
 };
 
 const char* QueueName(QueueType queue) {
@@ -175,7 +218,7 @@ public:
     ~NullDevice() override { WaitIdle(); }
 
     Backend GetBackend() const override { return Backend::Null; }
-    const DeviceCapabilities& GetCapabilities() const override { return mCaps; }
+    const DeviceCaps& GetCapabilities() const override { return mCaps; }
 
     // --- resources -------------------------------------------------------------------------
     BufferHandle CreateBuffer(const BufferDesc& desc) override {
@@ -346,6 +389,18 @@ public:
         AIR_CHECK(as && as->isTlas, "GetBindlessSRV: invalid TLAS");
         return LazyBindless(as->srv);
     }
+    BindlessIndex AllocateBindlessSlot() override {
+        BindlessIndex slot = kInvalidBindless;
+        return LazyBindless(slot);
+    }
+    void FreeBindlessSlot(BindlessIndex index) override {
+        DeferDelete([this, index] { ReleaseBindless(index); });
+    }
+    DescriptorHandles GetBindlessDescriptor(BindlessIndex index) override {
+        // Synthetic addresses: unique per slot, never dereferenced.
+        constexpr u64 kDescriptorSize = 32;
+        return {0x10000000ull + index * kDescriptorSize, 0x20000000ull + index * kDescriptorSize};
+    }
 
     AccelStructHandle CreateBlas(const BlasDesc& desc) override {
         NullAccelStruct as;
@@ -390,6 +445,16 @@ public:
         DeferDelete([this, handle] { mPipelines.Free(handle); });
     }
 
+    // --- presentation and interop -----------------------------------------------------------
+    std::unique_ptr<Swapchain> CreateSwapchain(const SwapchainDesc& desc) override {
+        AIR_CHECK(desc.width > 0 && desc.height > 0 && desc.bufferCount >= 2, "invalid swapchain {}x{} x{}", desc.width,
+                  desc.height, desc.bufferCount);
+        return std::make_unique<NullSwapchain>(*this, desc);
+    }
+    void* GetNativeObject(NativeObject) override { return nullptr; }
+    void* GetNativeResource(TextureHandle) override { return nullptr; }
+    void* GetNativeResource(BufferHandle) override { return nullptr; }
+
     // --- submission ------------------------------------------------------------------------
     std::unique_ptr<CommandList> CreateCommandList(QueueType queue) override {
         return std::make_unique<NullCommandList>(*this, queue);
@@ -402,6 +467,14 @@ public:
             for (RecordedCommand& command : static_cast<NullCommandList*>(list)->Commands()) {
                 for (const Barrier& barrier : command.barriers) {
                     ValidateBarrierLocked(queue, barrier);
+                }
+                for (const StateRequirement& requirement : command.requirements) {
+                    ValidateStateLocked(QueueName(queue), requirement.texture, requirement.access, command.text);
+                }
+                if (mProfiling && command.event == RecordedCommand::Event::Begin) {
+                    mFrameScopes.push_back({command.eventName, mScopeDepth++, 0.0, 0.0});
+                } else if (mProfiling && command.event == RecordedCommand::Event::End && mScopeDepth > 0) {
+                    --mScopeDepth;
                 }
                 if (mCapture) {
                     mCaptured.push_back(std::format("[{}] {}", QueueName(queue), command.text));
@@ -421,6 +494,15 @@ public:
 
     void BeginFrame() override {}
     void EndFrame() override {
+        {
+            std::lock_guard lock(mSubmitMutex);
+            if (mProfiling) {
+                mLastTimings.frameIndex = mFrameIndex.load();
+                mLastTimings.frameMs = 0.0;
+                mLastTimings.scopes = std::exchange(mFrameScopes, {});
+            }
+            mScopeDepth = 0;
+        }
         const u64 frame = mFrameIndex.fetch_add(1) + 1;
         // A real GPU may still be working on the last framesInFlight frames.
         if (frame >= mDesc.framesInFlight) {
@@ -434,9 +516,46 @@ public:
         for (u32 i = 0; i < u32(MemoryLocation::Count); ++i) {
             stats.perLocation[i] = mAllocator.GetStats(MemoryLocation(i));
         }
+        stats.pools = mAllocator.GetPoolStats();
+        stats.local = {mCaps.dedicatedVideoMemory,
+                       stats.perLocation[size_t(MemoryLocation::DeviceLocal)].reservedBytes};
         stats.liveBuffers = mBuffers.LiveCount();
         stats.liveTextures = mTextures.LiveCount();
+        stats.liveAccelStructs = mAccelStructs.LiveCount();
+        stats.livePipelines = mPipelines.LiveCount();
+        {
+            std::lock_guard lock(mBindlessMutex);
+            stats.bindlessDescriptors = mNextBindless - u32(mFreeBindless.size());
+        }
         return stats;
+    }
+
+    std::vector<ResourceInfo> GetResourceList() override {
+        std::vector<ResourceInfo> list;
+        mBuffers.ForEach([&](BufferHandle, const NullBuffer& b) {
+            list.push_back({ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory, b.placed});
+        });
+        mTextures.ForEach([&](TextureHandle, const NullTexture& tex) {
+            list.push_back({ResourceInfo::Kind::Texture, tex.desc.debugName, tex.allocation.size,
+                            MemoryLocation::DeviceLocal, tex.placed});
+        });
+        mHeaps.ForEach([&](HeapHandle, const NullHeap& h) {
+            list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.location, false});
+        });
+        mAccelStructs.ForEach([&](AccelStructHandle, const NullAccelStruct& as) {
+            list.push_back({ResourceInfo::Kind::AccelStruct, as.isTlas ? as.tlas.debugName : as.blas.debugName, 0,
+                            MemoryLocation::DeviceLocal, false});
+        });
+        return list;
+    }
+
+    void SetGpuProfiling(bool enabled) override {
+        std::lock_guard lock(mSubmitMutex);
+        mProfiling = enabled;
+    }
+    GpuFrameTimings GetGpuTimings() override {
+        std::lock_guard lock(mSubmitMutex);
+        return mLastTimings;
     }
 
     void SetCommandCapture(bool enabled) override {
@@ -471,6 +590,19 @@ public:
     bool IsValid(TextureHandle h) { return mTextures.Get(h) != nullptr; }
     bool IsValid(BufferHandle h) { return mBuffers.Get(h) != nullptr; }
 
+    // Swapchain support: back buffers start in Present, and Present() checks they are back there.
+    void SetTrackedState(TextureHandle texture, Access access) {
+        std::lock_guard lock(mSubmitMutex);
+        mTrackedState[StateKey(texture)] = access;
+    }
+    void ValidatePresent(TextureHandle texture) {
+        std::lock_guard lock(mSubmitMutex);
+        ValidateStateLocked("Present", texture, Access::Present, "Present");
+        if (mCapture) {
+            mCaptured.push_back(std::format("[Present] {}", Describe(texture)));
+        }
+    }
+
 private:
     static HeapCategory TextureCategory(const TextureDesc& desc) {
         return Any(desc.usage & (TextureUsage::RenderTarget | TextureUsage::DepthStencil))
@@ -498,6 +630,19 @@ private:
             }
         }
         it->second = barrier.after;
+    }
+
+    void ValidateStateLocked(std::string_view where, TextureHandle texture, Access expected, std::string_view what) {
+        const auto it = mTrackedState.find(StateKey(texture));
+        const Access actual = it == mTrackedState.end() ? Access::None : it->second;
+        if (actual != expected) {
+            const std::string message = std::format("VALIDATION: '{}' needs {} in {} but it is in {}", what,
+                                                    Describe(texture), ToString(expected), ToString(actual));
+            AIR_LOG(Error, "NullRHI", "{}", message);
+            if (mCapture) {
+                mCaptured.push_back(std::format("[{}] {}", where, message));
+            }
+        }
     }
 
     void ForgetState(u64 key) {
@@ -547,7 +692,7 @@ private:
     }
 
     DeviceDesc mDesc;
-    DeviceCapabilities mCaps;
+    DeviceCaps mCaps;
     NullHeapProvider mHeapProvider;
     GpuMemoryAllocator mAllocator;
 
@@ -562,12 +707,16 @@ private:
     std::unordered_map<u64, Access> mTrackedState;
     bool mCapture = false;
     std::vector<std::string> mCaptured;
+    bool mProfiling = false;
+    u32 mScopeDepth = 0;
+    std::vector<GpuTimingScope> mFrameScopes;
+    GpuFrameTimings mLastTimings;
 
     std::mutex mDeferredMutex;
     std::vector<std::pair<u64, std::function<void()>>> mDeferred;
     std::atomic<u64> mFrameIndex{0};
 
-    std::mutex mBindlessMutex;
+    mutable std::mutex mBindlessMutex;
     BindlessIndex mNextBindless = 0;
     std::vector<BindlessIndex> mFreeBindless;
 };
@@ -611,6 +760,20 @@ void NullCommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHand
 void NullCommandList::CopyTexture(TextureHandle dst, TextureHandle src) {
     Record(std::format("CopyTexture {} <- {}", mDevice.Describe(dst), mDevice.Describe(src)));
 }
+void NullCommandList::CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) {
+    Record(std::format("CopyTextureToBuffer {}+{} <- {} mip {}", mDevice.Describe(dst), dstOffset,
+                       mDevice.Describe(src), mip));
+}
+void NullCommandList::BeginRenderPass(TextureHandle target, const float* clearColor) {
+    AIR_CHECK(!mRenderPassTarget.IsValid(), "BeginRenderPass inside a render pass");
+    AIR_CHECK(mDevice.IsValid(target), "BeginRenderPass on an invalid texture");
+    mRenderPassTarget = target;
+    std::string text = std::format("BeginRenderPass {}", mDevice.Describe(target));
+    if (clearColor) {
+        text += std::format(" clear ({}, {}, {}, {})", clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+    }
+    Record(std::move(text), {}, {{target, Access::RenderTarget}});
+}
 void NullCommandList::ClearTexture(TextureHandle texture, const float c[4]) {
     Record(std::format("ClearTexture {} ({}, {}, {}, {})", mDevice.Describe(texture), c[0], c[1], c[2], c[3]));
 }
@@ -624,6 +787,48 @@ void NullCommandList::BuildBlas(AccelStructHandle blas, BufferHandle scratch) {
 void NullCommandList::BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) {
     Record(std::format("BuildTlas {} instances {} scratch {}", mDevice.Describe(tlas), instances.size(),
                        mDevice.Describe(scratch)));
+}
+
+// --- NullSwapchain ---------------------------------------------------------------------------
+
+NullSwapchain::NullSwapchain(NullDevice& device, const SwapchainDesc& desc) : mDevice(device), mDesc(desc) {
+    CreateBuffers();
+}
+
+void NullSwapchain::CreateBuffers() {
+    for (u32 i = 0; i < mDesc.bufferCount; ++i) {
+        TextureDesc desc;
+        desc.format = mDesc.format;
+        desc.width = mDesc.width;
+        desc.height = mDesc.height;
+        desc.usage = TextureUsage::RenderTarget | TextureUsage::CopyDst | TextureUsage::Present;
+        desc.debugName = std::format("Swapchain[{}]", i);
+        const TextureHandle texture = mDevice.CreateTexture(desc);
+        mDevice.SetTrackedState(texture, Access::Present);
+        mBuffers.push_back(texture);
+    }
+    mCurrent = 0;
+}
+
+void NullSwapchain::DestroyBuffers() {
+    for (TextureHandle texture : mBuffers) {
+        mDevice.DestroyTexture(texture);
+    }
+    mBuffers.clear();
+}
+
+bool NullSwapchain::Present() {
+    mDevice.ValidatePresent(mBuffers[mCurrent]);
+    mCurrent = (mCurrent + 1) % u32(mBuffers.size());
+    return true;
+}
+
+void NullSwapchain::Resize(u32 width, u32 height) {
+    mDevice.WaitIdle();
+    DestroyBuffers();
+    mDesc.width = width;
+    mDesc.height = height;
+    CreateBuffers();
 }
 
 } // namespace
