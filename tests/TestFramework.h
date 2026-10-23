@@ -9,24 +9,29 @@
 #include <string>
 #include <vector>
 
-namespace airtest {
+namespace airtest
+{
 
-struct TestCase {
+struct TestCase
+{
     const char* name;
     std::function<void()> fn;
 };
 
-inline std::vector<TestCase>& Registry() {
+inline std::vector<TestCase>& Registry()
+{
     static std::vector<TestCase> tests;
     return tests;
 }
 
-inline int& FailureCount() {
+inline int& FailureCount()
+{
     static int failures = 0;
     return failures;
 }
 
-struct Registrar {
+struct Registrar
+{
     Registrar(const char* name, std::function<void()> fn) { Registry().push_back({name, std::move(fn)}); }
 };
 
@@ -41,8 +46,10 @@ struct Registrar {
     static void AIR_TEST_CONCAT(Test_, name)()
 
 #define EXPECT(cond)                                                                                                   \
-    do {                                                                                                               \
-        if (!(cond)) {                                                                                                 \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (!(cond))                                                                                                   \
+        {                                                                                                              \
             std::fprintf(stderr, "  %s:%d: EXPECT failed: %s\n", __FILE__, __LINE__, #cond);                           \
             ++::airtest::FailureCount();                                                                               \
         }                                                                                                              \

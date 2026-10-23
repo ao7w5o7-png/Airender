@@ -22,8 +22,10 @@
 #include <cmath>
 #include <mutex>
 
-namespace air::dlss {
-namespace {
+namespace air::dlss
+{
+namespace
+{
 
 using rhi::Access;
 namespace slots = renderer::slots;
@@ -33,7 +35,8 @@ constexpr const char* kProjectId = "6c1f3a59-2d0e-4c8b-9a7e-3f5b1d2c4e80";
 constexpr float kNear = 0.01f;
 constexpr float kFar = 10000.0f;
 
-std::string ResultText(NVSDK_NGX_Result result) {
+std::string ResultText(NVSDK_NGX_Result result)
+{
     return std::format("0x{:08X}", u32(result));
 }
 
@@ -41,7 +44,8 @@ std::string ResultText(NVSDK_NGX_Result result) {
 // and D3D clip space with depth in [0, 1].
 using Matrix = std::array<float, 16>;
 
-void ViewMatrices(const renderer::Camera& camera, float aspect, Matrix& worldToView, Matrix& viewToClip) {
+void ViewMatrices(const renderer::Camera& camera, float aspect, Matrix& worldToView, Matrix& viewToClip)
+{
     const renderer::float3 r = camera.Right();
     const renderer::float3 u = camera.Up();
     const renderer::float3 f = camera.Forward();
@@ -61,31 +65,40 @@ void ViewMatrices(const renderer::Camera& camera, float aspect, Matrix& worldToV
     // clang-format on
 }
 
-class DlssFeature final : public renderer::RenderFeature {
+class DlssFeature final : public renderer::RenderFeature
+{
 public:
-    DlssFeature() {
+    DlssFeature()
+    {
         mParameters.Add("enabled", &mEnabled, "Run Ray Reconstruction (off: pass the noisy frame through)");
         mParameters.Add("preset", &mPreset, "0 default, 4 D (transformer), 5 E (latest transformer)", 0, 5);
         mParameters.Add("flipJitter", &mFlipJitter, "Negate the jitter passed to NGX (sign convention check)");
     }
 
-    ~DlssFeature() override {
-        if (mDevice) {
+    ~DlssFeature() override
+    {
+        if (mDevice)
+        {
             mDevice->WaitIdle();
         }
-        if (mHandle) {
+        if (mHandle)
+        {
             NVSDK_NGX_D3D12_ReleaseFeature(mHandle);
         }
-        if (mNgxParameters) {
+        if (mNgxParameters)
+        {
             NVSDK_NGX_D3D12_DestroyParameters(mNgxParameters);
         }
-        if (mNgxDevice) {
+        if (mNgxDevice)
+        {
             NVSDK_NGX_D3D12_Shutdown1(mNgxDevice);
         }
     }
 
-    bool Initialize(const renderer::FeatureInitContext& context) override {
-        if (context.device.GetBackend() != rhi::Backend::D3D12) {
+    bool Initialize(const renderer::FeatureInitContext& context) override
+    {
+        if (context.device.GetBackend() != rhi::Backend::D3D12)
+        {
             AIR_LOG(Error, "DLSS", "Ray Reconstruction needs the D3D12 backend (got {})",
                     rhi::ToString(context.device.GetBackend()));
             return false;
@@ -96,7 +109,8 @@ public:
         auto* device = static_cast<ID3D12Device*>(context.device.GetNativeObject(rhi::NativeObject::Device));
         NVSDK_NGX_Result result =
             NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "0.1", L".", device);
-        if (NVSDK_NGX_FAILED(result)) {
+        if (NVSDK_NGX_FAILED(result))
+        {
             AIR_LOG(Error, "DLSS", "NGX init failed ({}): needs an NVIDIA RTX GPU and a recent driver",
                     ResultText(result));
             return false;
@@ -107,7 +121,8 @@ public:
         if (NVSDK_NGX_FAILED(result) ||
             NVSDK_NGX_FAILED(NVSDK_NGX_Parameter_GetI(
                 mNgxParameters, NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &available)) ||
-            !available) {
+            !available)
+        {
             AIR_LOG(Error, "DLSS", "Ray Reconstruction is not available on '{}'",
                     context.device.GetCapabilities().adapterName);
             return false;
@@ -116,8 +131,10 @@ public:
         return true;
     }
 
-    void AddPasses(renderer::FrameContext& context) override {
-        if (!mEnabled) {
+    void AddPasses(renderer::FrameContext& context) override
+    {
+        if (!mEnabled)
+        {
             return;
         }
         const auto diffuse = context.blackboard.FindTexture(slots::kDiffuseAlbedo);
@@ -125,14 +142,17 @@ public:
         const auto normals = context.blackboard.FindTexture(slots::kNormalRoughness);
         const auto depth = context.blackboard.FindTexture(slots::kViewDepth);
         const auto motion = context.blackboard.FindTexture(slots::kMotionVectors);
-        if (!diffuse || !specular || !normals || !depth || !motion) {
-            if (!mWarnedMissingGuides) {
+        if (!diffuse || !specular || !normals || !depth || !motion)
+        {
+            if (!mWarnedMissingGuides)
+            {
                 AIR_LOG(Warning, "DLSS", "no guide textures this frame (enable pathtracer.guides); passing through");
                 mWarnedMissingGuides = true;
             }
             return;
         }
-        if (context.blackboard.GetValue(slots::kOutputIsDisplay) != 0.0) {
+        if (context.blackboard.GetValue(slots::kOutputIsDisplay) != 0.0)
+        {
             return; // debug views are not radiance
         }
 
@@ -146,7 +166,8 @@ public:
                                           rhi::TextureUsage::CopySrc,
                                  .debugName = "DLSS.Denoised"});
 
-        struct Inputs {
+        struct Inputs
+        {
             rdg::TextureRef color, denoised, diffuse, specular, normals, depth, motion;
         } in{color, denoised, *diffuse, *specular, *normals, *depth, *motion};
         const float sign = mFlipJitter ? -1.0f : 1.0f;
@@ -161,18 +182,21 @@ public:
 
         graph.AddPass(
             "DLSS.RayReconstruction", rdg::PassFlags::Compute,
-            [&](rdg::PassBuilder& b) {
-                for (rdg::TextureRef t : {in.color, in.diffuse, in.specular, in.normals, in.depth, in.motion}) {
+            [&](rdg::PassBuilder& b)
+            {
+                for (rdg::TextureRef t : {in.color, in.diffuse, in.specular, in.normals, in.depth, in.motion})
+                {
                     b.Read(t, Access::SRVCompute);
                 }
                 b.Write(in.denoised, Access::UAVCompute);
             },
-            [this, in, jitterX, jitterY, reset, preset, worldToView, viewToClip](rdg::PassContext& ctx) mutable {
+            [this, in, jitterX, jitterY, reset, preset, worldToView, viewToClip](rdg::PassContext& ctx) mutable
+            {
                 auto* list = static_cast<ID3D12GraphicsCommandList*>(ctx.cmd.GetNativeHandle());
-                auto resource = [&](rdg::TextureRef t) {
-                    return static_cast<ID3D12Resource*>(ctx.device.GetNativeResource(ctx.Get(t)));
-                };
-                if (!EnsureHandle(list, preset)) {
+                auto resource = [&](rdg::TextureRef t)
+                { return static_cast<ID3D12Resource*>(ctx.device.GetNativeResource(ctx.Get(t))); };
+                if (!EnsureHandle(list, preset))
+                {
                     return;
                 }
                 NVSDK_NGX_D3D12_DLSSD_Eval_Params eval = {};
@@ -195,21 +219,24 @@ public:
                 eval.InPreExposure = 1.0f; // the path tracer already applied the camera exposure
                 eval.InExposureScale = 1.0f;
                 const NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSD_EXT(list, mHandle, mNgxParameters, &eval);
-                if (NVSDK_NGX_FAILED(result)) {
+                if (NVSDK_NGX_FAILED(result))
+                {
                     AIR_LOG(Error, "DLSS", "evaluate failed ({})", ResultText(result));
                 }
             });
 
         graph.AddPass(
             "DLSS.Output", rdg::PassFlags::Copy,
-            [&](rdg::PassBuilder& b) {
+            [&](rdg::PassBuilder& b)
+            {
                 b.Read(in.denoised, Access::CopySrc);
                 b.Write(in.color, Access::CopyDst);
             },
             [in](rdg::PassContext& ctx) { ctx.cmd.CopyTexture(ctx.Get(in.color), ctx.Get(in.denoised)); });
     }
 
-    json::Value GetStatus() const override {
+    json::Value GetStatus() const override
+    {
         json::Value status = json::Value::MakeObject();
         status["created"] = mHandle != nullptr;
         return status;
@@ -217,12 +244,15 @@ public:
 
 private:
     // The NGX feature is created inside a command list on first use (and again when the preset changes).
-    bool EnsureHandle(ID3D12GraphicsCommandList* list, u32 preset) {
+    bool EnsureHandle(ID3D12GraphicsCommandList* list, u32 preset)
+    {
         std::lock_guard lock(mHandleMutex);
-        if (mHandle && preset == mHandlePreset) {
+        if (mHandle && preset == mHandlePreset)
+        {
             return true;
         }
-        if (mHandle) {
+        if (mHandle)
+        {
             mDevice->WaitIdle();
             NVSDK_NGX_D3D12_ReleaseFeature(mHandle);
             mHandle = nullptr;
@@ -240,7 +270,8 @@ private:
         create.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
         create.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
         const NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSSD_EXT(list, 1, 1, &mHandle, mNgxParameters, &create);
-        if (NVSDK_NGX_FAILED(result)) {
+        if (NVSDK_NGX_FAILED(result))
+        {
             AIR_LOG(Error, "DLSS", "creating Ray Reconstruction failed ({})", ResultText(result));
             mHandle = nullptr;
             mEnabled = false;
@@ -268,9 +299,11 @@ private:
 } // namespace
 } // namespace air::dlss
 
-namespace air::features {
+namespace air::features
+{
 
-void Register_dlss(renderer::FeatureRegistry& registry) {
+void Register_dlss(renderer::FeatureRegistry& registry)
+{
     registry.Register({"dlss", "NVIDIA DLSS Ray Reconstruction denoiser (D3D12, RTX GPUs)",
                        [] { return std::make_unique<dlss::DlssFeature>(); }});
 }

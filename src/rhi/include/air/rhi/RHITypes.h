@@ -10,13 +10,26 @@
 #include <string>
 #include <vector>
 
-namespace air::rhi {
+namespace air::rhi
+{
 
-enum class Backend : u8 { Null, D3D12, Vulkan };
+enum class Backend : u8
+{
+    Null,
+    D3D12,
+    Vulkan
+};
 
-enum class QueueType : u8 { Graphics, Compute, Copy, Count };
+enum class QueueType : u8
+{
+    Graphics,
+    Compute,
+    Copy,
+    Count
+};
 
-enum class Format : u16 {
+enum class Format : u16
+{
     Unknown,
     R8_UNORM,
     RG8_UNORM,
@@ -45,7 +58,8 @@ const char* ToString(Format format);
 u32 TextureCopyRowPitch(Format format, u32 width);
 
 // Where a resource lives. Backends map these onto D3D12 heap types / Vulkan memory types.
-enum class MemoryLocation : u8 {
+enum class MemoryLocation : u8
+{
     DeviceLocal,     // VRAM, GPU only (D3D12 DEFAULT, VK DEVICE_LOCAL)
     Upload,          // CPU write -> GPU read, write-combined (D3D12 UPLOAD, VK HOST_VISIBLE|COHERENT)
     Readback,        // GPU write -> CPU read, cached (D3D12 READBACK, VK HOST_VISIBLE|CACHED)
@@ -54,7 +68,8 @@ enum class MemoryLocation : u8 {
 };
 const char* ToString(MemoryLocation location);
 
-enum class BufferUsage : u32 {
+enum class BufferUsage : u32
+{
     None = 0,
     Vertex = 1 << 0,
     Index = 1 << 1,
@@ -70,7 +85,8 @@ enum class BufferUsage : u32 {
 };
 AIR_ENUM_FLAGS(BufferUsage)
 
-enum class TextureUsage : u32 {
+enum class TextureUsage : u32
+{
     None = 0,
     ShaderResource = 1 << 0,
     UnorderedAccess = 1 << 1,
@@ -84,7 +100,8 @@ AIR_ENUM_FLAGS(TextureUsage)
 
 // Resource access state as a bit set. Barriers are expressed as
 // (before access -> after access); backends translate to D3D12 enhanced barriers / VK sync2.
-enum class Access : u32 {
+enum class Access : u32
+{
     None = 0, // undefined contents (fresh / aliased transient resource)
     CopySrc = 1 << 0,
     CopyDst = 1 << 1,
@@ -111,7 +128,8 @@ enum class Access : u32 {
 AIR_ENUM_FLAGS(Access)
 std::string ToString(Access access);
 
-inline bool IsWriteAccess(Access access) {
+inline bool IsWriteAccess(Access access)
+{
     return Any(access & Access::WritableMask);
 }
 
@@ -136,7 +154,8 @@ constexpr BindlessIndex kInvalidBindless = ~0u;
 // ---------------------------------------------------------------------------
 // Descriptions
 // ---------------------------------------------------------------------------
-struct BufferDesc {
+struct BufferDesc
+{
     u64 size = 0;
     u32 stride = 0; // > 0: structured buffer element size
     BufferUsage usage = BufferUsage::None;
@@ -144,9 +163,15 @@ struct BufferDesc {
     std::string debugName;
 };
 
-enum class TextureDimension : u8 { Tex2D, Tex3D, TexCube };
+enum class TextureDimension : u8
+{
+    Tex2D,
+    Tex3D,
+    TexCube
+};
 
-struct TextureDesc {
+struct TextureDesc
+{
     TextureDimension dimension = TextureDimension::Tex2D;
     Format format = Format::Unknown;
     u32 width = 1;
@@ -160,13 +185,15 @@ struct TextureDesc {
 };
 
 // Size/alignment a resource needs when placed in a heap.
-struct AllocationInfo {
+struct AllocationInfo
+{
     u64 size = 0;
     u64 alignment = 0;
 };
 
 // Acceleration structures (hardware ray tracing).
-struct RayTracingGeometryTriangles {
+struct RayTracingGeometryTriangles
+{
     BufferHandle vertexBuffer;
     u64 vertexOffset = 0;
     u32 vertexCount = 0;
@@ -178,14 +205,16 @@ struct RayTracingGeometryTriangles {
     bool opaque = true;
 };
 
-struct BlasDesc {
+struct BlasDesc
+{
     std::vector<RayTracingGeometryTriangles> geometries;
     bool allowUpdate = false;
     bool preferFastTrace = true; // offline path tracing wants fast trace over fast build
     std::string debugName;
 };
 
-struct TlasInstance {
+struct TlasInstance
+{
     float transform[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}; // row-major 3x4
     u32 instanceId = 0;                                                 // InstanceID() in shaders, 24 bits
     u32 mask = 0xFF;
@@ -193,31 +222,36 @@ struct TlasInstance {
     AccelStructHandle blas;
 };
 
-struct TlasDesc {
+struct TlasDesc
+{
     u32 maxInstances = 0;
     bool allowUpdate = true;
     std::string debugName;
 };
 
 // Shaders are compiled offline by DXC to DXIL (D3D12) and SPIR-V (Vulkan) from the same HLSL.
-struct ShaderBlob {
+struct ShaderBlob
+{
     std::vector<u8> bytecode;
     std::string entryPoint;
 };
 
-struct ComputePipelineDesc {
+struct ComputePipelineDesc
+{
     ShaderBlob shader;
     u32 pushConstantBytes = 0; // root constants / push constants, max 128
     std::string debugName;
 };
 
-struct RayTracingHitGroup {
+struct RayTracingHitGroup
+{
     std::string name;
     std::string closestHit;
     std::string anyHit;
 };
 
-struct RayTracingPipelineDesc {
+struct RayTracingPipelineDesc
+{
     ShaderBlob library; // one DXIL/SPIR-V library holding all entry points
     std::string rayGen;
     std::vector<std::string> missShaders;
@@ -232,8 +266,15 @@ struct RayTracingPipelineDesc {
 // ---------------------------------------------------------------------------
 // Barriers
 // ---------------------------------------------------------------------------
-struct Barrier {
-    enum class Type : u8 { Buffer, Texture, AccelStruct, Aliasing };
+struct Barrier
+{
+    enum class Type : u8
+    {
+        Buffer,
+        Texture,
+        AccelStruct,
+        Aliasing
+    };
     Type type = Type::Texture;
     BufferHandle buffer;
     TextureHandle texture;
@@ -242,7 +283,8 @@ struct Barrier {
     Access after = Access::None;
     bool discard = false; // contents may be discarded (first use of a transient resource)
 
-    static Barrier Tex(TextureHandle t, Access before, Access after, bool discard = false) {
+    static Barrier Tex(TextureHandle t, Access before, Access after, bool discard = false)
+    {
         Barrier b;
         b.type = Type::Texture;
         b.texture = t;
@@ -251,7 +293,8 @@ struct Barrier {
         b.discard = discard;
         return b;
     }
-    static Barrier Buf(BufferHandle buf, Access before, Access after) {
+    static Barrier Buf(BufferHandle buf, Access before, Access after)
+    {
         Barrier b;
         b.type = Type::Buffer;
         b.buffer = buf;
@@ -261,7 +304,8 @@ struct Barrier {
     }
 };
 
-struct DeviceCaps {
+struct DeviceCaps
+{
     bool rayTracing = false; // DXR 1.1 / VK_KHR_ray_tracing_pipeline + ray_query
     bool meshShaders = false;
     bool bindless = false; // SM 6.6 dynamic resources / descriptor indexing

@@ -7,9 +7,11 @@
 #include <chrono>
 #include <format>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
-json::Value FrameResult::ToJson() const {
+json::Value FrameResult::ToJson() const
+{
     json::Value out = json::Value::MakeObject();
     out["frame"] = frameIndex;
     out["cpuMs"] = cpuMilliseconds;
@@ -21,13 +23,16 @@ json::Value FrameResult::ToJson() const {
     out["transientHeapBytes"] = graphStats.transientHeapSize;
     out["transientBytesUnaliased"] = graphStats.transientBytesUnaliased;
     json::Value errors = json::Value::MakeArray();
-    for (const std::string& e : validationErrors) {
+    for (const std::string& e : validationErrors)
+    {
         errors.Push(e);
     }
     out["validationErrors"] = std::move(errors);
-    if (!passCpu.empty() || gpu.frameIndex != ~0ull) {
+    if (!passCpu.empty() || gpu.frameIndex != ~0ull)
+    {
         json::Value passes = json::Value::MakeArray();
-        for (const auto& pass : passCpu) {
+        for (const auto& pass : passCpu)
+        {
             json::Value p = json::Value::MakeObject();
             p["name"] = pass.name;
             p["cpuMs"] = pass.cpuMs;
@@ -42,7 +47,8 @@ json::Value FrameResult::ToJson() const {
 }
 
 FrameRunner::FrameRunner(rhi::Device& device, TaskSystem& tasks, FrameRunnerDesc desc)
-    : mDevice(device), mTasks(tasks), mDesc(std::move(desc)) {
+    : mDevice(device), mTasks(tasks), mDesc(std::move(desc))
+{
     mOutput = mDevice.CreateTexture(
         {.format = mDesc.outputFormat,
          .width = mDesc.width,
@@ -51,21 +57,25 @@ FrameRunner::FrameRunner(rhi::Device& device, TaskSystem& tasks, FrameRunnerDesc
          .debugName = "FrameOutput"});
     AIR_CHECK(mOutput.IsValid(), "failed to create the frame output texture");
     mDevice.SetCommandCapture(true); // always on: validation lines are collected every frame
-    if (mDesc.profile) {
+    if (mDesc.profile)
+    {
         mDevice.SetGpuProfiling(true);
     }
 }
 
-FrameRunner::~FrameRunner() {
+FrameRunner::~FrameRunner()
+{
     mFeatures.clear(); // features release their resources before the output goes away
     mDevice.DestroyTexture(mOutput);
 }
 
-bool FrameRunner::AddFeature(const std::string& name, std::unique_ptr<RenderFeature> feature) {
+bool FrameRunner::AddFeature(const std::string& name, std::unique_ptr<RenderFeature> feature)
+{
     AIR_CHECK(feature, "AddFeature('{}') with a null feature", name);
     AIR_CHECK(!FindFeature(name), "feature '{}' added twice", name);
     FeatureInitContext context{mDevice, mTasks, mDesc.shaderRoot / name, mDesc.width, mDesc.height};
-    if (!feature->Initialize(context)) {
+    if (!feature->Initialize(context))
+    {
         AIR_LOG(Error, "FrameRunner", "feature '{}' failed to initialize", name);
         return false;
     }
@@ -73,26 +83,34 @@ bool FrameRunner::AddFeature(const std::string& name, std::unique_ptr<RenderFeat
     return true;
 }
 
-RenderFeature* FrameRunner::FindFeature(std::string_view name) const {
-    for (const Entry& e : mFeatures) {
-        if (e.name == name) {
+RenderFeature* FrameRunner::FindFeature(std::string_view name) const
+{
+    for (const Entry& e : mFeatures)
+    {
+        if (e.name == name)
+        {
             return e.feature.get();
         }
     }
     return nullptr;
 }
 
-bool FrameRunner::SetParameter(std::string_view qualifiedName, std::string_view value, std::string* error) {
+bool FrameRunner::SetParameter(std::string_view qualifiedName, std::string_view value, std::string* error)
+{
     const size_t dot = qualifiedName.find('.');
-    if (dot == std::string_view::npos) {
-        if (error) {
+    if (dot == std::string_view::npos)
+    {
+        if (error)
+        {
             *error = std::format("parameter '{}' must be written as <feature>.<parameter>", qualifiedName);
         }
         return false;
     }
     RenderFeature* feature = FindFeature(qualifiedName.substr(0, dot));
-    if (!feature) {
-        if (error) {
+    if (!feature)
+    {
+        if (error)
+        {
             *error = std::format("no active feature named '{}'", qualifiedName.substr(0, dot));
         }
         return false;
@@ -101,7 +119,8 @@ bool FrameRunner::SetParameter(std::string_view qualifiedName, std::string_view 
 }
 
 FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera,
-                                     const std::function<void(FrameContext&)>& extraPasses) {
+                                     const std::function<void(FrameContext&)>& extraPasses)
+{
     AIR_PROFILE_SCOPE("FrameRunner.RenderFrame");
     const auto start = std::chrono::steady_clock::now();
     FrameResult result;
@@ -119,36 +138,44 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
                              blackboard, output, mDesc.width, mDesc.height, mFrameIndex};
         {
             AIR_PROFILE_SCOPE("FrameRunner.AddPasses");
-            for (Entry& e : mFeatures) {
+            for (Entry& e : mFeatures)
+            {
                 AIR_PROFILE_SCOPE(e.name);
                 e.feature->AddPasses(context);
             }
-            if (extraPasses) {
+            if (extraPasses)
+            {
                 extraPasses(context);
             }
         }
         graph.Execute();
 
         result.graphStats = graph.GetStats();
-        if (mDesc.profile) {
+        if (mDesc.profile)
+        {
             result.passCpu = graph.GetPassTimings();
         }
-        if (mDesc.captureGraph) {
+        if (mDesc.captureGraph)
+        {
             result.graphText = graph.DumpText();
             result.graphviz = graph.DumpGraphviz();
         }
     }
-    for (std::string& line : mDevice.TakeCapturedCommands()) {
-        if (line.find("VALIDATION") != std::string::npos) {
+    for (std::string& line : mDevice.TakeCapturedCommands())
+    {
+        if (line.find("VALIDATION") != std::string::npos)
+        {
             result.validationErrors.push_back(line);
         }
-        if (mDesc.captureCommands) {
+        if (mDesc.captureCommands)
+        {
             result.commands.push_back(std::move(line));
         }
     }
     mDevice.EndFrame();
     ++mFrameIndex;
-    if (mDesc.profile) {
+    if (mDesc.profile)
+    {
         result.gpu = mDevice.GetGpuTimings();
         result.memory = mDevice.GetMemoryStats();
         result.processMemory = GetProcessMemory();
@@ -159,9 +186,11 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
     return result;
 }
 
-json::Value FrameRunner::DescribeFeatures() const {
+json::Value FrameRunner::DescribeFeatures() const
+{
     json::Value out = json::Value::MakeArray();
-    for (const Entry& e : mFeatures) {
+    for (const Entry& e : mFeatures)
+    {
         json::Value item = json::Value::MakeObject();
         item["name"] = e.name;
         item["parameters"] = e.feature->Parameters().ToJson();

@@ -2,10 +2,13 @@
 
 #include "air/core/Log.h"
 
-namespace air::rhi {
+namespace air::rhi
+{
 
-std::unique_ptr<Device> CreateDevice(const DeviceDesc& desc) {
-    switch (desc.backend) {
+std::unique_ptr<Device> CreateDevice(const DeviceDesc& desc)
+{
+    switch (desc.backend)
+    {
     case Backend::Null: return CreateNullDevice(desc);
     case Backend::D3D12:
 #if AIR_RHI_D3D12
@@ -25,8 +28,10 @@ std::unique_ptr<Device> CreateDevice(const DeviceDesc& desc) {
     return nullptr;
 }
 
-const char* ToString(Backend backend) {
-    switch (backend) {
+const char* ToString(Backend backend)
+{
+    switch (backend)
+    {
     case Backend::Null: return "Null";
     case Backend::D3D12: return "D3D12";
     case Backend::Vulkan: return "Vulkan";
@@ -34,8 +39,10 @@ const char* ToString(Backend backend) {
     return "?";
 }
 
-u32 FormatBytesPerPixel(Format format) {
-    switch (format) {
+u32 FormatBytesPerPixel(Format format)
+{
+    switch (format)
+    {
     case Format::Unknown: return 0;
     case Format::R8_UNORM: return 1;
     case Format::RG8_UNORM:
@@ -59,16 +66,20 @@ u32 FormatBytesPerPixel(Format format) {
     return 0;
 }
 
-u32 TextureCopyRowPitch(Format format, u32 width) {
+u32 TextureCopyRowPitch(Format format, u32 width)
+{
     return u32(AlignUp(u64(width) * FormatBytesPerPixel(format), 256));
 }
 
-bool IsDepthFormat(Format format) {
+bool IsDepthFormat(Format format)
+{
     return format == Format::D32_FLOAT || format == Format::D24_UNORM_S8_UINT;
 }
 
-const char* ToString(Format format) {
-    switch (format) {
+const char* ToString(Format format)
+{
+    switch (format)
+    {
 #define AIR_FORMAT_CASE(f)                                                                                             \
     case Format::f: return #f;
         AIR_FORMAT_CASE(Unknown)
@@ -95,8 +106,10 @@ const char* ToString(Format format) {
     return "?";
 }
 
-const char* ToString(MemoryLocation location) {
-    switch (location) {
+const char* ToString(MemoryLocation location)
+{
+    switch (location)
+    {
     case MemoryLocation::DeviceLocal: return "DeviceLocal";
     case MemoryLocation::Upload: return "Upload";
     case MemoryLocation::Readback: return "Readback";
@@ -106,8 +119,10 @@ const char* ToString(MemoryLocation location) {
     return "?";
 }
 
-std::string ToString(Access access) {
-    if (access == Access::None) {
+std::string ToString(Access access)
+{
+    if (access == Access::None)
+    {
         return "None";
     }
     static constexpr const char* kNames[] = {"CopySrc",         "CopyDst",          "VertexOrIndex", "Constant",
@@ -115,9 +130,12 @@ std::string ToString(Access access) {
                                              "RenderTarget",    "DepthRead",        "DepthWrite",    "IndirectArgs",
                                              "AccelStructRead", "AccelStructWrite", "Present",       "HostRead"};
     std::string result;
-    for (u32 bit = 0; bit < std::size(kNames); ++bit) {
-        if (u32(access) & (1u << bit)) {
-            if (!result.empty()) {
+    for (u32 bit = 0; bit < std::size(kNames); ++bit)
+    {
+        if (u32(access) & (1u << bit))
+        {
+            if (!result.empty())
+            {
                 result += '|';
             }
             result += kNames[bit];

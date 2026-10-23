@@ -3,7 +3,8 @@
 using namespace airtest;
 
 // Without D3D12 and an RTX GPU the feature must refuse to run and say why, not crash.
-TEST(Dlss_RefusesOnNullDevice) {
+TEST(Dlss_RefusesOnNullDevice)
+{
     auto device = air::rhi::CreateDevice({.backend = air::rhi::Backend::Null});
     air::TaskSystem tasks(1);
     air::renderer::FeatureRegistry registry;

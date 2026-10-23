@@ -36,7 +36,8 @@
 #include <string>
 #include <vector>
 
-namespace air::rhi::d3d12 {
+namespace air::rhi::d3d12
+{
 
 using Microsoft::WRL::ComPtr;
 
@@ -49,7 +50,8 @@ constexpr u32 kTimestampBlock = 64; // timestamps a command list reserves at a t
 
 // D3D12 methods that return structs have a different C++ ABI outside MSVC (MinGW): these wrappers
 // call the right variant.
-inline D3D12_CPU_DESCRIPTOR_HANDLE CpuHeapStart(ID3D12DescriptorHeap* heap) {
+inline D3D12_CPU_DESCRIPTOR_HANDLE CpuHeapStart(ID3D12DescriptorHeap* heap)
+{
 #if defined(_MSC_VER) || !defined(_WIN32)
     return heap->GetCPUDescriptorHandleForHeapStart();
 #else
@@ -58,7 +60,8 @@ inline D3D12_CPU_DESCRIPTOR_HANDLE CpuHeapStart(ID3D12DescriptorHeap* heap) {
     return handle;
 #endif
 }
-inline D3D12_GPU_DESCRIPTOR_HANDLE GpuHeapStart(ID3D12DescriptorHeap* heap) {
+inline D3D12_GPU_DESCRIPTOR_HANDLE GpuHeapStart(ID3D12DescriptorHeap* heap)
+{
 #if defined(_MSC_VER) || !defined(_WIN32)
     return heap->GetGPUDescriptorHandleForHeapStart();
 #else
@@ -67,7 +70,8 @@ inline D3D12_GPU_DESCRIPTOR_HANDLE GpuHeapStart(ID3D12DescriptorHeap* heap) {
     return handle;
 #endif
 }
-inline D3D12_RESOURCE_ALLOCATION_INFO ResourceAllocationInfo(ID3D12Device* device, const D3D12_RESOURCE_DESC& desc) {
+inline D3D12_RESOURCE_ALLOCATION_INFO ResourceAllocationInfo(ID3D12Device* device, const D3D12_RESOURCE_DESC& desc)
+{
 #if defined(_MSC_VER) || !defined(_WIN32)
     return device->GetResourceAllocationInfo(0, 1, &desc);
 #else
@@ -82,9 +86,16 @@ std::string ToUtf8(const wchar_t* text);
 std::string HResultToString(HRESULT hr);
 
 // Tier-1 heap categories, encoded in the allocator's memory type key as location * 4 + category.
-enum class HeapCategory : u32 { Buffer = 0, RenderTargetTexture = 1, Texture = 2, All = 3 };
+enum class HeapCategory : u32
+{
+    Buffer = 0,
+    RenderTargetTexture = 1,
+    Texture = 2,
+    All = 3
+};
 
-struct D3D12Buffer {
+struct D3D12Buffer
+{
     BufferDesc desc;
     ComPtr<ID3D12Resource> resource;
     GpuAllocation allocation;
@@ -96,7 +107,8 @@ struct D3D12Buffer {
     BindlessIndex uav = kInvalidBindless;
 };
 
-struct D3D12Texture {
+struct D3D12Texture
+{
     TextureDesc desc;
     ComPtr<ID3D12Resource> resource;
     GpuAllocation allocation;
@@ -106,13 +118,15 @@ struct D3D12Texture {
     u32 rtv = ~0u;                   // index in the RTV heap
 };
 
-struct D3D12Heap {
+struct D3D12Heap
+{
     GpuAllocation allocation;
     u64 size = 0;
     std::string name;
 };
 
-struct D3D12AccelStruct {
+struct D3D12AccelStruct
+{
     bool isTlas = false;
     BlasDesc blas;
     TlasDesc tlas;
@@ -130,7 +144,8 @@ struct D3D12AccelStruct {
     u32 nextSlot = 0; // advanced with std::atomic_ref
 };
 
-struct D3D12Pipeline {
+struct D3D12Pipeline
+{
     bool rayTracing = false;
     std::string name;
     ComPtr<ID3D12PipelineState> pso;
@@ -143,14 +158,16 @@ struct D3D12Pipeline {
 
 // GPU timestamps of one frame. Command lists reserve blocks of query indices, resolve them into
 // the readback buffer at End(), and append their scopes at Submit() (so scopes are in GPU order).
-struct TimestampScope {
+struct TimestampScope
+{
     std::string name;
     u32 depth = 0;
     u32 begin = 0; // query indices
     u32 end = 0;
 };
 
-struct TimestampFrame {
+struct TimestampFrame
+{
     ComPtr<ID3D12QueryHeap> heap;
     ComPtr<ID3D12Resource> readback;
     const u64* mapped = nullptr;
@@ -161,13 +178,15 @@ struct TimestampFrame {
 };
 
 // A command allocator + command list pair. Recycled once the GPU has finished with it.
-struct CommandContext {
+struct CommandContext
+{
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList4> list;
     u64 fence = 0; // fence value on its queue that releases it
 };
 
-struct Queue {
+struct Queue
+{
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12Fence> fence;
     std::mutex mutex; // guards submission and lastSignaled
@@ -178,7 +197,8 @@ struct Queue {
 
 class D3D12Device;
 
-class D3D12CommandList final : public CommandList {
+class D3D12CommandList final : public CommandList
+{
 public:
     D3D12CommandList(D3D12Device& device, QueueType queue) : mDevice(device), mQueue(queue) {}
     ~D3D12CommandList() override;
@@ -220,7 +240,8 @@ private:
     void Capture(std::string text);
     u32 AllocateTimestamp();
 
-    struct OpenScope {
+    struct OpenScope
+    {
         std::string name;
         u32 begin;
     };
@@ -238,7 +259,8 @@ private:
 
     // Profiling (graphics / compute queues only)
     TimestampFrame* mTimestamps = nullptr;
-    struct TimestampBlock {
+    struct TimestampBlock
+    {
         u32 begin = 0;
         u32 used = 0; // next free index; the block ends at begin + kTimestampBlock
     };
@@ -247,7 +269,8 @@ private:
     std::vector<TimestampScope> mClosedScopes;
 };
 
-class D3D12Device final : public Device {
+class D3D12Device final : public Device
+{
 public:
     explicit D3D12Device(const DeviceDesc& desc);
     ~D3D12Device() override;
@@ -346,11 +369,13 @@ public:
     void LogDeviceRemoved(HRESULT hr, std::string_view where);
 
 private:
-    struct DeferredDelete {
+    struct DeferredDelete
+    {
         u64 frame;
         std::function<void()> fn;
     };
-    struct FrameRecord {
+    struct FrameRecord
+    {
         u64 frame;
         u64 fences[size_t(QueueType::Count)];
     };
@@ -433,7 +458,8 @@ std::unique_ptr<Swapchain> CreateD3D12Swapchain(D3D12Device& device, const Swapc
 D3D12_RESOURCE_STATES ToStates(Access access);
 
 #define AIR_D3D12_CHECK(expr, ...)                                                                                     \
-    do {                                                                                                               \
+    do                                                                                                                 \
+    {                                                                                                                  \
         const HRESULT air_hr_ = (expr);                                                                                \
         AIR_CHECK(SUCCEEDED(air_hr_), "{} failed: {}", #expr, ::air::rhi::d3d12::HResultToString(air_hr_));            \
     } while (false)

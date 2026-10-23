@@ -23,9 +23,11 @@
 #include <string_view>
 #include <vector>
 
-namespace air {
+namespace air
+{
 
-struct CpuEvent {
+struct CpuEvent
+{
     std::string name;
     u32 thread = 0;       // index into CpuFrame::threadNames
     u32 depth = 0;        // nesting level on its thread
@@ -33,14 +35,16 @@ struct CpuEvent {
     double durationMs = 0.0;
 };
 
-struct CpuFrame {
+struct CpuFrame
+{
     u64 frameIndex = ~0ull; // ~0: nothing recorded yet
     double durationMs = 0.0;
     std::vector<std::string> threadNames;
     std::vector<CpuEvent> events; // sorted by thread, then start time
 };
 
-class Profiler {
+class Profiler
+{
 public:
     static Profiler& Get();
 
@@ -73,15 +77,20 @@ private:
     CpuFrame mLastFrame;
 };
 
-class ProfileScope {
+class ProfileScope
+{
 public:
-    explicit ProfileScope(std::string_view name) : mActive(Profiler::Get().IsEnabled()) {
-        if (mActive) {
+    explicit ProfileScope(std::string_view name) : mActive(Profiler::Get().IsEnabled())
+    {
+        if (mActive)
+        {
             Profiler::Get().BeginScope(name);
         }
     }
-    ~ProfileScope() {
-        if (mActive) {
+    ~ProfileScope()
+    {
+        if (mActive)
+        {
             Profiler::Get().EndScope();
         }
     }
@@ -97,7 +106,8 @@ private:
 #define AIR_PROFILE_SCOPE(name) ::air::ProfileScope AIR_PROFILE_CONCAT(airProfileScope, __LINE__)(name)
 
 // Process memory as the OS reports it (working set / resident set size).
-struct ProcessMemory {
+struct ProcessMemory
+{
     u64 residentBytes = 0;
     u64 peakResidentBytes = 0;
 };

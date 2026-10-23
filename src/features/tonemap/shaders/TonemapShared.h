@@ -5,7 +5,8 @@
 #include "air/renderer/shader/HlslCompat.h"
 
 #ifdef __cplusplus
-namespace air::tonemap::gpu {
+namespace air::tonemap::gpu
+{
 using namespace air::hlsl;
 #endif
 
@@ -18,7 +19,8 @@ AIR_CONST uint kFlagDisplayInput = 1u;     // input is already display-referred 
 AIR_CONST uint kFlagHighlightInvalid = 2u; // NaN / Inf -> magenta, negative -> cyan
 AIR_CONST uint kFlagEncodeSrgb = 4u;       // apply the sRGB transfer function
 
-struct TonemapConstants {
+struct TonemapConstants
+{
     uint image; // RWTexture2D<float4>, tonemapped in place
     uint width;
     uint height;

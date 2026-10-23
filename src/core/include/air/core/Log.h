@@ -4,9 +4,17 @@
 #include <functional>
 #include <string_view>
 
-namespace air {
+namespace air
+{
 
-enum class LogLevel { Trace, Info, Warning, Error, Fatal };
+enum class LogLevel
+{
+    Trace,
+    Info,
+    Warning,
+    Error,
+    Fatal
+};
 
 // Thread-safe: lines from different threads never interleave.
 void LogMessage(LogLevel level, std::string_view category, std::string_view message);

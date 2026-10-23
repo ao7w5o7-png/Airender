@@ -4,12 +4,15 @@
 
 #include <cstring>
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv)
+{
     air::SetMinLogLevel(air::LogLevel::Warning);
     const char* filter = argc > 1 ? argv[1] : nullptr;
     int ran = 0, failedTests = 0;
-    for (const auto& test : airtest::Registry()) {
-        if (filter && !std::strstr(test.name, filter)) {
+    for (const auto& test : airtest::Registry())
+    {
+        if (filter && !std::strstr(test.name, filter))
+        {
             continue;
         }
         const int before = airtest::FailureCount();

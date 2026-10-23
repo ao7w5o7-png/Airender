@@ -8,9 +8,11 @@ using namespace air;
 using namespace air::rhi;
 using namespace air::rdg;
 
-namespace {
+namespace
+{
 
-TextureDesc UavTexture(const char* name, u32 size = 256) {
+TextureDesc UavTexture(const char* name, u32 size = 256)
+{
     return {.format = Format::RGBA16_FLOAT,
             .width = size,
             .height = size,
@@ -18,30 +20,36 @@ TextureDesc UavTexture(const char* name, u32 size = 256) {
             .debugName = name};
 }
 
-bool Contains(const std::vector<std::string>& lines, std::string_view needle) {
+bool Contains(const std::vector<std::string>& lines, std::string_view needle)
+{
     return std::any_of(lines.begin(), lines.end(),
                        [&](const std::string& l) { return l.find(needle) != std::string::npos; });
 }
 
-bool HasValidationErrors(const std::vector<std::string>& lines) {
+bool HasValidationErrors(const std::vector<std::string>& lines)
+{
     return Contains(lines, "VALIDATION");
 }
 
-struct Fixture {
+struct Fixture
+{
     std::unique_ptr<Device> device = CreateDevice({.backend = Backend::Null});
     PipelineHandle pso = device->CreateComputePipeline({.debugName = "Test"});
     TextureHandle output = device->CreateTexture(UavTexture("Output"));
 
     Fixture() { device->SetCommandCapture(true); }
-    ~Fixture() {
+    ~Fixture()
+    {
         device->DestroyTexture(output);
         device->DestroyPipeline(pso);
         device->WaitIdle();
     }
     // A compute pass body that only dispatches.
-    auto Dispatch() const {
+    auto Dispatch() const
+    {
         PipelineHandle p = pso;
-        return [p](PassContext& ctx) {
+        return [p](PassContext& ctx)
+        {
             ctx.cmd.SetPipeline(p);
             ctx.cmd.Dispatch(1, 1, 1);
         };
@@ -50,7 +58,8 @@ struct Fixture {
 
 } // namespace
 
-TEST(RenderGraph_CullsPassesWithUnusedOutputs) {
+TEST(RenderGraph_CullsPassesWithUnusedOutputs)
+{
     Fixture f;
     RenderGraph graph(*f.device);
     TextureRef unused = graph.CreateTexture(UavTexture("Unused"));
@@ -70,7 +79,8 @@ TEST(RenderGraph_CullsPassesWithUnusedOutputs) {
     EXPECT(!HasValidationErrors(commands));
 }
 
-TEST(RenderGraph_GeneratesTransitionsAndUavBarriers) {
+TEST(RenderGraph_GeneratesTransitionsAndUavBarriers)
+{
     Fixture f;
     RenderGraph graph(*f.device);
     TextureRef temp = graph.CreateTexture(UavTexture("Temp"));
@@ -79,7 +89,8 @@ TEST(RenderGraph_GeneratesTransitionsAndUavBarriers) {
     graph.AddPass("B", PassFlags::Compute, [&](PassBuilder& b) { b.Write(temp, Access::UAVCompute); }, f.Dispatch());
     graph.AddPass(
         "C", PassFlags::Compute,
-        [&](PassBuilder& b) {
+        [&](PassBuilder& b)
+        {
             b.Read(temp, Access::SRVCompute);
             b.Write(out, Access::UAVCompute);
         },
@@ -94,7 +105,8 @@ TEST(RenderGraph_GeneratesTransitionsAndUavBarriers) {
     EXPECT(!HasValidationErrors(commands));
 }
 
-TEST(RenderGraph_AliasesNonOverlappingLifetimes) {
+TEST(RenderGraph_AliasesNonOverlappingLifetimes)
+{
     Fixture f;
     RenderGraph graph(*f.device);
     TextureRef a = graph.CreateTexture(UavTexture("A"));
@@ -104,7 +116,8 @@ TEST(RenderGraph_AliasesNonOverlappingLifetimes) {
     graph.AddPass("WriteA", PassFlags::Compute, [&](PassBuilder& p) { p.Write(a, Access::UAVCompute); }, f.Dispatch());
     graph.AddPass(
         "ReadA", PassFlags::Compute,
-        [&](PassBuilder& p) {
+        [&](PassBuilder& p)
+        {
             p.Read(a, Access::SRVCompute);
             p.Write(out, Access::UAVCompute);
         },
@@ -112,7 +125,8 @@ TEST(RenderGraph_AliasesNonOverlappingLifetimes) {
     graph.AddPass("WriteB", PassFlags::Compute, [&](PassBuilder& p) { p.Write(b, Access::UAVCompute); }, f.Dispatch());
     graph.AddPass(
         "ReadB", PassFlags::Compute,
-        [&](PassBuilder& p) {
+        [&](PassBuilder& p)
+        {
             p.Read(b, Access::SRVCompute);
             p.Write(out, Access::UAVCompute);
         },
@@ -125,7 +139,8 @@ TEST(RenderGraph_AliasesNonOverlappingLifetimes) {
     EXPECT(!HasValidationErrors(f.device->TakeCapturedCommands()));
 }
 
-TEST(RenderGraph_OverlappingLifetimesDoNotAlias) {
+TEST(RenderGraph_OverlappingLifetimesDoNotAlias)
+{
     Fixture f;
     RenderGraph graph(*f.device);
     TextureRef a = graph.CreateTexture(UavTexture("A"));
@@ -135,7 +150,8 @@ TEST(RenderGraph_OverlappingLifetimesDoNotAlias) {
     graph.AddPass("WriteB", PassFlags::Compute, [&](PassBuilder& p) { p.Write(b, Access::UAVCompute); }, f.Dispatch());
     graph.AddPass(
         "Combine", PassFlags::Compute,
-        [&](PassBuilder& p) {
+        [&](PassBuilder& p)
+        {
             p.Read(a, Access::SRVCompute);
             p.Read(b, Access::SRVCompute);
             p.Write(out, Access::UAVCompute);
@@ -145,21 +161,27 @@ TEST(RenderGraph_OverlappingLifetimesDoNotAlias) {
     EXPECT(graph.GetStats().transientHeapSize == graph.GetStats().transientBytesUnaliased);
 }
 
-TEST(RenderGraph_ParallelRecordingMatchesSerial) {
-    auto run = [](bool parallel) {
+TEST(RenderGraph_ParallelRecordingMatchesSerial)
+{
+    auto run = [](bool parallel)
+    {
         Fixture f;
         TaskSystem tasks(4);
         RenderGraph graph(*f.device, &tasks, {.parallelRecording = parallel, .passesPerCommandList = 2});
         TextureRef out = graph.ImportTexture(f.output, Access::None, Access::SRVCompute);
         std::vector<TextureRef> chain;
-        for (int i = 0; i < 16; ++i) {
+        for (int i = 0; i < 16; ++i)
+        {
             chain.push_back(graph.CreateTexture(UavTexture(("T" + std::to_string(i)).c_str(), 64)));
         }
-        for (int i = 0; i < 16; ++i) {
+        for (int i = 0; i < 16; ++i)
+        {
             graph.AddPass(
                 "Step" + std::to_string(i), PassFlags::Compute,
-                [&, i](PassBuilder& b) {
-                    if (i > 0) {
+                [&, i](PassBuilder& b)
+                {
+                    if (i > 0)
+                    {
                         b.Read(chain[i - 1], Access::SRVCompute);
                     }
                     b.Write(i == 15 ? out : chain[i], Access::UAVCompute);
@@ -176,7 +198,8 @@ TEST(RenderGraph_ParallelRecordingMatchesSerial) {
     EXPECT(!HasValidationErrors(parallel));
 }
 
-TEST(RenderGraph_ExtractedTextureOutlivesGraph) {
+TEST(RenderGraph_ExtractedTextureOutlivesGraph)
+{
     Fixture f;
     TextureHandle history;
     {
@@ -195,7 +218,8 @@ TEST(RenderGraph_ExtractedTextureOutlivesGraph) {
     f.device->DestroyTexture(history);
 }
 
-TEST(RenderGraph_TransientMemoryIsReleased) {
+TEST(RenderGraph_TransientMemoryIsReleased)
+{
     Fixture f;
     {
         RenderGraph graph(*f.device);
@@ -204,7 +228,8 @@ TEST(RenderGraph_TransientMemoryIsReleased) {
         graph.AddPass("A", PassFlags::Compute, [&](PassBuilder& b) { b.Write(t, Access::UAVCompute); }, f.Dispatch());
         graph.AddPass(
             "B", PassFlags::Compute,
-            [&](PassBuilder& b) {
+            [&](PassBuilder& b)
+            {
                 b.Read(t, Access::SRVCompute);
                 b.Write(out, Access::UAVCompute);
             },

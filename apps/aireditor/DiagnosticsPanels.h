@@ -13,9 +13,11 @@
 #include <string>
 #include <vector>
 
-namespace air::editor {
+namespace air::editor
+{
 
-class DiagnosticsPanels {
+class DiagnosticsPanels
+{
 public:
     // Feeds one finished frame. `wallMs` is the time between two presented frames.
     void Update(const renderer::FrameResult& frame, double wallMs, u32 samplesThisFrame);
@@ -28,7 +30,8 @@ public:
     float GetSamplesPerSecond() const { return mSamplesPerSecond.Last(); }
 
 private:
-    struct ScopeStats {
+    struct ScopeStats
+    {
         double lastMs = 0.0;
         double averageMs = 0.0; // exponential moving average
         double maxMs = 0.0;     // over the last few seconds

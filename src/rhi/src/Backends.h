@@ -2,7 +2,8 @@
 
 #include "air/rhi/RHIDevice.h"
 
-namespace air::rhi {
+namespace air::rhi
+{
 
 std::unique_ptr<Device> CreateNullDevice(const DeviceDesc& desc);
 #if AIR_RHI_D3D12

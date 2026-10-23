@@ -26,9 +26,11 @@
 #include <string>
 #include <vector>
 
-namespace air::editor {
+namespace air::editor
+{
 
-struct EditorOptions {
+struct EditorOptions
+{
     std::filesystem::path shaderRoot = AIR_DEFAULT_SHADER_DIR;
     std::string scene = "cornell_box";
     std::vector<std::string> features = {"pathtracer", "tonemap"}; // "dlss" is inserted when available
@@ -36,12 +38,14 @@ struct EditorOptions {
     u32 height = 720;
 };
 
-struct LogLine {
+struct LogLine
+{
     LogLevel level = LogLevel::Info;
     std::string text;
 };
 
-class EditorApp {
+class EditorApp
+{
 public:
     EditorApp(rhi::Device& device, TaskSystem& tasks, EditorOptions options);
     ~EditorApp();

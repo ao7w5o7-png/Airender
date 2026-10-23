@@ -8,20 +8,23 @@
 #include "air/renderer/shader/HlslCompat.h"
 
 #ifdef __cplusplus
-namespace air::gpu {
+namespace air::gpu
+{
 using namespace air::hlsl;
 #endif
 
 AIR_CONST uint kInvalidIndex = 0xFFFFFFFFu;
 
-struct Vertex {
+struct Vertex
+{
     float3 position; // object space
     float u;
     float3 normal; // object space, normalized
     float v;
 };
 
-struct MaterialData {
+struct MaterialData
+{
     float3 baseColor; // linear albedo (dielectric) or F0 (metal)
     float roughness;  // perceptual
     float3 emission;  // emitted radiance, nits
@@ -29,7 +32,8 @@ struct MaterialData {
 };
 
 // One TLAS instance. InstanceID() indexes this array.
-struct InstanceData {
+struct InstanceData
+{
     uint vertexBuffer; // bindless StructuredBuffer<Vertex>
     uint indexBuffer;  // bindless StructuredBuffer<uint>
     uint materialIndex;
@@ -44,7 +48,8 @@ struct InstanceData {
 };
 
 // An emissive triangle in world space, chosen for next event estimation proportionally to power.
-struct LightTriangle {
+struct LightTriangle
+{
     float3 p0;
     float area;
     float3 e1;         // p1 - p0; the emitting side is cross(e1, e2)

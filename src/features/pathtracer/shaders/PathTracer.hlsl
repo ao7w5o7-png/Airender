@@ -8,7 +8,8 @@
 
 [[vk::push_constant]] ConstantBuffer<TraceConstants> g : register(b0);
 
-struct Payload {
+struct Payload
+{
     float t; // < 0: miss
     uint instance;
     uint primitive;
@@ -17,37 +18,44 @@ struct Payload {
 
 // --- Integrator hooks ----------------------------------------------------------------------------
 
-float BsdfLutLoad(uint index) {
+float BsdfLutLoad(uint index)
+{
     StructuredBuffer<float> lut = ResourceDescriptorHeap[g.bsdfLut];
     return lut[index];
 }
 
-InstanceData LoadInstance(uint instance) {
+InstanceData LoadInstance(uint instance)
+{
     StructuredBuffer<InstanceData> instances = ResourceDescriptorHeap[g.instances];
     return instances[instance];
 }
 
-uint LoadIndex(InstanceData instance, uint index) {
+uint LoadIndex(InstanceData instance, uint index)
+{
     StructuredBuffer<uint> indices = ResourceDescriptorHeap[NonUniformResourceIndex(instance.indexBuffer)];
     return indices[index];
 }
 
-Vertex LoadVertex(InstanceData instance, uint index) {
+Vertex LoadVertex(InstanceData instance, uint index)
+{
     StructuredBuffer<Vertex> vertices = ResourceDescriptorHeap[NonUniformResourceIndex(instance.vertexBuffer)];
     return vertices[index];
 }
 
-MaterialData LoadMaterial(uint material) {
+MaterialData LoadMaterial(uint material)
+{
     StructuredBuffer<MaterialData> materials = ResourceDescriptorHeap[g.materials];
     return materials[material];
 }
 
-LightTriangle LoadLight(uint light) {
+LightTriangle LoadLight(uint light)
+{
     StructuredBuffer<LightTriangle> lights = ResourceDescriptorHeap[g.lights];
     return lights[light];
 }
 
-HitInfo TraceClosest(float3 origin, float3 direction) {
+HitInfo TraceClosest(float3 origin, float3 direction)
+{
     RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
     RayDesc ray;
     ray.Origin = origin;
@@ -69,7 +77,8 @@ HitInfo TraceClosest(float3 origin, float3 direction) {
     return hit;
 }
 
-bool TraceVisible(float3 origin, float3 direction, float tMax) {
+bool TraceVisible(float3 origin, float3 direction, float tMax)
+{
     RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
     RayDesc ray;
     ray.Origin = origin;
@@ -87,7 +96,8 @@ bool TraceVisible(float3 origin, float3 direction, float tMax) {
 // --- Debug helpers -------------------------------------------------------------------------------
 
 // Every triangle the ray crosses, not just the closest: shows where geometry piles up.
-uint CountIntersections(float3 origin, float3 direction) {
+uint CountIntersections(float3 origin, float3 direction)
+{
     RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
     RayDesc ray;
     ray.Origin = origin;
@@ -97,16 +107,20 @@ uint CountIntersections(float3 origin, float3 direction) {
     RayQuery<RAY_FLAG_FORCE_NON_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
     uint count = 0;
-    while (query.Proceed()) {
-        if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+    while (query.Proceed())
+    {
+        if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+        {
             ++count; // never committed, so traversal visits every intersection
         }
     }
     return count;
 }
 
-float3 DebugValue(uint view, PathSample s, float intersections, FrameData f) {
-    switch (view) {
+float3 DebugValue(uint view, PathSample s, float intersections, FrameData f)
+{
+    switch (view)
+    {
     case kDebugNormals: return s.hit ? s.normal * 0.5f + 0.5f : float3(0.0f, 0.0f, 0.0f);
     case kDebugBaseColor: return s.material.baseColor;
     case kDebugRoughness: return s.material.roughness;
@@ -123,7 +137,8 @@ float3 DebugValue(uint view, PathSample s, float intersections, FrameData f) {
 // --- Shaders -------------------------------------------------------------------------------------
 
 [shader("raygeneration")]
-void RayGen() {
+void RayGen()
+{
     uint2 pixel = DispatchRaysIndex().xy;
     StructuredBuffer<FrameData> frames = ResourceDescriptorHeap[g.frameData];
     FrameData f = frames[g.frameSlot];
@@ -139,17 +154,20 @@ void RayGen() {
     float3 sum = 0.0f;
     PathSample first = (PathSample)0;
     float2 firstPixel = float2(pixel) + 0.5f;
-    for (uint i = 0; i < f.samplesPerPixel; ++i) {
+    for (uint i = 0; i < f.samplesPerPixel; ++i)
+    {
         float2 jitter = (f.flags & kFlagGlobalJitter) != 0u ? f.jitter + 0.5f : float2(Rand(seed), Rand(seed));
         float2 pixelPos = float2(pixel) + jitter;
         float3 direction = CameraRayDirection(f.camera, pixelPos, size);
         PathSample s = TracePath(f.camera.position.xyz, direction, params, seed);
         float intersections = 0.0f;
-        if (f.debugView == kDebugIntersections) {
+        if (f.debugView == kDebugIntersections)
+        {
             intersections = float(CountIntersections(f.camera.position.xyz, direction));
         }
         sum += f.debugView == kDebugNone ? s.radiance : DebugValue(f.debugView, s, intersections, f);
-        if (i == 0) {
+        if (i == 0)
+        {
             first = s;
             firstPixel = pixelPos;
         }
@@ -159,7 +177,8 @@ void RayGen() {
     float4 previous = (f.flags & kFlagReset) != 0u ? float4(0.0f, 0.0f, 0.0f, 0.0f) : accumulation[pixel];
     accumulation[pixel] = previous + float4(sum, float(f.samplesPerPixel));
 
-    if ((f.flags & kFlagGuides) != 0u) {
+    if ((f.flags & kFlagGuides) != 0u)
+    {
         RWTexture2D<float4> diffuseAlbedo = ResourceDescriptorHeap[g.diffuseAlbedo];
         RWTexture2D<float4> specularAlbedo = ResourceDescriptorHeap[g.specularAlbedo];
         RWTexture2D<float4> normalRoughness = ResourceDescriptorHeap[g.normalRoughness];
@@ -178,12 +197,14 @@ void RayGen() {
 }
 
 [shader("miss")]
-void Miss(inout Payload payload) {
+void Miss(inout Payload payload)
+{
     payload.t = -1.0f;
 }
 
 [shader("closesthit")]
-void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes attributes) {
+void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes attributes)
+{
     payload.t = RayTCurrent();
     payload.instance = InstanceID();
     payload.primitive = PrimitiveIndex();

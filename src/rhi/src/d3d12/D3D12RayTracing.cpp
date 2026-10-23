@@ -9,25 +9,31 @@
 #include <cstring>
 #include <format>
 
-namespace air::rhi::d3d12 {
+namespace air::rhi::d3d12
+{
 
-namespace {
+namespace
+{
 
-std::wstring Widen(std::string_view text) {
+std::wstring Widen(std::string_view text)
+{
     return std::wstring(text.begin(), text.end()); // entry point names are ASCII
 }
 
-D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS BuildFlags(bool allowUpdate, bool fastTrace) {
+D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS BuildFlags(bool allowUpdate, bool fastTrace)
+{
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags =
         fastTrace ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE
                   : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD;
-    if (allowUpdate) {
+    if (allowUpdate)
+    {
         flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
     }
     return flags;
 }
 
-ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device5* device, u64 size, std::string_view name) {
+ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device5* device, u64 size, std::string_view name)
+{
     D3D12_HEAP_PROPERTIES heap = {D3D12_HEAP_TYPE_UPLOAD};
     D3D12_RESOURCE_DESC desc = {};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
@@ -51,10 +57,12 @@ ComPtr<ID3D12Resource> CreateUploadBuffer(ID3D12Device5* device, u64 size, std::
 // Acceleration structures
 // ---------------------------------------------------------------------------
 
-AccelStructHandle D3D12Device::CreateBlas(const BlasDesc& desc) {
+AccelStructHandle D3D12Device::CreateBlas(const BlasDesc& desc)
+{
     D3D12AccelStruct as;
     as.blas = desc;
-    for (const RayTracingGeometryTriangles& g : desc.geometries) {
+    for (const RayTracingGeometryTriangles& g : desc.geometries)
+    {
         D3D12Buffer* vertices = mBuffers.Get(g.vertexBuffer);
         D3D12Buffer* indices = mBuffers.Get(g.indexBuffer);
         AIR_CHECK(vertices, "BLAS '{}': invalid vertex buffer", desc.debugName);
@@ -65,7 +73,8 @@ AccelStructHandle D3D12Device::CreateBlas(const BlasDesc& desc) {
         geometry.Triangles.VertexBuffer.StrideInBytes = g.vertexStride;
         geometry.Triangles.VertexCount = g.vertexCount;
         geometry.Triangles.VertexFormat = ToDxgi(g.vertexFormat);
-        if (indices) {
+        if (indices)
+        {
             geometry.Triangles.IndexBuffer = indices->address + g.indexOffset;
             geometry.Triangles.IndexCount = g.indexCount;
             geometry.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
@@ -89,7 +98,8 @@ AccelStructHandle D3D12Device::CreateBlas(const BlasDesc& desc) {
     const AllocationInfo info = GetBufferAllocationInfo(storage);
     auto allocation = mAllocator->Allocate({u32(MemoryLocation::DeviceLocal) * 4 + u32(HeapCategory::Buffer),
                                             MemoryLocation::DeviceLocal, info.size, info.alignment});
-    if (!allocation) {
+    if (!allocation)
+    {
         AIR_LOG(Error, "D3D12", "out of video memory for BLAS '{}'", desc.debugName);
         return {};
     }
@@ -103,7 +113,8 @@ AccelStructHandle D3D12Device::CreateBlas(const BlasDesc& desc) {
     return mAccelStructs.Allocate(std::move(as));
 }
 
-AccelStructHandle D3D12Device::CreateTlas(const TlasDesc& desc) {
+AccelStructHandle D3D12Device::CreateTlas(const TlasDesc& desc)
+{
     AIR_CHECK(desc.maxInstances > 0, "TLAS '{}' needs maxInstances > 0", desc.debugName);
     D3D12AccelStruct as;
     as.isTlas = true;
@@ -124,7 +135,8 @@ AccelStructHandle D3D12Device::CreateTlas(const TlasDesc& desc) {
     const AllocationInfo info = GetBufferAllocationInfo(storage);
     auto allocation = mAllocator->Allocate({u32(MemoryLocation::DeviceLocal) * 4 + u32(HeapCategory::Buffer),
                                             MemoryLocation::DeviceLocal, info.size, info.alignment});
-    if (!allocation) {
+    if (!allocation)
+    {
         AIR_LOG(Error, "D3D12", "out of video memory for TLAS '{}'", desc.debugName);
         return {};
     }
@@ -147,29 +159,35 @@ AccelStructHandle D3D12Device::CreateTlas(const TlasDesc& desc) {
     return mAccelStructs.Allocate(std::move(as));
 }
 
-void D3D12Device::DestroyAccelStruct(AccelStructHandle handle) {
-    DeferDelete([this, handle] {
-        D3D12AccelStruct* as = mAccelStructs.Get(handle);
-        AIR_CHECK(as, "DestroyAccelStruct on stale handle");
-        ReleaseDescriptor(as->srv);
-        as->resource.Reset();
-        as->instanceRing.Reset();
-        mAllocator->Free(as->allocation);
-        mAccelStructs.Free(handle);
-    });
+void D3D12Device::DestroyAccelStruct(AccelStructHandle handle)
+{
+    DeferDelete(
+        [this, handle]
+        {
+            D3D12AccelStruct* as = mAccelStructs.Get(handle);
+            AIR_CHECK(as, "DestroyAccelStruct on stale handle");
+            ReleaseDescriptor(as->srv);
+            as->resource.Reset();
+            as->instanceRing.Reset();
+            mAllocator->Free(as->allocation);
+            mAccelStructs.Free(handle);
+        });
 }
 
-u64 D3D12Device::GetAccelStructScratchSize(AccelStructHandle handle) {
+u64 D3D12Device::GetAccelStructScratchSize(AccelStructHandle handle)
+{
     D3D12AccelStruct* as = mAccelStructs.Get(handle);
     AIR_CHECK(as, "GetAccelStructScratchSize: invalid handle");
     return as->scratchSize;
 }
 
-BindlessIndex D3D12Device::GetBindlessSRV(AccelStructHandle handle) {
+BindlessIndex D3D12Device::GetBindlessSRV(AccelStructHandle handle)
+{
     D3D12AccelStruct* as = mAccelStructs.Get(handle);
     AIR_CHECK(as && as->isTlas, "GetBindlessSRV: invalid TLAS");
     std::lock_guard lock(mViewMutex);
-    if (as->srv == kInvalidBindless) {
+    if (as->srv == kInvalidBindless)
+    {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv = {};
         srv.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -180,7 +198,8 @@ BindlessIndex D3D12Device::GetBindlessSRV(AccelStructHandle handle) {
     return as->srv;
 }
 
-void D3D12CommandList::BuildBlas(AccelStructHandle handle, BufferHandle scratchHandle) {
+void D3D12CommandList::BuildBlas(AccelStructHandle handle, BufferHandle scratchHandle)
+{
     D3D12AccelStruct* as = mDevice.AccelStruct(handle);
     D3D12Buffer* scratch = mDevice.Buffer(scratchHandle);
     AIR_CHECK(as && !as->isTlas, "BuildBlas: invalid BLAS");
@@ -207,7 +226,8 @@ void D3D12CommandList::BuildBlas(AccelStructHandle handle, BufferHandle scratchH
 }
 
 void D3D12CommandList::BuildTlas(AccelStructHandle handle, std::span<const TlasInstance> instances,
-                                 BufferHandle scratchHandle) {
+                                 BufferHandle scratchHandle)
+{
     D3D12AccelStruct* as = mDevice.AccelStruct(handle);
     D3D12Buffer* scratch = mDevice.Buffer(scratchHandle);
     AIR_CHECK(as && as->isTlas, "BuildTlas: invalid TLAS");
@@ -219,7 +239,8 @@ void D3D12CommandList::BuildTlas(AccelStructHandle handle, std::span<const TlasI
     const u64 slotSize = AlignUp(u64(as->tlas.maxInstances) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC), 256);
     const u32 slot = std::atomic_ref<u32>(as->nextSlot).fetch_add(1) % as->ringSlots;
     auto* descs = reinterpret_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(as->instanceMapped + slot * slotSize);
-    for (size_t i = 0; i < instances.size(); ++i) {
+    for (size_t i = 0; i < instances.size(); ++i)
+    {
         const TlasInstance& in = instances[i];
         D3D12AccelStruct* blas = mDevice.AccelStruct(in.blas);
         AIR_CHECK(blas && !blas->isTlas, "TLAS '{}': instance {} has an invalid BLAS", as->tlas.debugName, i);
@@ -255,8 +276,10 @@ void D3D12CommandList::BuildTlas(AccelStructHandle handle, std::span<const TlasI
 // Pipelines
 // ---------------------------------------------------------------------------
 
-PipelineHandle D3D12Device::CreateComputePipeline(const ComputePipelineDesc& desc) {
-    if (desc.shader.bytecode.empty()) {
+PipelineHandle D3D12Device::CreateComputePipeline(const ComputePipelineDesc& desc)
+{
+    if (desc.shader.bytecode.empty())
+    {
         AIR_LOG(Error, "D3D12", "compute pipeline '{}': no shader bytecode (was the shader compiled?)", desc.debugName);
         return {};
     }
@@ -268,7 +291,8 @@ PipelineHandle D3D12Device::CreateComputePipeline(const ComputePipelineDesc& des
     D3D12Pipeline pipeline;
     pipeline.name = desc.debugName;
     const HRESULT hr = mDevice->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pipeline.pso));
-    if (FAILED(hr)) {
+    if (FAILED(hr))
+    {
         AIR_LOG(Error, "D3D12", "compute pipeline '{}': CreateComputePipelineState failed: {}", desc.debugName,
                 HResultToString(hr));
         return {};
@@ -277,12 +301,15 @@ PipelineHandle D3D12Device::CreateComputePipeline(const ComputePipelineDesc& des
     return mPipelines.Allocate(std::move(pipeline));
 }
 
-PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDesc& desc) {
-    if (!mCaps.rayTracing) {
+PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDesc& desc)
+{
+    if (!mCaps.rayTracing)
+    {
         AIR_LOG(Error, "D3D12", "ray tracing pipeline '{}': device has no DXR 1.1", desc.debugName);
         return {};
     }
-    if (desc.library.bytecode.empty()) {
+    if (desc.library.bytecode.empty())
+    {
         AIR_LOG(Error, "D3D12", "ray tracing pipeline '{}': no library bytecode (was the shader compiled?)",
                 desc.debugName);
         return {};
@@ -291,8 +318,10 @@ PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDes
     // Wide strings must outlive CreateStateObject.
     std::vector<std::wstring> names;
     names.reserve(desc.hitGroups.size() * 3 + desc.missShaders.size() + 1);
-    auto keep = [&](std::string_view s) -> LPCWSTR {
-        if (s.empty()) {
+    auto keep = [&](std::string_view s) -> LPCWSTR
+    {
+        if (s.empty())
+        {
             return nullptr;
         }
         names.push_back(Widen(s));
@@ -307,7 +336,8 @@ PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDes
     subobjects.push_back({D3D12_STATE_SUBOBJECT_TYPE_DXIL_LIBRARY, &library}); // exports everything
 
     std::vector<D3D12_HIT_GROUP_DESC> hitGroups(desc.hitGroups.size());
-    for (size_t i = 0; i < desc.hitGroups.size(); ++i) {
+    for (size_t i = 0; i < desc.hitGroups.size(); ++i)
+    {
         hitGroups[i].HitGroupExport = keep(desc.hitGroups[i].name);
         hitGroups[i].Type = D3D12_HIT_GROUP_TYPE_TRIANGLES;
         hitGroups[i].ClosestHitShaderImport = keep(desc.hitGroups[i].closestHit);
@@ -333,7 +363,8 @@ PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDes
     pipeline.rayTracing = true;
     pipeline.name = desc.debugName;
     const HRESULT hr = mDevice->CreateStateObject(&stateDesc, IID_PPV_ARGS(&pipeline.stateObject));
-    if (FAILED(hr)) {
+    if (FAILED(hr))
+    {
         AIR_LOG(Error, "D3D12",
                 "ray tracing pipeline '{}': CreateStateObject failed: {} (the debug layer log has "
                 "the details)",
@@ -344,7 +375,8 @@ PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDes
 
     ComPtr<ID3D12StateObjectProperties> properties;
     AIR_D3D12_CHECK(pipeline.stateObject.As(&properties));
-    auto identifier = [&](std::string_view name) -> const void* {
+    auto identifier = [&](std::string_view name) -> const void*
+    {
         const std::wstring wide = Widen(name);
         const void* id = properties->GetShaderIdentifier(wide.c_str());
         AIR_CHECK(id, "ray tracing pipeline '{}': no export named '{}'", desc.debugName, name);
@@ -365,10 +397,12 @@ PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDes
     const D3D12_RANGE noRead = {0, 0};
     AIR_D3D12_CHECK(pipeline.shaderTable->Map(0, &noRead, reinterpret_cast<void**>(&table)));
     std::memcpy(table + rayGenOffset, identifier(desc.rayGen), kRecord);
-    for (size_t i = 0; i < desc.missShaders.size(); ++i) {
+    for (size_t i = 0; i < desc.missShaders.size(); ++i)
+    {
         std::memcpy(table + missOffset + i * kRecord, identifier(desc.missShaders[i]), kRecord);
     }
-    for (size_t i = 0; i < desc.hitGroups.size(); ++i) {
+    for (size_t i = 0; i < desc.hitGroups.size(); ++i)
+    {
         std::memcpy(table + hitOffset + i * kRecord, identifier(desc.hitGroups[i].name), kRecord);
     }
     pipeline.shaderTable->Unmap(0, nullptr);
@@ -380,7 +414,8 @@ PipelineHandle D3D12Device::CreateRayTracingPipeline(const RayTracingPipelineDes
     return mPipelines.Allocate(std::move(pipeline));
 }
 
-void D3D12Device::DestroyPipeline(PipelineHandle handle) {
+void D3D12Device::DestroyPipeline(PipelineHandle handle)
+{
     DeferDelete([this, handle] { mPipelines.Free(handle); });
 }
 

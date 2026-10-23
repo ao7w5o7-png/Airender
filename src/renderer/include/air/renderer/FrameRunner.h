@@ -14,9 +14,11 @@
 #include <string>
 #include <vector>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
-struct FrameRunnerDesc {
+struct FrameRunnerDesc
+{
     u32 width = 1280;
     u32 height = 720;
     rhi::Format outputFormat = rhi::Format::RGBA16_FLOAT;
@@ -29,7 +31,8 @@ struct FrameRunnerDesc {
     bool profile = false;
 };
 
-struct FrameResult {
+struct FrameResult
+{
     u64 frameIndex = 0;
     rdg::RenderGraph::Stats graphStats;
     double cpuMilliseconds = 0.0;
@@ -46,7 +49,8 @@ struct FrameResult {
     json::Value ToJson() const;
 };
 
-class FrameRunner {
+class FrameRunner
+{
 public:
     FrameRunner(rhi::Device& device, TaskSystem& tasks, FrameRunnerDesc desc);
     ~FrameRunner();
@@ -71,7 +75,8 @@ public:
     json::Value DescribeFeatures() const;
 
 private:
-    struct Entry {
+    struct Entry
+    {
         std::string name;
         std::unique_ptr<RenderFeature> feature;
     };

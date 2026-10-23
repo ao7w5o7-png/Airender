@@ -10,11 +10,13 @@
 
 using namespace air;
 
-TEST(TaskSystem_ChainRunsInDependencyOrder) {
+TEST(TaskSystem_ChainRunsInDependencyOrder)
+{
     TaskSystem tasks(4);
     std::mutex mutex;
     std::vector<int> order;
-    auto push = [&](int v) {
+    auto push = [&](int v)
+    {
         std::lock_guard lock(mutex);
         order.push_back(v);
     };
@@ -25,7 +27,8 @@ TEST(TaskSystem_ChainRunsInDependencyOrder) {
     EXPECT((order == std::vector<int>{1, 2, 3}));
 }
 
-TEST(TaskSystem_DiamondWaitsForAllPrerequisites) {
+TEST(TaskSystem_DiamondWaitsForAllPrerequisites)
+{
     TaskSystem tasks(4);
     std::atomic<int> done{0};
     std::atomic<bool> sawBoth{false};
@@ -38,33 +41,39 @@ TEST(TaskSystem_DiamondWaitsForAllPrerequisites) {
     EXPECT(sawBoth.load());
 }
 
-TEST(TaskSystem_ManyTasksAndWhenAll) {
+TEST(TaskSystem_ManyTasksAndWhenAll)
+{
     TaskSystem tasks(0);
     std::atomic<int> counter{0};
     std::vector<TaskHandle> handles;
-    for (int i = 0; i < 5000; ++i) {
+    for (int i = 0; i < 5000; ++i)
+    {
         handles.push_back(tasks.Launch("inc", [&] { counter.fetch_add(1, std::memory_order_relaxed); }));
     }
     tasks.WhenAll(handles).Wait();
     EXPECT(counter.load() == 5000);
 }
 
-TEST(TaskSystem_ParallelForCoversEveryIndexOnce) {
+TEST(TaskSystem_ParallelForCoversEveryIndexOnce)
+{
     TaskSystem tasks(4);
     std::vector<std::atomic<int>> hits(10007);
     tasks.ParallelFor(u32(hits.size()), [&](u32 i) { hits[i].fetch_add(1); }, 64);
     bool allOnce = true;
-    for (auto& h : hits) {
+    for (auto& h : hits)
+    {
         allOnce = allOnce && h.load() == 1;
     }
     EXPECT(allOnce);
 }
 
-TEST(TaskSystem_PipeSerialisesWithoutLocks) {
+TEST(TaskSystem_PipeSerialisesWithoutLocks)
+{
     TaskSystem tasks(4);
     Pipe pipe(tasks, "Ordered");
     std::vector<int> values; // deliberately unsynchronised: the pipe is the synchronisation
-    for (int i = 0; i < 2000; ++i) {
+    for (int i = 0; i < 2000; ++i)
+    {
         pipe.Launch("push", [&values, i] { values.push_back(i); });
     }
     pipe.WaitIdle();
@@ -73,18 +82,23 @@ TEST(TaskSystem_PipeSerialisesWithoutLocks) {
     EXPECT(values == expected);
 }
 
-TEST(TaskSystem_NestedWaitOnSingleWorkerDoesNotDeadlock) {
+TEST(TaskSystem_NestedWaitOnSingleWorkerDoesNotDeadlock)
+{
     TaskSystem tasks(1);
     std::atomic<int> result{0};
-    TaskHandle outer = tasks.Launch("outer", [&] {
-        TaskHandle inner = tasks.Launch("inner", [&] { result = 42; });
-        inner.Wait(); // the only worker is busy here; Wait() must execute 'inner' itself
-    });
+    TaskHandle outer =
+        tasks.Launch("outer",
+                     [&]
+                     {
+                         TaskHandle inner = tasks.Launch("inner", [&] { result = 42; });
+                         inner.Wait(); // the only worker is busy here; Wait() must execute 'inner' itself
+                     });
     outer.Wait();
     EXPECT(result.load() == 42);
 }
 
-TEST(TaskSystem_ExceptionDoesNotBreakDependents) {
+TEST(TaskSystem_ExceptionDoesNotBreakDependents)
+{
     TaskSystem tasks(2);
     std::atomic<bool> ran{false};
     TaskHandle bad = tasks.Launch("throws", [] { throw std::runtime_error("boom"); });

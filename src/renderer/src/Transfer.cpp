@@ -7,36 +7,47 @@
 #include <bit>
 #include <cstring>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
 using rhi::Access;
 using rhi::Barrier;
 using rhi::Format;
 
-float HalfToFloat(u16 half) {
+float HalfToFloat(u16 half)
+{
     const u32 sign = u32(half & 0x8000u) << 16;
     const u32 exponent = (half >> 10) & 0x1Fu;
     u32 mantissa = half & 0x3FFu;
     u32 bits = 0;
-    if (exponent == 0x1F) {
+    if (exponent == 0x1F)
+    {
         bits = sign | 0x7F800000u | (mantissa << 13); // inf / nan
-    } else if (exponent != 0) {
+    }
+    else if (exponent != 0)
+    {
         bits = sign | ((exponent + 112) << 23) | (mantissa << 13);
-    } else if (mantissa != 0) {
+    }
+    else if (mantissa != 0)
+    {
         // Subnormal: normalize.
         u32 e = 113;
-        while ((mantissa & 0x400u) == 0) {
+        while ((mantissa & 0x400u) == 0)
+        {
             mantissa <<= 1;
             --e;
         }
         bits = sign | (e << 23) | ((mantissa & 0x3FFu) << 13);
-    } else {
+    }
+    else
+    {
         bits = sign;
     }
     return std::bit_cast<float>(bits);
 }
 
-rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc, const void* data, u64 size) {
+rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc, const void* data, u64 size)
+{
     desc.memory = rhi::MemoryLocation::DeviceLocal;
     desc.usage |= rhi::BufferUsage::CopyDst;
     desc.size = std::max(desc.size, size);
@@ -45,7 +56,8 @@ rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc
                                                            .usage = rhi::BufferUsage::CopySrc,
                                                            .memory = rhi::MemoryLocation::Upload,
                                                            .debugName = desc.debugName + ".Staging"});
-    if (!buffer.IsValid() || !staging.IsValid()) {
+    if (!buffer.IsValid() || !staging.IsValid())
+    {
         AIR_LOG(Error, "Transfer", "out of memory creating '{}'", desc.debugName);
         return buffer;
     }
@@ -62,10 +74,12 @@ rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc
     return buffer;
 }
 
-std::optional<Image> ReadbackTexture(rhi::Device& device, rhi::TextureHandle texture, Access current) {
+std::optional<Image> ReadbackTexture(rhi::Device& device, rhi::TextureHandle texture, Access current)
+{
     const rhi::TextureDesc* desc = device.GetTextureDesc(texture);
     if (!desc || (desc->format != Format::RGBA8_UNORM && desc->format != Format::RGBA16_FLOAT &&
-                  desc->format != Format::RGBA32_FLOAT)) {
+                  desc->format != Format::RGBA32_FLOAT))
+    {
         AIR_LOG(Error, "Readback", "unsupported texture for readback");
         return std::nullopt;
     }
@@ -88,18 +102,26 @@ std::optional<Image> ReadbackTexture(rhi::Device& device, rhi::TextureHandle tex
 
     const auto* bytes = static_cast<const u8*>(device.GetMappedPointer(buffer));
     Image image(width, height);
-    for (u32 y = 0; y < height && bytes; ++y) {
+    for (u32 y = 0; y < height && bytes; ++y)
+    {
         const u8* row = bytes + size_t(y) * rowPitch;
-        for (u32 x = 0; x < width; ++x) {
+        for (u32 x = 0; x < width; ++x)
+        {
             float* out = image.At(x, y);
-            for (u32 c = 0; c < 4; ++c) {
-                if (format == Format::RGBA8_UNORM) {
+            for (u32 c = 0; c < 4; ++c)
+            {
+                if (format == Format::RGBA8_UNORM)
+                {
                     out[c] = float(row[x * 4 + c]) / 255.0f;
-                } else if (format == Format::RGBA16_FLOAT) {
+                }
+                else if (format == Format::RGBA16_FLOAT)
+                {
                     u16 half = 0;
                     std::memcpy(&half, row + (x * 4 + c) * 2, 2);
                     out[c] = HalfToFloat(half);
-                } else {
+                }
+                else
+                {
                     std::memcpy(&out[c], row + (x * 4 + c) * 4, 4);
                 }
             }

@@ -11,6 +11,18 @@ The standards are enforced by tools rather than memory: code conforms when
 | Editors | EditorConfig | `.editorconfig` |
 | Behaviour | Unit tests + golden snapshots | `tests/`, `src/features/*/tests/`, `tests/golden/` |
 
+### Layout
+
+- The opening brace of every multi-line block goes on its own line, aligned with the statement it
+  belongs to (Allman): functions, classes/structs/enums, namespaces, `if`/`else`/`for`/`while`/
+  `switch`/`case` blocks and multi-line lambda bodies. `} else {` is three lines.
+- One-line inline functions and one-line lambdas stay on one line (`bool IsValid() const { return
+  mIndex != 0; }`); braced initializers are not blocks (`Desc{.width = 8}` stays as is).
+- C++ is laid out by clang-format 18 (`BreakBeforeBraces: Allman`). clang-format cannot parse HLSL,
+  so `.hlsl`/`.hlsli` brace placement is checked and fixed by `tools/air.py format` itself, which
+  touches nothing else in shader files.
+- Never hand-format around the tools: run `python3 tools/air.py format` and commit the result.
+
 ## 1. Modules and dependencies (low coupling)
 
 ```

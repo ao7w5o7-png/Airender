@@ -23,14 +23,16 @@
 #include "Bsdf.hlsli"
 #include "Sampling.hlsli"
 
-struct IntegratorParams {
+struct IntegratorParams
+{
     float3 environment; // radiance, nits
     uint lightCount;
     uint maxBounces;
     uint flags; // kFlagFurnace, kFlagNoNee
 };
 
-struct Surface {
+struct Surface
+{
     float3 position;
     float3 geometricNormal; // unit, facing the incoming ray
     float3 shadingNormal;   // unit, same side as geometricNormal
@@ -39,7 +41,8 @@ struct Surface {
     BsdfMaterial material;
 };
 
-struct PathSample {
+struct PathSample
+{
     float3 radiance;
     float3 directRadiance; // part of `radiance` from paths with at most one bounce
     // First hit, for denoiser guides and debug views.
@@ -53,17 +56,20 @@ struct PathSample {
     uint bounces; // surfaces the path scattered at
 };
 
-float3 Xyz(float4 v) {
+float3 Xyz(float4 v)
+{
     return float3(v.x, v.y, v.z);
 }
 
-float3 TransformRow3(float4 r0, float4 r1, float4 r2, float3 p, float w) {
+float3 TransformRow3(float4 r0, float4 r1, float4 r2, float3 p, float w)
+{
     float4 h = float4(p, w);
     return float3(dot(r0, h), dot(r1, h), dot(r2, h));
 }
 
 // Offsets a ray origin off the surface along the normal of the side it leaves from.
-float3 OffsetRayOrigin(float3 p, float3 n) {
+float3 OffsetRayOrigin(float3 p, float3 n)
+{
     float scale = 1e-4f * (1.0f + MaxComponent(abs(p)));
     return p + n * scale;
 }
@@ -71,7 +77,8 @@ float3 OffsetRayOrigin(float3 p, float3 n) {
 // --- Camera --------------------------------------------------------------------------------------
 
 // Direction through pixel position `pixel` (0 .. size, y down).
-float3 CameraRayDirection(CameraData c, float2 pixel, float2 size) {
+float3 CameraRayDirection(CameraData c, float2 pixel, float2 size)
+{
     float ndcX = pixel.x / size.x * 2.0f - 1.0f;
     float ndcY = 1.0f - pixel.y / size.y * 2.0f;
     float tanHalf = c.position.w;
@@ -80,7 +87,8 @@ float3 CameraRayDirection(CameraData c, float2 pixel, float2 size) {
 }
 
 // Pixel position of a world point (or of a direction when w = 0), inverse of CameraRayDirection.
-float2 CameraProject(CameraData c, float3 p, float w, float2 size) {
+float2 CameraProject(CameraData c, float3 p, float w, float2 size)
+{
     float3 d = p - Xyz(c.position) * w;
     float z = max(dot(d, Xyz(c.forward)), 1e-6f);
     float tanHalf = c.position.w;
@@ -93,14 +101,19 @@ float2 CameraProject(CameraData c, float3 p, float w, float2 size) {
 // --- Lights --------------------------------------------------------------------------------------
 
 // Index of the light whose CDF interval contains u (skips zero-probability entries).
-uint SampleLightIndex(float u, uint count) {
+uint SampleLightIndex(float u, uint count)
+{
     uint lo = 0;
     uint hi = count - 1;
-    while (lo < hi) {
+    while (lo < hi)
+    {
         uint mid = (lo + hi) / 2;
-        if (LoadLight(mid).cdf > u) {
+        if (LoadLight(mid).cdf > u)
+        {
             hi = mid;
-        } else {
+        }
+        else
+        {
             lo = mid + 1;
         }
     }
@@ -108,13 +121,15 @@ uint SampleLightIndex(float u, uint count) {
 }
 
 // Solid angle pdf of NEE choosing the point at distance `dist` on `light`, seen under cosLight.
-float LightPdf(LightTriangle light, float dist, float cosLight) {
+float LightPdf(LightTriangle light, float dist, float cosLight)
+{
     return cosLight > 0.0f ? light.probability * dist * dist / (light.area * cosLight) : 0.0f;
 }
 
 // --- Surfaces ------------------------------------------------------------------------------------
 
-Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params) {
+Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
+{
     InstanceData instance = LoadInstance(hit.instance);
     uint i0 = LoadIndex(instance, hit.primitive * 3u);
     uint i1 = LoadIndex(instance, hit.primitive * 3u + 1u);
@@ -145,7 +160,8 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params) {
     s.material.roughness = m.roughness;
     s.material.metallic = m.metallic;
     s.emission = frontFace ? m.emission : float3(0.0f, 0.0f, 0.0f);
-    if ((params.flags & kFlagFurnace) != 0u) {
+    if ((params.flags & kFlagFurnace) != 0u)
+    {
         s.material.baseColor = float3(1.0f, 1.0f, 1.0f);
         s.emission = float3(0.0f, 0.0f, 0.0f);
     }
@@ -155,7 +171,8 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params) {
 
 // --- Path ----------------------------------------------------------------------------------------
 
-PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, AIR_INOUT(uint) seed) {
+PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, AIR_INOUT(uint) seed)
+{
     PathSample result;
     result.radiance = float3(0.0f, 0.0f, 0.0f);
     result.directRadiance = float3(0.0f, 0.0f, 0.0f);
@@ -174,19 +191,23 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     float previousBsdfPdf = 0.0f; // solid angle pdf of the BSDF sample that produced `direction`
 
-    for (uint bounce = 0u; bounce <= params.maxBounces; ++bounce) {
+    for (uint bounce = 0u; bounce <= params.maxBounces; ++bounce)
+    {
         HitInfo hit = TraceClosest(origin, direction);
         bool direct = bounce <= 1u;
-        if (!hit.hit) {
+        if (!hit.hit)
+        {
             float3 environment = throughput * params.environment;
             result.radiance += environment;
-            if (direct) {
+            if (direct)
+            {
                 result.directRadiance += environment;
             }
             break;
         }
         Surface s = LoadSurface(hit, direction, params);
-        if (bounce == 0u) {
+        if (bounce == 0u)
+        {
             result.hit = true;
             result.hitDistance = hit.t;
             result.position = s.position;
@@ -197,20 +218,24 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
 
         // Emission found by the BSDF sample, weighted against NEE having found it.
-        if (any(s.emission)) {
+        if (any(s.emission))
+        {
             float weight = 1.0f;
-            if (bounce > 0u && useNee) {
+            if (bounce > 0u && useNee)
+            {
                 LightTriangle light = LoadLight(s.lightIndex);
                 float lightPdf = LightPdf(light, hit.t, dot(-direction, s.geometricNormal));
                 weight = PowerHeuristic(previousBsdfPdf, lightPdf);
             }
             float3 emitted = throughput * s.emission * weight;
             result.radiance += emitted;
-            if (direct) {
+            if (direct)
+            {
                 result.directRadiance += emitted;
             }
         }
-        if (bounce == params.maxBounces) {
+        if (bounce == params.maxBounces)
+        {
             break;
         }
         result.bounces = bounce + 1u;
@@ -218,7 +243,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         float3 ns = s.shadingNormal;
         float3 ng = s.geometricNormal;
         float3 wo = -direction;
-        if (dot(ns, wo) <= 0.0f) {
+        if (dot(ns, wo) <= 0.0f)
+        {
             ns = ng; // the interpolated normal faces away from the viewer: fall back to the facet
         }
         Frame frame = MakeFrame(ns);
@@ -226,7 +252,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         float3 rayOrigin = OffsetRayOrigin(s.position, ng);
 
         // Next event estimation: one point on one emissive triangle.
-        if (useNee) {
+        if (useNee)
+        {
             float uLight = Rand(seed);
             float2 uPoint = float2(Rand(seed), Rand(seed));
             LightTriangle light = LoadLight(SampleLightIndex(uLight, params.lightCount));
@@ -237,14 +264,17 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             float3 wi = toLight / dist;
             float3 lightNormal = normalize(cross(light.e1, light.e2));
             float cosLight = dot(-wi, lightNormal);
-            if (cosLight > 0.0f && dot(wi, ng) > 0.0f) {
+            if (cosLight > 0.0f && dot(wi, ng) > 0.0f)
+            {
                 BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
                 float lightPdf = LightPdf(light, dist, cosLight);
-                if (any(e.fCos) && lightPdf > 0.0f && TraceVisible(rayOrigin, wi, dist * (1.0f - 1e-4f))) {
+                if (any(e.fCos) && lightPdf > 0.0f && TraceVisible(rayOrigin, wi, dist * (1.0f - 1e-4f)))
+                {
                     float weight = PowerHeuristic(lightPdf, e.pdf);
                     float3 contribution = throughput * e.fCos * light.radiance * (weight / lightPdf);
                     result.radiance += contribution;
-                    if (bounce == 0u) {
+                    if (bounce == 0u)
+                    {
                         result.directRadiance += contribution;
                     }
                 }
@@ -255,11 +285,13 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         float uLobe = Rand(seed);
         float2 u = float2(Rand(seed), Rand(seed));
         BsdfSample bs = SampleBsdf(s.material, woLocal, uLobe, u);
-        if (!bs.valid) {
+        if (!bs.valid)
+        {
             break;
         }
         float3 wiWorld = ToWorld(frame, bs.wi);
-        if (dot(wiWorld, ng) <= 0.0f) {
+        if (dot(wiWorld, ng) <= 0.0f)
+        {
             break; // shading normal sent the ray into the surface
         }
         throughput *= bs.weight;
@@ -267,9 +299,11 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         origin = rayOrigin;
         direction = wiWorld;
 
-        if (bounce >= 3u) {
+        if (bounce >= 3u)
+        {
             float survive = min(MaxComponent(throughput), 0.95f);
-            if (Rand(seed) >= survive) {
+            if (Rand(seed) >= survive)
+            {
                 break;
             }
             throughput /= survive;

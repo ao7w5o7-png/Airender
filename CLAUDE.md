@@ -56,4 +56,7 @@ serialising shared mutable state through a `Pipe` over adding locks.
 ## Style
 - C++20, as defined by `.clang-format` / `.clang-tidy`: types and functions `PascalCase`, private
   members `mName`, constants `kName`.
+- Braces of multi-line blocks on their own line (Allman), in C++ and HLSL alike; one-line inline
+  functions and lambdas stay on one line. Run `python3 tools/air.py format` after editing: it runs
+  clang-format 18 on C++ and fixes HLSL brace placement (clang-format cannot parse HLSL).
 - Invariants use `AIR_CHECK` (always on, messages name the pass/resource); debug-only checks use `AIR_DCHECK`.

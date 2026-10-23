@@ -5,7 +5,8 @@
 using namespace air;
 using namespace airtest;
 
-TEST(Parameters_ParseValidateAndVersion) {
+TEST(Parameters_ParseValidateAndVersion)
+{
     renderer::ParameterSet params;
     u32 count = 1;
     float scale = 1.0f;
@@ -31,34 +32,40 @@ TEST(Parameters_ParseValidateAndVersion) {
            std::string::npos);
 }
 
-TEST(FeatureRegistry_BuiltinFeaturesAreRegistered) {
+TEST(FeatureRegistry_BuiltinFeaturesAreRegistered)
+{
     renderer::FeatureRegistry registry;
     renderer::RegisterBuiltinFeatures(registry);
     EXPECT(registry.Find("pathtracer") != nullptr);
     EXPECT(registry.Find("example") != nullptr);
     EXPECT(registry.Create("does-not-exist") == nullptr);
-    for (const auto& info : registry.List()) {
+    for (const auto& info : registry.List())
+    {
         EXPECT(!info.description.empty());
     }
 }
 
-TEST(FrameRunner_NoFeaturesStillValid) {
+TEST(FrameRunner_NoFeaturesStillValid)
+{
     Headless h({});
     auto result = h.Frame();
     EXPECT(result.validationErrors.empty());
     EXPECT(result.graphStats.passCount == 0);
 }
 
-TEST(FrameRunner_MultipleFramesKeepStateConsistent) {
+TEST(FrameRunner_MultipleFramesKeepStateConsistent)
+{
     Headless h({"pathtracer", "example"});
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 5; ++i)
+    {
         auto result = h.Frame();
         EXPECT(result.frameIndex == u64(i));
         EXPECT(result.validationErrors.empty());
     }
 }
 
-TEST(FrameRunner_ReleasesAllMemoryOnShutdown) {
+TEST(FrameRunner_ReleasesAllMemoryOnShutdown)
+{
     auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
     {
         TaskSystem tasks(2);
@@ -74,7 +81,8 @@ TEST(FrameRunner_ReleasesAllMemoryOnShutdown) {
     device->WaitIdle();
     const auto stats = device->GetMemoryStats();
     EXPECT(stats.liveBuffers == 0 && stats.liveTextures == 0);
-    for (const auto& location : stats.perLocation) {
+    for (const auto& location : stats.perLocation)
+    {
         EXPECT(location.allocationCount == 0);
     }
 }

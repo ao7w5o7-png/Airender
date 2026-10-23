@@ -11,9 +11,11 @@
 #include <variant>
 #include <vector>
 
-namespace air::json {
+namespace air::json
+{
 
-class Value {
+class Value
+{
 public:
     using Array = std::vector<Value>;
     using Object = std::map<std::string, Value>; // sorted keys keep output deterministic

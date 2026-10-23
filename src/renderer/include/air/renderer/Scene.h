@@ -16,12 +16,14 @@
 #include <string>
 #include <vector>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
 using float3 = hlsl::float3;
 
 // Pinhole camera with a physical exposure. yaw = 0, pitch = 0 looks down -z; +y is up.
-struct Camera {
+struct Camera
+{
     float3 position = {0.0f, 1.0f, 4.0f};
     float yaw = 0.0f;   // radians, around +y
     float pitch = 0.0f; // radians, positive looks up
@@ -40,7 +42,8 @@ struct Camera {
 // 1 / (1.2 * 2^EV100) (saturation-based sensitivity, Lagarde & de Rousiers 2014).
 float ExposureScale(float ev100);
 
-struct Material {
+struct Material
+{
     std::string name;
     float3 baseColor = {0.8f, 0.8f, 0.8f};
     float roughness = 0.5f;
@@ -52,20 +55,23 @@ struct Material {
     bool operator==(const Material&) const = default;
 };
 
-struct Mesh {
+struct Mesh
+{
     std::string name;
     std::vector<gpu::Vertex> vertices;
     std::vector<u32> indices; // triangle list
 };
 
-struct Instance {
+struct Instance
+{
     std::string name;
     u32 mesh = 0;
     u32 material = 0;
     float transform[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}; // row-major object-to-world
 };
 
-struct SceneDesc {
+struct SceneDesc
+{
     std::string name;
     std::vector<Mesh> meshes;
     std::vector<Material> materials;
@@ -97,7 +103,8 @@ std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, doubl
 gpu::InstanceData MakeInstanceData(const Instance& instance, u32 firstLight, u32 vertexBuffer, u32 indexBuffer);
 float3 TransformPoint(const float transform[3][4], float3 p);
 
-struct GpuScene {
+struct GpuScene
+{
     rhi::AccelStructHandle tlas;
     rhi::BufferHandle instances; // StructuredBuffer<gpu::InstanceData>, indexed by InstanceID()
     rhi::BufferHandle materials; // StructuredBuffer<gpu::MaterialData>
@@ -108,7 +115,8 @@ struct GpuScene {
     u64 version = 0; // bumped whenever anything that changes the image changes
 };
 
-class Scene {
+class Scene
+{
 public:
     // Uploads geometry, builds the acceleration structures and waits for the GPU.
     Scene(rhi::Device& device, SceneDesc desc);
@@ -132,7 +140,8 @@ private:
     void Upload();
     void WriteDynamicData();
 
-    struct GpuMesh {
+    struct GpuMesh
+    {
         rhi::BufferHandle vertices;
         rhi::BufferHandle indices;
         rhi::AccelStructHandle blas;

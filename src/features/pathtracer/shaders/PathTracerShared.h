@@ -5,7 +5,8 @@
 #include "air/renderer/shader/HlslCompat.h"
 
 #ifdef __cplusplus
-namespace air::pt::gpu {
+namespace air::pt::gpu
+{
 using namespace air::hlsl;
 #endif
 
@@ -29,7 +30,8 @@ AIR_CONST uint kFlagGuides = 8u;       // write the denoiser guide textures
 AIR_CONST uint kFlagNoNee = 16u;       // BSDF sampling only (reference for the MIS tests)
 
 // Result of TraceClosest() in the integrator (not stored in buffers).
-struct HitInfo {
+struct HitInfo
+{
     bool hit;
     float t;
     uint instance;  // InstanceID()
@@ -37,7 +39,8 @@ struct HitInfo {
     float2 barycentrics;
 };
 
-struct CameraData {
+struct CameraData
+{
     float4 position; // xyz, w = tan(verticalFov / 2)
     float4 forward;  // xyz, w = aspect (width / height)
     float4 right;
@@ -46,7 +49,8 @@ struct CameraData {
 
 // Everything a frame needs that does not fit in push constants. One element per frame in an
 // upload ring; TraceConstants::frameSlot selects it.
-struct FrameData {
+struct FrameData
+{
     CameraData camera;
     CameraData previousCamera; // for motion vectors
     float4 environment;        // rgb radiance (nits), w = exposure scale applied by Resolve
@@ -64,7 +68,8 @@ struct FrameData {
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
-struct TraceConstants {
+struct TraceConstants
+{
     uint frameData; // StructuredBuffer<FrameData>
     uint frameSlot;
     uint tlas;
@@ -83,7 +88,8 @@ struct TraceConstants {
     uint pad2;
 };
 
-struct ResolveConstants {
+struct ResolveConstants
+{
     uint frameData;
     uint frameSlot;
     uint accumulation; // Texture2D<float4>

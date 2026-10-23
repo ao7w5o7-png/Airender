@@ -5,12 +5,16 @@
 
 #include "PathTracerShared.h"
 
-namespace air::pt {
-namespace {
+namespace air::pt
+{
+namespace
+{
 
-class PathTracerFeature final : public renderer::RenderFeature {
+class PathTracerFeature final : public renderer::RenderFeature
+{
 public:
-    PathTracerFeature() {
+    PathTracerFeature()
+    {
         mParameters.Add("spp", &mSettings.samplesPerPixelPerFrame, "Samples per pixel traced each frame", 1, 4096);
         mParameters.Add("maxBounces", &mSettings.maxBounces, "Maximum path length (0 = emitters only)", 0, 64);
         mParameters.Add("targetSamples", &mSettings.targetSamples,
@@ -30,14 +34,16 @@ public:
                         "Full scale of the depth (metres) and intersection heatmap views", 1e-3f, 1e6f);
     }
 
-    bool Initialize(const renderer::FeatureInitContext& context) override {
+    bool Initialize(const renderer::FeatureInitContext& context) override
+    {
         mSettings.width = context.width;
         mSettings.height = context.height;
         mTracer = std::make_unique<PathTracer>(context.device, mSettings);
         return mTracer->Initialize(context.shaderDir);
     }
 
-    void AddPasses(renderer::FrameContext& context) override {
+    void AddPasses(renderer::FrameContext& context) override
+    {
         // Parameters write into mSettings; the tracer restarts accumulation when they change the image.
         PathTracerSettings& live = mTracer->MutableSettings();
         const u32 width = live.width;
@@ -48,7 +54,8 @@ public:
         mTracer->AddPasses(context.graph, context.scene, context.camera, context.blackboard, context.output);
     }
 
-    json::Value GetStatus() const override {
+    json::Value GetStatus() const override
+    {
         json::Value status = json::Value::MakeObject();
         status["accumulatedSamples"] = mTracer ? mTracer->GetAccumulatedSamples() : 0u;
         status["converged"] = mTracer && mTracer->IsConverged();
@@ -63,9 +70,11 @@ private:
 } // namespace
 } // namespace air::pt
 
-namespace air::features {
+namespace air::features
+{
 
-void Register_pathtracer(renderer::FeatureRegistry& registry) {
+void Register_pathtracer(renderer::FeatureRegistry& registry)
+{
     registry.Register({"pathtracer", "Progressive DXR path tracer: GGX multi-scatter BSDF, NEE + MIS, physical units",
                        [] { return std::make_unique<pt::PathTracerFeature>(); }});
 }

@@ -5,49 +5,60 @@
 #include <algorithm>
 #include <format>
 
-namespace air::editor {
+namespace air::editor
+{
 
-namespace {
+namespace
+{
 
 constexpr float kGraphHeight = 56.0f;
 constexpr double kMb = 1024.0 * 1024.0;
 
-const char* KindName(rhi::ResourceInfo::Kind kind) {
+const char* KindName(rhi::ResourceInfo::Kind kind)
+{
     return renderer::ToString(kind);
 }
 
 // Draws one bar of a timeline with a label clipped to it and a tooltip.
-void TimelineBar(ImDrawList* draw, ImVec2 min, ImVec2 max, const std::string& name, double ms) {
+void TimelineBar(ImDrawList* draw, ImVec2 min, ImVec2 max, const std::string& name, double ms)
+{
     const ImU32 color = ColorForName(name);
     draw->AddRectFilled(min, max, color, 2.0f);
     draw->AddRect(min, max, IM_COL32(0, 0, 0, 90), 2.0f);
     const std::string label = std::format("{} {}", name, FormatMs(ms));
     const ImVec2 size = ImGui::CalcTextSize(label.c_str());
-    if (size.x + 6.0f < max.x - min.x) {
+    if (size.x + 6.0f < max.x - min.x)
+    {
         draw->AddText(ImVec2(min.x + 3.0f, min.y + (max.y - min.y - size.y) * 0.5f), IM_COL32(15, 15, 15, 255),
                       label.c_str());
     }
-    if (ImGui::IsMouseHoveringRect(min, max)) {
+    if (ImGui::IsMouseHoveringRect(min, max))
+    {
         ImGui::SetTooltip("%s", label.c_str());
     }
 }
 
 } // namespace
 
-void DiagnosticsPanels::Update(const renderer::FrameResult& frame, double wallMs, u32 samplesThisFrame) {
+void DiagnosticsPanels::Update(const renderer::FrameResult& frame, double wallMs, u32 samplesThisFrame)
+{
     ++mUpdateCount;
     mWallMs.Push(float(wallMs));
     mCpuMs.Push(float(frame.cpuMilliseconds));
-    if (wallMs > 0.0) {
+    if (wallMs > 0.0)
+    {
         mSamplesPerSecond.Push(float(double(samplesThisFrame) * 1000.0 / wallMs));
     }
-    if (mPauseCapture) {
+    if (mPauseCapture)
+    {
         return;
     }
-    if (frame.gpu.frameIndex != ~0ull) {
+    if (frame.gpu.frameIndex != ~0ull)
+    {
         mLastGpu = frame.gpu;
         mGpuMs.Push(float(frame.gpu.frameMs));
-        for (const rhi::GpuTimingScope& scope : frame.gpu.scopes) {
+        for (const rhi::GpuTimingScope& scope : frame.gpu.scopes)
+        {
             ScopeStats& s = mGpuScopes[scope.name];
             s.lastMs = scope.durationMs;
             s.averageMs = s.lastSeen == 0 ? scope.durationMs : s.averageMs * 0.95 + scope.durationMs * 0.05;
@@ -64,15 +75,18 @@ void DiagnosticsPanels::Update(const renderer::FrameResult& frame, double wallMs
     mProcessMb.Push(float(double(mProcess.residentBytes) / kMb));
 }
 
-float DiagnosticsPanels::GetFps() const {
+float DiagnosticsPanels::GetFps() const
+{
     const float ms = mWallMs.Average();
     return ms > 0.0f ? 1000.0f / ms : 0.0f;
 }
 
 // --- Profiler ------------------------------------------------------------------------------------
 
-void DiagnosticsPanels::BuildProfiler(bool* open) {
-    if (!ImGui::Begin("Profiler", open)) {
+void DiagnosticsPanels::BuildProfiler(bool* open)
+{
+    if (!ImGui::Begin("Profiler", open))
+    {
         ImGui::End();
         return;
     }
@@ -85,12 +99,15 @@ void DiagnosticsPanels::BuildProfiler(bool* open) {
     PlotHistory("CPU", mCpuMs, "ms", kGraphHeight);
     PlotHistory("Samples/s", mSamplesPerSecond, "spp/s", kGraphHeight);
 
-    if (ImGui::BeginTabBar("profiler")) {
-        if (ImGui::BeginTabItem("GPU")) {
+    if (ImGui::BeginTabBar("profiler"))
+    {
+        if (ImGui::BeginTabItem("GPU"))
+        {
             BuildGpuSection();
             ImGui::EndTabItem();
         }
-        if (ImGui::BeginTabItem("CPU")) {
+        if (ImGui::BeginTabItem("CPU"))
+        {
             BuildCpuSection();
             ImGui::EndTabItem();
         }
@@ -99,8 +116,10 @@ void DiagnosticsPanels::BuildProfiler(bool* open) {
     ImGui::End();
 }
 
-void DiagnosticsPanels::BuildGpuSection() {
-    if (mLastGpu.frameIndex == ~0ull) {
+void DiagnosticsPanels::BuildGpuSection()
+{
+    if (mLastGpu.frameIndex == ~0ull)
+    {
         ImGui::TextDisabled("No GPU timings yet (the GPU reports a few frames late).");
         return;
     }
@@ -110,7 +129,8 @@ void DiagnosticsPanels::BuildGpuSection() {
     if (ImGui::BeginTable("gpuScopes", 5,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
                               ImGuiTableFlags_ScrollY,
-                          ImVec2(0.0f, 0.0f))) {
+                          ImVec2(0.0f, 0.0f)))
+    {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Last");
@@ -118,7 +138,8 @@ void DiagnosticsPanels::BuildGpuSection() {
         ImGui::TableSetupColumn("Max");
         ImGui::TableSetupColumn("Share");
         ImGui::TableHeadersRow();
-        for (const rhi::GpuTimingScope& scope : mLastGpu.scopes) {
+        for (const rhi::GpuTimingScope& scope : mLastGpu.scopes)
+        {
             const ScopeStats& s = mGpuScopes[scope.name];
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
@@ -142,9 +163,11 @@ void DiagnosticsPanels::BuildGpuSection() {
     }
 }
 
-void DiagnosticsPanels::DrawGpuTimeline(float rowHeight) {
+void DiagnosticsPanels::DrawGpuTimeline(float rowHeight)
+{
     u32 maxDepth = 0;
-    for (const auto& scope : mLastGpu.scopes) {
+    for (const auto& scope : mLastGpu.scopes)
+    {
         maxDepth = std::max(maxDepth, scope.depth);
     }
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -154,7 +177,8 @@ void DiagnosticsPanels::DrawGpuTimeline(float rowHeight) {
     ImDrawList* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height), IM_COL32(30, 30, 34, 255));
     const double scale = mLastGpu.frameMs > 0.0 ? width / mLastGpu.frameMs : 0.0;
-    for (const rhi::GpuTimingScope& scope : mLastGpu.scopes) {
+    for (const rhi::GpuTimingScope& scope : mLastGpu.scopes)
+    {
         const float x0 = origin.x + float(scope.beginMs * scale);
         const float x1 = std::max(x0 + 1.0f, origin.x + float((scope.beginMs + scope.durationMs) * scale));
         const float y0 = origin.y + float(scope.depth) * (rowHeight + 2.0f);
@@ -162,33 +186,40 @@ void DiagnosticsPanels::DrawGpuTimeline(float rowHeight) {
     }
 }
 
-void DiagnosticsPanels::BuildCpuSection() {
-    if (mLastCpu.frameIndex == ~0ull) {
+void DiagnosticsPanels::BuildCpuSection()
+{
+    if (mLastCpu.frameIndex == ~0ull)
+    {
         ImGui::TextDisabled("CPU profiler has not finished a frame yet.");
         return;
     }
     ImGui::Text("CPU frame %llu: %s on %zu threads", static_cast<unsigned long long>(mLastCpu.frameIndex),
                 FormatMs(mLastCpu.durationMs).c_str(), mLastCpu.threadNames.size());
     DrawCpuTimeline();
-    if (ImGui::TreeNodeEx("Render graph passes (recording time)", ImGuiTreeNodeFlags_DefaultOpen)) {
-        for (const auto& pass : mPassCpu) {
+    if (ImGui::TreeNodeEx("Render graph passes (recording time)", ImGuiTreeNodeFlags_DefaultOpen))
+    {
+        for (const auto& pass : mPassCpu)
+        {
             ImGui::BulletText("%s  %s", pass.name.c_str(), FormatMs(pass.cpuMs).c_str());
         }
         ImGui::TreePop();
     }
 }
 
-void DiagnosticsPanels::DrawCpuTimeline() {
+void DiagnosticsPanels::DrawCpuTimeline()
+{
     constexpr float kRow = 18.0f;
     constexpr float kLabel = 90.0f;
     std::vector<u32> depthPerThread(mLastCpu.threadNames.size(), 0);
-    for (const CpuEvent& e : mLastCpu.events) {
+    for (const CpuEvent& e : mLastCpu.events)
+    {
         depthPerThread[e.thread] = std::max(depthPerThread[e.thread], e.depth + 1);
     }
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float width = std::max(ImGui::GetContentRegionAvail().x - kLabel, 50.0f);
     float height = 0.0f;
-    for (u32 depth : depthPerThread) {
+    for (u32 depth : depthPerThread)
+    {
         height += float(std::max(depth, 1u)) * kRow + 4.0f;
     }
     ImGui::InvisibleButton("cpuTimeline", ImVec2(width + kLabel, height));
@@ -196,7 +227,8 @@ void DiagnosticsPanels::DrawCpuTimeline() {
     const double scale = mLastCpu.durationMs > 0.0 ? width / mLastCpu.durationMs : 0.0;
     float laneY = origin.y;
     std::vector<float> laneTop(mLastCpu.threadNames.size(), 0.0f);
-    for (size_t t = 0; t < mLastCpu.threadNames.size(); ++t) {
+    for (size_t t = 0; t < mLastCpu.threadNames.size(); ++t)
+    {
         const float laneHeight = float(std::max(depthPerThread[t], 1u)) * kRow;
         laneTop[t] = laneY;
         draw->AddRectFilled(ImVec2(origin.x + kLabel, laneY), ImVec2(origin.x + kLabel + width, laneY + laneHeight),
@@ -205,7 +237,8 @@ void DiagnosticsPanels::DrawCpuTimeline() {
                       mLastCpu.threadNames[t].c_str());
         laneY += laneHeight + 4.0f;
     }
-    for (const CpuEvent& e : mLastCpu.events) {
+    for (const CpuEvent& e : mLastCpu.events)
+    {
         const float x0 = origin.x + kLabel + float(e.startMs * scale);
         const float x1 = std::max(x0 + 1.0f, origin.x + kLabel + float((e.startMs + e.durationMs) * scale));
         const float y0 = laneTop[e.thread] + float(e.depth) * kRow;
@@ -215,15 +248,18 @@ void DiagnosticsPanels::DrawCpuTimeline() {
 
 // --- Memory --------------------------------------------------------------------------------------
 
-void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open) {
-    if (!ImGui::Begin("Memory", open)) {
+void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open)
+{
+    if (!ImGui::Begin("Memory", open))
+    {
         ImGui::End();
         return;
     }
     const rhi::MemoryStats& m = mMemory;
 
     ImGui::SeparatorText("Video memory (OS budget)");
-    auto budgetBar = [](const char* label, const rhi::MemoryBudget& b) {
+    auto budgetBar = [](const char* label, const rhi::MemoryBudget& b)
+    {
         const float fraction = b.budgetBytes ? float(double(b.usageBytes) / double(b.budgetBytes)) : 0.0f;
         const std::string text = std::format("{}: {} / {}", label, renderer::FormatBytes(b.usageBytes),
                                              renderer::FormatBytes(b.budgetBytes));
@@ -247,9 +283,11 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open) {
                 m.bindlessDescriptors);
 
     ImGui::SeparatorText("Allocator (by memory location)");
-    for (u32 i = 0; i < u32(rhi::MemoryLocation::Count); ++i) {
+    for (u32 i = 0; i < u32(rhi::MemoryLocation::Count); ++i)
+    {
         const auto& s = m.perLocation[i];
-        if (s.heapCount == 0 && s.allocationCount == 0) {
+        if (s.heapCount == 0 && s.allocationCount == 0)
+        {
             continue;
         }
         const float fraction = s.reservedBytes ? float(double(s.usedBytes) / double(s.reservedBytes)) : 0.0f;
@@ -258,14 +296,18 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open) {
                                              renderer::FormatBytes(s.reservedBytes), s.heapCount, s.allocationCount);
         UsageBar(fraction, text.c_str());
     }
-    if (ImGui::TreeNode("Pools and heaps")) {
-        for (const auto& pool : m.pools) {
+    if (ImGui::TreeNode("Pools and heaps"))
+    {
+        for (const auto& pool : m.pools)
+        {
             const std::string title =
                 std::format("type {} ({}): {} / {}###pool{}", pool.memoryTypeKey, rhi::ToString(pool.location),
                             renderer::FormatBytes(pool.stats.usedBytes),
                             renderer::FormatBytes(pool.stats.reservedBytes), pool.memoryTypeKey);
-            if (ImGui::TreeNode(title.c_str())) {
-                for (size_t h = 0; h < pool.heaps.size(); ++h) {
+            if (ImGui::TreeNode(title.c_str()))
+            {
+                for (size_t h = 0; h < pool.heaps.size(); ++h)
+                {
                     const auto& heap = pool.heaps[h];
                     const std::string text = std::format(
                         "heap {}{}: {} / {}, {} allocations", h, heap.dedicated ? " (dedicated)" : "",
@@ -280,7 +322,8 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open) {
 
     ImGui::SeparatorText("Resources");
     // The list walks every live object: refresh twice a second, not every frame.
-    if (mResourcesFrame == ~0ull || mUpdateCount - mResourcesFrame > 30 || ImGui::Button("Refresh")) {
+    if (mResourcesFrame == ~0ull || mUpdateCount - mResourcesFrame > 30 || ImGui::Button("Refresh"))
+    {
         mResources = device.GetResourceList();
         std::sort(mResources.begin(), mResources.end(),
                   [](const rhi::ResourceInfo& a, const rhi::ResourceInfo& b) { return a.sizeBytes > b.sizeBytes; });
@@ -290,14 +333,16 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open) {
     ImGui::SetNextItemWidth(200.0f);
     ImGui::InputTextWithHint("##filter", "filter by name", mResourceFilter, sizeof(mResourceFilter));
     u64 total = 0;
-    for (const auto& r : mResources) {
+    for (const auto& r : mResources)
+    {
         total += r.sizeBytes;
     }
     ImGui::SameLine();
     ImGui::Text("%zu resources, %s", mResources.size(), renderer::FormatBytes(total).c_str());
     if (ImGui::BeginTable("resources", 4,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable |
-                              ImGuiTableFlags_BordersInnerV)) {
+                              ImGuiTableFlags_BordersInnerV))
+    {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("Kind");
@@ -305,8 +350,10 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open) {
         ImGui::TableSetupColumn("Size");
         ImGui::TableHeadersRow();
         const std::string_view filter = mResourceFilter;
-        for (const rhi::ResourceInfo& r : mResources) {
-            if (!filter.empty() && r.name.find(filter) == std::string::npos) {
+        for (const rhi::ResourceInfo& r : mResources)
+        {
+            if (!filter.empty() && r.name.find(filter) == std::string::npos)
+            {
                 continue;
             }
             ImGui::TableNextRow();

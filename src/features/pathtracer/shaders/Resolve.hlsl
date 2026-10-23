@@ -5,13 +5,15 @@
 
 [[vk::push_constant]] ConstantBuffer<ResolveConstants> g : register(b0);
 
-float3 SrgbToLinear(float3 c) {
+float3 SrgbToLinear(float3 c)
+{
     c = saturate(c);
     return select(c <= 0.04045f, c / 12.92f, pow((c + 0.055f) / 1.055f, 2.4f));
 }
 
 // Turbo colormap (Mikhailov 2019), polynomial fit. x in [0, 1], returns sRGB-encoded color.
-float3 Turbo(float x) {
+float3 Turbo(float x)
+{
     x = saturate(x);
     const float4 kr = float4(0.13572138f, 4.61539260f, -42.66032258f, 132.13108234f);
     const float4 kg = float4(0.09140261f, 2.19418839f, 4.84296658f, -14.18503333f);
@@ -25,10 +27,12 @@ float3 Turbo(float x) {
 }
 
 [numthreads(8, 8, 1)]
-void Main(uint3 id : SV_DispatchThreadID) {
+void Main(uint3 id : SV_DispatchThreadID)
+{
     StructuredBuffer<FrameData> frames = ResourceDescriptorHeap[g.frameData];
     FrameData f = frames[g.frameSlot];
-    if (id.x >= f.width || id.y >= f.height) {
+    if (id.x >= f.width || id.y >= f.height)
+    {
         return;
     }
     Texture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
@@ -36,7 +40,8 @@ void Main(uint3 id : SV_DispatchThreadID) {
 
     float4 sum = accumulation[id.xy];
     float3 value = sum.a > 0.0f ? sum.rgb / sum.a : 0.0f;
-    switch (f.debugView) {
+    switch (f.debugView)
+    {
     case kDebugNone:
     case kDebugDirect:
     case kDebugIndirect: value *= f.environment.w; break; // exposure: radiance -> scene-linear

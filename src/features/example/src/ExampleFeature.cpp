@@ -12,27 +12,34 @@
 
 #include "ExampleShared.h"
 
-namespace air::example {
-namespace {
+namespace air::example
+{
+namespace
+{
 
 using rhi::Access;
 
-class ExampleFeature final : public renderer::RenderFeature {
+class ExampleFeature final : public renderer::RenderFeature
+{
 public:
-    ExampleFeature() {
+    ExampleFeature()
+    {
         mParameters.Add("scale", &mScale, "Spatial frequency of the pattern", 0.0f, 1000.0f);
         mParameters.Add("opacity", &mOpacity, "Blend factor over the existing output", 0.0f, 1.0f);
         mParameters.Add("animate", &mAnimate, "Advance the pattern every frame");
     }
 
-    ~ExampleFeature() override {
-        if (mDevice) {
+    ~ExampleFeature() override
+    {
+        if (mDevice)
+        {
             mDevice->DestroyPipeline(mGenerate);
             mDevice->DestroyPipeline(mComposite);
         }
     }
 
-    bool Initialize(const renderer::FeatureInitContext& context) override {
+    bool Initialize(const renderer::FeatureInitContext& context) override
+    {
         mDevice = &context.device;
         mGenerate = mDevice->CreateComputePipeline(
             {.shader = renderer::LoadShader(*mDevice, context.shaderDir, "Generate.cs", "Main"),
@@ -45,7 +52,8 @@ public:
         return mGenerate.IsValid() && mComposite.IsValid();
     }
 
-    void AddPasses(renderer::FrameContext& context) override {
+    void AddPasses(renderer::FrameContext& context) override
+    {
         rdg::RenderGraph& graph = context.graph;
         const u32 width = context.width;
         const u32 height = context.height;
@@ -69,7 +77,8 @@ public:
         graph.AddPass(
             "Example.Generate", rdg::PassFlags::Compute,
             [&](rdg::PassBuilder& b) { b.Write(pattern, Access::UAVCompute); },
-            [=](rdg::PassContext& ctx) mutable {
+            [=](rdg::PassContext& ctx) mutable
+            {
                 generate.outputUav = ctx.UAV(pattern);
                 ctx.cmd.SetPipeline(generatePipeline);
                 ctx.cmd.PushConstants(&generate, sizeof(generate));
@@ -81,11 +90,13 @@ public:
         const rdg::TextureRef output = context.output;
         graph.AddPass(
             "Example.Composite", rdg::PassFlags::Compute,
-            [&](rdg::PassBuilder& b) {
+            [&](rdg::PassBuilder& b)
+            {
                 b.Read(pattern, Access::SRVCompute);
                 b.Write(output, Access::UAVCompute);
             },
-            [=](rdg::PassContext& ctx) {
+            [=](rdg::PassContext& ctx)
+            {
                 CompositeConstants composite{};
                 composite.patternSrv = ctx.SRV(pattern);
                 composite.outputUav = ctx.UAV(output);
@@ -110,9 +121,11 @@ private:
 } // namespace
 } // namespace air::example
 
-namespace air::features {
+namespace air::features
+{
 
-void Register_example(renderer::FeatureRegistry& registry) {
+void Register_example(renderer::FeatureRegistry& registry)
+{
     registry.Register({"example", "Template feature: animated pattern composited over the output",
                        [] { return std::make_unique<example::ExampleFeature>(); }});
 }

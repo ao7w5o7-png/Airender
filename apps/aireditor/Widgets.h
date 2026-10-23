@@ -11,10 +11,12 @@
 #include <string_view>
 #include <vector>
 
-namespace air::editor {
+namespace air::editor
+{
 
 // Fixed-size history of a value for rolling graphs.
-class History {
+class History
+{
 public:
     explicit History(size_t capacity = 300) : mValues(capacity, 0.0f) {}
     void Push(float value);

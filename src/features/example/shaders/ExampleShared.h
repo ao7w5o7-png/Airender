@@ -4,14 +4,16 @@
 
 #ifdef __cplusplus
 #include "air/core/Types.h"
-namespace air::example {
+namespace air::example
+{
 using uint = air::u32;
 #define AIR_EX_ALIGN alignas(16)
 #else
 #define AIR_EX_ALIGN
 #endif
 
-struct AIR_EX_ALIGN GenerateConstants {
+struct AIR_EX_ALIGN GenerateConstants
+{
     uint outputUav; // RWTexture2D<float4>
     uint width;
     uint height;
@@ -20,7 +22,8 @@ struct AIR_EX_ALIGN GenerateConstants {
     uint pad0, pad1, pad2;
 };
 
-struct AIR_EX_ALIGN CompositeConstants {
+struct AIR_EX_ALIGN CompositeConstants
+{
     uint patternSrv; // Texture2D<float4>
     uint outputUav;  // RWTexture2D<float4>
     uint width;

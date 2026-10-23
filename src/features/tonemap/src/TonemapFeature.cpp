@@ -7,27 +7,34 @@
 
 #include "TonemapShared.h"
 
-namespace air::tonemap {
-namespace {
+namespace air::tonemap
+{
+namespace
+{
 
 using rhi::Access;
 
-class TonemapFeature final : public renderer::RenderFeature {
+class TonemapFeature final : public renderer::RenderFeature
+{
 public:
-    TonemapFeature() {
+    TonemapFeature()
+    {
         mParameters.Add("operator", &mOperator, "0 clamp, 1 ACES, 2 Khronos PBR Neutral", 0, gpu::kOperatorCount - 1);
         mParameters.Add("whitePoint", &mWhitePoint, "Input value shown as white by the clamp operator", 1e-3f, 1e6f);
         mParameters.Add("highlightInvalid", &mHighlightInvalid, "Show NaN/Inf as magenta and negative values as cyan");
         mParameters.Add("srgb", &mEncodeSrgb, "Apply the sRGB transfer function (off for linear captures)");
     }
 
-    ~TonemapFeature() override {
-        if (mDevice) {
+    ~TonemapFeature() override
+    {
+        if (mDevice)
+        {
             mDevice->DestroyPipeline(mPipeline);
         }
     }
 
-    bool Initialize(const renderer::FeatureInitContext& context) override {
+    bool Initialize(const renderer::FeatureInitContext& context) override
+    {
         mDevice = &context.device;
         mPipeline = mDevice->CreateComputePipeline(
             {.shader = renderer::LoadShader(*mDevice, context.shaderDir, "Tonemap.cs", "Main"),
@@ -36,7 +43,8 @@ public:
         return mPipeline.IsValid();
     }
 
-    void AddPasses(renderer::FrameContext& context) override {
+    void AddPasses(renderer::FrameContext& context) override
+    {
         gpu::TonemapConstants constants{};
         constants.width = context.width;
         constants.height = context.height;
@@ -49,7 +57,8 @@ public:
         const rhi::PipelineHandle pipeline = mPipeline;
         context.graph.AddPass(
             "Tonemap", rdg::PassFlags::Compute, [&](rdg::PassBuilder& b) { b.Write(output, Access::UAVCompute); },
-            [=](rdg::PassContext& ctx) mutable {
+            [=](rdg::PassContext& ctx) mutable
+            {
                 constants.image = ctx.UAV(output);
                 ctx.cmd.SetPipeline(pipeline);
                 ctx.cmd.PushConstants(&constants, sizeof(constants));
@@ -69,9 +78,11 @@ private:
 } // namespace
 } // namespace air::tonemap
 
-namespace air::features {
+namespace air::features
+{
 
-void Register_tonemap(renderer::FeatureRegistry& registry) {
+void Register_tonemap(renderer::FeatureRegistry& registry)
+{
     registry.Register({"tonemap", "Display transform (ACES / PBR Neutral / clamp + sRGB) with NaN highlighting",
                        [] { return std::make_unique<tonemap::TonemapFeature>(); }});
 }

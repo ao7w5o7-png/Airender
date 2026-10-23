@@ -27,11 +27,13 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-namespace {
+namespace
+{
 
 using namespace air;
 
-struct WindowState {
+struct WindowState
+{
     u32 width = 1600;
     u32 height = 900;
     bool resized = false;
@@ -39,25 +41,31 @@ struct WindowState {
 };
 WindowState gWindow;
 
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam)) {
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam))
+    {
         return 1;
     }
-    switch (msg) {
+    switch (msg)
+    {
     case WM_SIZE:
         gWindow.minimized = wParam == SIZE_MINIMIZED;
-        if (!gWindow.minimized) {
+        if (!gWindow.minimized)
+        {
             gWindow.width = LOWORD(lParam);
             gWindow.height = HIWORD(lParam);
             gWindow.resized = true;
         }
         return 0;
     case WM_SYSCOMMAND:
-        if ((wParam & 0xFFF0) == SC_KEYMENU) {
+        if ((wParam & 0xFFF0) == SC_KEYMENU)
+        {
             return 0; // no ALT application menu
         }
         break;
-    case WM_DPICHANGED: {
+    case WM_DPICHANGED:
+    {
         const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
         SetWindowPos(hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
                      suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -73,7 +81,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 rhi::Device* gDevice = nullptr;
 std::unordered_map<u64, rhi::BindlessIndex> gImGuiSlots;
 
-void AllocateImGuiSrv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu) {
+void AllocateImGuiSrv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu)
+{
     const rhi::BindlessIndex slot = gDevice->AllocateBindlessSlot();
     const rhi::DescriptorHandles handles = gDevice->GetBindlessDescriptor(slot);
     cpu->ptr = SIZE_T(handles.cpu);
@@ -81,22 +90,26 @@ void AllocateImGuiSrv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* cpu
     gImGuiSlots[handles.gpu] = slot;
 }
 
-void FreeImGuiSrv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE gpu) {
+void FreeImGuiSrv(ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_GPU_DESCRIPTOR_HANDLE gpu)
+{
     const auto it = gImGuiSlots.find(gpu.ptr);
-    if (it != gImGuiSlots.end()) {
+    if (it != gImGuiSlots.end())
+    {
         gDevice->FreeBindlessSlot(it->second); // released once the GPU is done with it
         gImGuiSlots.erase(it);
     }
 }
 
-std::string Narrow(const wchar_t* text) {
+std::string Narrow(const wchar_t* text)
+{
     const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
     std::string out(size > 0 ? size - 1 : 0, '\0');
     WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), size, nullptr, nullptr);
     return out;
 }
 
-void ApplyStyle(float dpiScale) {
+void ApplyStyle(float dpiScale)
+{
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 4.0f;
@@ -109,7 +122,8 @@ void ApplyStyle(float dpiScale) {
 
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
+{
     editor::EditorOptions options;
     rhi::DeviceDesc deviceDesc{.backend = rhi::Backend::D3D12};
 #ifdef NDEBUG
@@ -118,16 +132,24 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     {
         int argc = 0;
         LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-        for (int i = 1; i < argc; ++i) {
+        for (int i = 1; i < argc; ++i)
+        {
             const std::string arg = Narrow(argv[i]);
-            if (arg == "--scene" && i + 1 < argc) {
+            if (arg == "--scene" && i + 1 < argc)
+            {
                 options.scene = Narrow(argv[++i]);
-            } else if (arg == "--shaders" && i + 1 < argc) {
+            }
+            else if (arg == "--shaders" && i + 1 < argc)
+            {
                 options.shaderRoot = Narrow(argv[++i]);
-            } else if (arg == "--gpu-validation") {
+            }
+            else if (arg == "--gpu-validation")
+            {
                 deviceDesc.enableValidation = true;
                 deviceDesc.enableGpuValidation = true;
-            } else if (arg == "--no-validation") {
+            }
+            else if (arg == "--no-validation")
+            {
                 deviceDesc.enableValidation = false;
             }
         }
@@ -137,7 +159,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     const std::filesystem::path besideExe = std::filesystem::path(exePath).parent_path() / "shaders";
-    if (std::filesystem::exists(besideExe)) {
+    if (std::filesystem::exists(besideExe))
+    {
         options.shaderRoot = besideExe;
     }
 
@@ -158,7 +181,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
                               int(gWindow.width), int(gWindow.height), nullptr, nullptr, instance, nullptr);
 
     auto device = rhi::CreateDevice(deviceDesc);
-    if (!device) {
+    if (!device)
+    {
         MessageBoxW(hwnd, L"Could not create a D3D12 device with DXR 1.1 and shader model 6.6.", L"Airender", MB_OK);
         return 1;
     }
@@ -169,7 +193,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     gWindow.height = u32(std::max<LONG>(client.bottom - client.top, 8));
     auto swapchain =
         device->CreateSwapchain({.window = hwnd, .width = gWindow.width, .height = gWindow.height, .vsync = true});
-    if (!swapchain) {
+    if (!swapchain)
+    {
         return 1;
     }
     ShowWindow(hwnd, showCommand);
@@ -199,21 +224,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
         editor::EditorApp app(*device, tasks, options);
         auto last = std::chrono::steady_clock::now();
         bool running = true;
-        while (running && !app.WantsQuit()) {
+        while (running && !app.WantsQuit())
+        {
             MSG msg;
-            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+            {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
                 running &= msg.message != WM_QUIT;
             }
-            if (!running) {
+            if (!running)
+            {
                 break;
             }
-            if (gWindow.minimized) {
+            if (gWindow.minimized)
+            {
                 Sleep(16);
                 continue;
             }
-            if (gWindow.resized) {
+            if (gWindow.resized)
+            {
                 gWindow.resized = false;
                 swapchain->Resize(gWindow.width, gWindow.height);
             }
@@ -228,26 +258,31 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
             ImGui::Render();
 
             const rhi::TextureHandle backBuffer = swapchain->GetCurrentTexture();
-            app.RenderFrame([&](renderer::FrameContext& context) {
-                // Back buffers rest in Present between frames.
-                const rdg::TextureRef target =
-                    context.graph.ImportTexture(backBuffer, rhi::Access::Present, rhi::Access::Present);
-                const rdg::TextureRef image = context.output;
-                context.graph.AddPass(
-                    "Editor.UI", rdg::PassFlags::Raster | rdg::PassFlags::NeverCull,
-                    [&](rdg::PassBuilder& b) {
-                        b.Read(image, rhi::Access::SRVGraphics);
-                        b.Write(target, rhi::Access::RenderTarget);
-                    },
-                    [=](rdg::PassContext& ctx) {
-                        const float clear[4] = {0.08f, 0.08f, 0.09f, 1.0f};
-                        ctx.cmd.BeginRenderPass(ctx.Get(target), clear);
-                        auto* list = static_cast<ID3D12GraphicsCommandList*>(ctx.cmd.GetNativeHandle());
-                        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
-                        ctx.cmd.EndRenderPass();
-                    });
-            });
-            if (!swapchain->Present()) {
+            app.RenderFrame(
+                [&](renderer::FrameContext& context)
+                {
+                    // Back buffers rest in Present between frames.
+                    const rdg::TextureRef target =
+                        context.graph.ImportTexture(backBuffer, rhi::Access::Present, rhi::Access::Present);
+                    const rdg::TextureRef image = context.output;
+                    context.graph.AddPass(
+                        "Editor.UI", rdg::PassFlags::Raster | rdg::PassFlags::NeverCull,
+                        [&](rdg::PassBuilder& b)
+                        {
+                            b.Read(image, rhi::Access::SRVGraphics);
+                            b.Write(target, rhi::Access::RenderTarget);
+                        },
+                        [=](rdg::PassContext& ctx)
+                        {
+                            const float clear[4] = {0.08f, 0.08f, 0.09f, 1.0f};
+                            ctx.cmd.BeginRenderPass(ctx.Get(target), clear);
+                            auto* list = static_cast<ID3D12GraphicsCommandList*>(ctx.cmd.GetNativeHandle());
+                            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), list);
+                            ctx.cmd.EndRenderPass();
+                        });
+                });
+            if (!swapchain->Present())
+            {
                 AIR_LOG(Fatal, "Editor", "present failed (device removed?), see the log above");
                 break;
             }

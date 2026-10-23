@@ -133,14 +133,59 @@ def test(preset: str, test_filter: str | None, env: dict | None = None) -> bool:
     return run_step(f"test[{preset}]" + (f"({test_filter})" if test_filter else ""), cmd, env=env, tail=120)
 
 
+HLSL_SUFFIXES = {".hlsl", ".hlsli"}
+HLSL_ELSE_RE = re.compile(r"^(\s*)\}\s*(else\b.*?)\s*\{\s*$")
+HLSL_OPEN_RE = re.compile(r"^(\s*)(\S.*?)\s*\{\s*$")
+
+
+def hlsl_files() -> list[Path]:
+    return sorted(p for d in ["src"] for p in (ROOT / d).rglob("*") if p.suffix in HLSL_SUFFIXES)
+
+
+def hlsl_brace_lines(lines: list[str]) -> list[str]:
+    """Allman braces for HLSL, which clang-format cannot parse: a block brace that ends a line of
+    code moves onto its own line, `} else {` becomes three lines. Nothing else changes."""
+    out = []
+    for line in lines:
+        match = HLSL_ELSE_RE.match(line)
+        if match:
+            out += [f"{match[1]}}}", f"{match[1]}{match[2]}", f"{match[1]}{{"]
+            continue
+        match = HLSL_OPEN_RE.match(line)
+        if match and not match[2].startswith("//") and not match[2].endswith(("=", "(", ",")):
+            out += [f"{match[1]}{match[2]}", f"{match[1]}{{"]
+            continue
+        out.append(line)
+    return out
+
+
+def format_hlsl(check: bool) -> bool:
+    problems = []
+    for path in hlsl_files():
+        lines = path.read_text(encoding="utf-8").split("\n")
+        fixed = hlsl_brace_lines(lines)
+        if fixed == lines:
+            continue
+        if check:
+            first = next(i for i, (a, b) in enumerate(zip(lines, fixed)) if a != b)
+            problems.append(f"{path.relative_to(ROOT)}:{first + 1}: opening brace must be on its own line")
+        else:
+            path.write_text("\n".join(fixed), encoding="utf-8", newline="")
+    if problems:
+        print("\n".join(problems))
+    return record("format hlsl" + (" --check" if check else ""), not problems, f"{len(problems)} files" if problems else "")
+
+
 def format_sources(check: bool) -> bool:
     clang_format = find_tool("clang-format", "clang-format-18", "clang-format-17")
     if not clang_format:
         return record("format", False, "clang-format not found")
     files = [str(p) for p in source_files()]
     if check:
-        return run_step("format --check", [clang_format, "--dry-run", "--Werror", *files], tail=40)
-    return run_step("format", [clang_format, "-i", *files])
+        ok = run_step("format --check", [clang_format, "--dry-run", "--Werror", *files], tail=40)
+    else:
+        ok = run_step("format", [clang_format, "-i", *files])
+    return format_hlsl(check) and ok
 
 
 def tidy(preset: str, paths: list[str]) -> bool:

@@ -31,9 +31,11 @@
 #include <string>
 #include <vector>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
-struct FeatureInitContext {
+struct FeatureInitContext
+{
     rhi::Device& device;
     TaskSystem& tasks;
     std::filesystem::path shaderDir; // <shader root>/<feature name>
@@ -42,7 +44,8 @@ struct FeatureInitContext {
 };
 
 // Well-known blackboard names. Producers document the format next to each name.
-namespace slots {
+namespace slots
+{
 // Textures (all render resolution).
 inline constexpr std::string_view kDiffuseAlbedo = "guide.diffuseAlbedo";     // RGBA16F, rgb
 inline constexpr std::string_view kSpecularAlbedo = "guide.specularAlbedo";   // RGBA16F, rgb
@@ -60,15 +63,18 @@ inline constexpr std::string_view kOutputIsDisplay = "output.isDisplay";
 } // namespace slots
 
 // Per-frame named exchange between features. Lives for one RenderFrame().
-class Blackboard {
+class Blackboard
+{
 public:
     void SetTexture(std::string_view name, rdg::TextureRef texture) { mTextures[std::string(name)] = texture; }
-    std::optional<rdg::TextureRef> FindTexture(std::string_view name) const {
+    std::optional<rdg::TextureRef> FindTexture(std::string_view name) const
+    {
         const auto it = mTextures.find(name);
         return it == mTextures.end() ? std::nullopt : std::optional(it->second);
     }
     void SetValue(std::string_view name, double value) { mValues[std::string(name)] = value; }
-    double GetValue(std::string_view name, double fallback = 0.0) const {
+    double GetValue(std::string_view name, double fallback = 0.0) const
+    {
         const auto it = mValues.find(name);
         return it == mValues.end() ? fallback : it->second;
     }
@@ -78,7 +84,8 @@ private:
     std::map<std::string, double, std::less<>> mValues;
 };
 
-struct FrameContext {
+struct FrameContext
+{
     rhi::Device& device;
     TaskSystem& tasks;
     rdg::RenderGraph& graph;
@@ -91,7 +98,8 @@ struct FrameContext {
     u64 frameIndex = 0;
 };
 
-class RenderFeature {
+class RenderFeature
+{
 public:
     virtual ~RenderFeature() = default;
 
@@ -109,13 +117,15 @@ protected:
     ParameterSet mParameters;
 };
 
-struct FeatureInfo {
+struct FeatureInfo
+{
     std::string name;        // identifier used on the command line, e.g. "pathtracer"
     std::string description; // one line
     std::function<std::unique_ptr<RenderFeature>()> create;
 };
 
-class FeatureRegistry {
+class FeatureRegistry
+{
 public:
     void Register(FeatureInfo info);
     std::unique_ptr<RenderFeature> Create(std::string_view name) const;

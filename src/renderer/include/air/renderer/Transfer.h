@@ -8,7 +8,8 @@
 
 #include <optional>
 
-namespace air::renderer {
+namespace air::renderer
+{
 
 // Copies mip 0 of `texture` (RGBA8/RGBA16F/RGBA32F) into a float image and waits for the GPU.
 // `current` is the texture's access when called; it is left in the same state.

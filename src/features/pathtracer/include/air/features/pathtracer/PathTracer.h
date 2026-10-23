@@ -18,9 +18,11 @@
 #include <filesystem>
 #include <optional>
 
-namespace air::pt {
+namespace air::pt
+{
 
-struct PathTracerSettings {
+struct PathTracerSettings
+{
     u32 width = 1920;
     u32 height = 1080;
     u32 samplesPerPixelPerFrame = 4; // raise for offline throughput, lower for interactive preview
@@ -36,7 +38,8 @@ struct PathTracerSettings {
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap
 };
 
-class PathTracer {
+class PathTracer
+{
 public:
     PathTracer(rhi::Device& device, const PathTracerSettings& settings);
     ~PathTracer();

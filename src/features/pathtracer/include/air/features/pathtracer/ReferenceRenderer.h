@@ -8,9 +8,11 @@
 #include "air/core/TaskSystem.h"
 #include "air/renderer/Scene.h"
 
-namespace air::pt {
+namespace air::pt
+{
 
-struct ReferenceSettings {
+struct ReferenceSettings
+{
     u32 width = 64;
     u32 height = 64;
     u32 samplesPerPixel = 64;

@@ -5,8 +5,10 @@
 [[vk::push_constant]] ConstantBuffer<CompositeConstants> g : register(b0);
 
 [numthreads(8, 8, 1)]
-void Main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= g.width || id.y >= g.height) {
+void Main(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= g.width || id.y >= g.height)
+    {
         return;
     }
     Texture2D<float4> pattern = ResourceDescriptorHeap[g.patternSrv];

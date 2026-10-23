@@ -11,20 +11,24 @@
 #include <cmath>
 #include <cstring>
 
-namespace air::pt {
+namespace air::pt
+{
 
 using rhi::Access;
 
-namespace {
+namespace
+{
 
 // Settings whose change invalidates the accumulated image.
-bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b) {
+bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
+{
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.furnace == b.furnace && a.debugView == b.debugView &&
            a.debugScale == b.debugScale;
 }
 
-gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect) {
+gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
+{
     gpu::CameraData out;
     out.position = {camera.position, std::tan(camera.verticalFov * 0.5f)};
     out.forward = {camera.Forward(), aspect};
@@ -34,45 +38,59 @@ gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect) {
 }
 
 // Halton(2, 3) sub-pixel offsets in [-0.5, 0.5).
-float Halton(u32 index, u32 base) {
+float Halton(u32 index, u32 base)
+{
     float f = 1.0f;
     float r = 0.0f;
-    for (u32 i = index; i > 0; i /= base) {
+    for (u32 i = index; i > 0; i /= base)
+    {
         f /= float(base);
         r += f * float(i % base);
     }
     return r;
 }
 
-bool IsDisplayDebugView(u32 view) {
+bool IsDisplayDebugView(u32 view)
+{
     return view != gpu::kDebugNone && view != gpu::kDebugDirect && view != gpu::kDebugIndirect;
 }
 
 } // namespace
 
 PathTracer::PathTracer(rhi::Device& device, const PathTracerSettings& settings)
-    : mDevice(device), mSettings(settings), mLastSettings(settings) {}
+    : mDevice(device), mSettings(settings), mLastSettings(settings)
+{
+}
 
-PathTracer::~PathTracer() {
-    for (rhi::TextureHandle texture : {mAccumulation}) {
-        if (texture.IsValid()) {
+PathTracer::~PathTracer()
+{
+    for (rhi::TextureHandle texture : {mAccumulation})
+    {
+        if (texture.IsValid())
+        {
             mDevice.DestroyTexture(texture);
         }
     }
-    for (rhi::BufferHandle buffer : {mBsdfLut, mFrameRing}) {
-        if (buffer.IsValid()) {
+    for (rhi::BufferHandle buffer : {mBsdfLut, mFrameRing})
+    {
+        if (buffer.IsValid())
+        {
             mDevice.DestroyBuffer(buffer);
         }
     }
-    for (rhi::PipelineHandle pipeline : {mTracePipeline, mResolvePipeline}) {
-        if (pipeline.IsValid()) {
+    for (rhi::PipelineHandle pipeline : {mTracePipeline, mResolvePipeline})
+    {
+        if (pipeline.IsValid())
+        {
             mDevice.DestroyPipeline(pipeline);
         }
     }
 }
 
-bool PathTracer::Initialize(const std::filesystem::path& shaderDir) {
-    if (!mDevice.GetCapabilities().rayTracing) {
+bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
+{
+    if (!mDevice.GetCapabilities().rayTracing)
+    {
         AIR_LOG(Error, "PathTracer", "device '{}' does not support hardware ray tracing",
                 mDevice.GetCapabilities().adapterName);
         return false;
@@ -119,20 +137,23 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir) {
            mFrameRing.IsValid();
 }
 
-void PathTracer::ResetAccumulation() {
+void PathTracer::ResetAccumulation()
+{
     mResetPending = true;
     mAccumulatedSamples = 0;
 }
 
 void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& scene, const renderer::Camera& camera,
-                           renderer::Blackboard& blackboard, rdg::TextureRef output) {
+                           renderer::Blackboard& blackboard, rdg::TextureRef output)
+{
     AIR_CHECK(mAccumulation.IsValid(), "PathTracer::AddPasses before Initialize()");
     namespace slots = renderer::slots;
 
     const bool cameraChanged = !mLastCamera || !(*mLastCamera == camera);
     const bool historyInvalid =
         !mLastCamera || scene.version != mLastSceneVersion || !SameImage(mSettings, mLastSettings);
-    if (cameraChanged || historyInvalid || !mSettings.accumulate) {
+    if (cameraChanged || historyInvalid || !mSettings.accumulate)
+    {
         ResetAccumulation();
     }
     const renderer::Camera previousCamera = mLastCamera.value_or(camera);
@@ -153,16 +174,20 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.camera = ToGpu(camera, aspect);
     frame.previousCamera = ToGpu(previousCamera, aspect);
     float exposure = renderer::ExposureScale(camera.ev100);
-    if (mSettings.furnace) {
+    if (mSettings.furnace)
+    {
         // Map the environment to middle grey: a correct furnace image is a flat 0.18.
         const float environment = std::max(hlsl::dot(scene.environment, hlsl::float3(0.2126f, 0.7152f, 0.0722f)), 0.0f);
         frame.environment = {environment > 0.0f ? scene.environment : hlsl::float3(1.0f), 0.0f};
         exposure = environment > 0.0f ? 0.18f / environment : 0.18f;
-    } else {
+    }
+    else
+    {
         frame.environment = {scene.environment, 0.0f};
     }
     frame.environment.w = exposure;
-    if (!mSettings.accumulate) {
+    if (!mSettings.accumulate)
+    {
         const u32 phase = mFrameIndex % 32 + 1;
         frame.jitter = {Halton(phase, 2) - 0.5f, Halton(phase, 3) - 0.5f};
     }
@@ -201,15 +226,19 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     constants.lights = mDevice.GetBindlessSRV(scene.lights);
     constants.bsdfLut = mDevice.GetBindlessSRV(mBsdfLut);
 
-    if (spp > 0) {
+    if (spp > 0)
+    {
         mResetPending = false;
         mAccumulatedSamples += spp;
 
-        struct Guides {
+        struct Guides
+        {
             rdg::TextureRef diffuseAlbedo, specularAlbedo, normalRoughness, viewDepth, motionVectors;
         } guides;
-        if (mSettings.guides) {
-            auto make = [&](rhi::Format format, const char* name) {
+        if (mSettings.guides)
+        {
+            auto make = [&](rhi::Format format, const char* name)
+            {
                 return graph.CreateTexture(
                     {.format = format,
                      .width = width,
@@ -232,18 +261,23 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const rhi::PipelineHandle pipeline = mTracePipeline;
         graph.AddPass(
             "PathTracer.Trace", rdg::PassFlags::RayTracing,
-            [&](rdg::PassBuilder& b) {
+            [&](rdg::PassBuilder& b)
+            {
                 b.Write(accumulation, Access::UAVCompute);
                 for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
-                                          guides.viewDepth, guides.motionVectors}) {
-                    if (t.IsValid()) {
+                                          guides.viewDepth, guides.motionVectors})
+                {
+                    if (t.IsValid())
+                    {
                         b.Write(t, Access::UAVCompute);
                     }
                 }
             },
-            [=](rdg::PassContext& ctx) mutable {
+            [=](rdg::PassContext& ctx) mutable
+            {
                 constants.accumulation = ctx.UAV(accumulation);
-                if (guides.diffuseAlbedo.IsValid()) {
+                if (guides.diffuseAlbedo.IsValid())
+                {
                     constants.diffuseAlbedo = ctx.UAV(guides.diffuseAlbedo);
                     constants.specularAlbedo = ctx.UAV(guides.specularAlbedo);
                     constants.normalRoughness = ctx.UAV(guides.normalRoughness);
@@ -260,11 +294,13 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     const u32 frameData = constants.frameData;
     graph.AddPass(
         "PathTracer.Resolve", rdg::PassFlags::Compute,
-        [&](rdg::PassBuilder& b) {
+        [&](rdg::PassBuilder& b)
+        {
             b.Read(accumulation, Access::SRVCompute);
             b.Write(output, Access::UAVCompute);
         },
-        [=](rdg::PassContext& ctx) {
+        [=](rdg::PassContext& ctx)
+        {
             gpu::ResolveConstants resolve{};
             resolve.frameData = frameData;
             resolve.frameSlot = slot;

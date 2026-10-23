@@ -6,14 +6,17 @@
 using namespace air;
 using namespace airtest;
 
-TEST(Profiler_CollectsScopesFromTasksAndMainThread) {
+TEST(Profiler_CollectsScopesFromTasksAndMainThread)
+{
     Profiler& profiler = Profiler::Get();
     profiler.SetEnabled(true);
     profiler.BeginFrame();
     {
         TaskSystem tasks(2);
         AIR_PROFILE_SCOPE("Test.Outer");
-        { AIR_PROFILE_SCOPE("Test.Inner"); }
+        {
+            AIR_PROFILE_SCOPE("Test.Inner");
+        }
         tasks.Launch("Test.Task", [] {}).Wait();
     }
     profiler.EndFrame();
@@ -30,7 +33,8 @@ TEST(Profiler_CollectsScopesFromTasksAndMainThread) {
     EXPECT(renderer::ToJson(frame).Dump(0).find("\"Test.Outer\"") != std::string::npos);
 }
 
-TEST(FrameRunner_ProfileReportsPassTimingsAndMemory) {
+TEST(FrameRunner_ProfileReportsPassTimingsAndMemory)
+{
     auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
     TaskSystem tasks(2);
     {
@@ -58,7 +62,8 @@ TEST(FrameRunner_ProfileReportsPassTimingsAndMemory) {
     device->WaitIdle();
 }
 
-TEST(Diagnostics_FormatBytes) {
+TEST(Diagnostics_FormatBytes)
+{
     EXPECT(renderer::FormatBytes(512) == "512 B");
     EXPECT(renderer::FormatBytes(1536) == "1.50 KiB");
     EXPECT(renderer::FormatBytes(3ull << 30) == "3.00 GiB");
