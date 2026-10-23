@@ -7,6 +7,8 @@
 #include "air/renderer/Transfer.h"
 
 #include "PathTracerShared.h"
+#include "ReSTIR.h"
+#include "ReSTIRShared.h"
 
 #include <algorithm>
 #include <cmath>
@@ -25,7 +27,7 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 {
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
-           a.furnace == b.furnace && a.debugView == b.debugView && a.debugScale == b.debugScale;
+           a.restir == b.restir && a.furnace == b.furnace && a.debugView == b.debugView && a.debugScale == b.debugScale;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -139,6 +141,10 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
         {.stride = sizeof(float), .usage = rhi::BufferUsage::ShaderResource, .debugName = "PathTracer.BsdfLut"},
         lut.data(), lut.size_bytes());
 
+    // Optional: without its shaders the path tracer runs with NEE at the first surface.
+    mReSTIR = std::make_unique<ReSTIR>(mDevice);
+    mReSTIR->Initialize(shaderDir);
+
     mFrameRingSize = mDevice.GetFramesInFlight() + 1;
     mFrameRing = mDevice.CreateBuffer({.size = mFrameRingSize * sizeof(gpu::FrameData),
                                        .stride = sizeof(gpu::FrameData),
@@ -182,6 +188,23 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                                      mSettings.accumulate ? mSettings.targetSamples - mAccumulatedSamples : ~0u)
                           : 0u;
 
+    // ReSTIR DI replaces NEE at the first surface for the lit and direct/indirect views.
+    const u32 view = mSettings.debugView;
+    const bool restirWanted = mSettings.restir.enabled && mSettings.nextEventEstimation && !mSettings.furnace &&
+                              scene.lightCount > 0 && mReSTIR && mReSTIR->IsAvailable() &&
+                              (view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect);
+    const bool restir = restirWanted && spp > 0;
+    AIR_CHECK(!restir || scene.lightCount <= gpu::kReSTIRMaxLight, "ReSTIR: {} lights exceed the reservoirs' 24 bits",
+              scene.lightCount);
+    if (!restirWanted && mReSTIR)
+    {
+        mReSTIR->Invalidate();
+    }
+    if (spp > 0)
+    {
+        mUsedReSTIR = restir;
+    }
+
     const float aspect = float(mSettings.width) / float(mSettings.height);
     gpu::FrameData frame{};
     frame.camera = ToGpu(camera, aspect);
@@ -209,7 +232,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.frameIndex = mFrameIndex++;
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
-                  (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee);
+                  (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restir ? gpu::kFlagReSTIR : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -274,12 +297,19 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             blackboard.SetTexture(slots::kMotionVectors, guides.motionVectors);
         }
 
+        const rdg::BufferRef primaryHits =
+            restir ? mReSTIR->BeginFrame(graph, width, height, !historyInvalid) : rdg::BufferRef{};
+
         const rhi::PipelineHandle pipeline = UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline;
         graph.AddPass(
             "PathTracer.Trace", rdg::PassFlags::RayTracing,
             [&](rdg::PassBuilder& b)
             {
                 b.Write(accumulation, Access::UAVCompute);
+                if (primaryHits.IsValid())
+                {
+                    b.Write(primaryHits, Access::UAVCompute);
+                }
                 for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
                                           guides.viewDepth, guides.motionVectors})
                 {
@@ -300,10 +330,30 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     constants.viewDepth = ctx.UAV(guides.viewDepth);
                     constants.motionVectors = ctx.UAV(guides.motionVectors);
                 }
+                if (primaryHits.IsValid())
+                {
+                    constants.primaryHits = ctx.UAV(primaryHits);
+                }
                 ctx.cmd.SetPipeline(pipeline);
                 ctx.cmd.PushConstants(&constants, sizeof(constants));
                 ctx.cmd.DispatchRays(width, height, 1);
             });
+
+        if (restir)
+        {
+            gpu::ReSTIRConstants restirScene{};
+            restirScene.frameData = constants.frameData;
+            restirScene.frameSlot = constants.frameSlot;
+            restirScene.tlas = constants.tlas;
+            restirScene.instances = constants.instances;
+            restirScene.materials = constants.materials;
+            restirScene.lights = constants.lights;
+            restirScene.instanceLights = constants.instanceLights;
+            restirScene.lightTree = constants.lightTree;
+            restirScene.bsdfLut = constants.bsdfLut;
+            const bool addDirect = view != gpu::kDebugIndirect;
+            mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, addDirect);
+        }
     }
 
     const rhi::PipelineHandle resolvePipeline = mResolvePipeline;

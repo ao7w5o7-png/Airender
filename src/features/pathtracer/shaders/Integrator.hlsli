@@ -22,6 +22,8 @@
 // wasted samples among many lights, but a walk of ~log2(lights) dependent loads); deeper vertices,
 // whose light reaches the image after a bounce, choose by power alone in O(1). The environment is
 // only reached by BSDF sampling. Russian roulette starts after the third bounce and is unbiased.
+// With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
+// entirely: ReSTIR DI (ReSTIR.hlsli) estimates it.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
 #define AIR_PT_INTEGRATOR_HLSLI
 
@@ -60,6 +62,10 @@ struct PathSample
     float3 diffuseAlbedo;
     float3 specularAlbedo;
     uint bounces; // surfaces the path scattered at
+    // The first hit as TraceClosest reported it (instance kInvalidIndex: none), for ReSTIR DI.
+    uint instance;
+    uint primitive;
+    float2 barycentrics;
 };
 
 float3 Xyz(float4 v)
@@ -118,6 +124,14 @@ LightTriangle SampleLight(float uSelect, float uAlias, uint count)
         light = LoadLight(light.alias);
     }
     return light;
+}
+
+// The light-list index SampleLight(uSelect, uAlias, count) chooses.
+uint SampleLightIndex(float uSelect, float uAlias, uint count)
+{
+    uint i = min(uint(uSelect * float(count)), count - 1u);
+    LightTriangle light = LoadLight(i);
+    return uAlias >= light.aliasThreshold ? light.alias : i;
 }
 
 // Solid angle pdf of NEE choosing, with probability `pmf`, a light of `area` and the point on it at
@@ -348,8 +362,14 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.diffuseAlbedo = float3(0.0f, 0.0f, 0.0f);
     result.specularAlbedo = float3(0.0f, 0.0f, 0.0f);
     result.bounces = 0u;
+    result.instance = kInvalidIndex;
+    result.primitive = 0u;
+    result.barycentrics = float2(0.0f, 0.0f);
 
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
+    // ReSTIR DI estimates the whole direct light at the first surface (from emissive triangles): the
+    // path neither samples a light there nor counts the emission its BSDF sample reaches.
+    bool restir = useNee && (params.flags & kFlagReSTIR) != 0u;
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     float previousBsdfPdf = 0.0f; // solid angle pdf of the BSDF sample that produced `direction`
     // The vertex that produced `direction` and how NEE chose lights there (for MIS).
@@ -381,10 +401,13 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             result.material = s.material;
             result.diffuseAlbedo = DiffuseAlbedo(s.material);
             result.specularAlbedo = SpecularAlbedo(s.material, saturate(dot(s.shadingNormal, -direction)));
+            result.instance = hit.instance;
+            result.primitive = hit.primitive;
+            result.barycentrics = hit.barycentrics;
         }
 
         // Emission found by the BSDF sample, weighted against NEE having found it.
-        if (any(s.emission))
+        if (any(s.emission) && !(restir && bounce == 1u))
         {
             float weight = 1.0f;
             if (bounce > 0u && useNee)
@@ -415,12 +438,14 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             ns = ng; // the interpolated normal faces away from the viewer: fall back to the facet
         }
         Frame frame = MakeFrame(ns);
+        // The BSDF is prepared per call below: keeping a BsdfContext alive across the shadow ray
+        // costs registers, which measured slower than repeating its cached LUT lookups.
         float3 woLocal = ToLocal(frame, wo);
         float3 rayOrigin = OffsetRayOrigin(s.position, ng);
         bool lightTree = bounce < params.lightTreeBounces;
 
         // Next event estimation: one point on one emissive triangle.
-        if (useNee)
+        if (useNee && !(restir && bounce == 0u))
         {
             float uLight = Rand(seed);
             float uAlias = Rand(seed); // drawn in both modes: the random sequence stays the same

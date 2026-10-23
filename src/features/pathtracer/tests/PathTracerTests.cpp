@@ -116,3 +116,51 @@ TEST(PathTracer_DebugViewsAndFurnaceRun)
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "false"));
     EXPECT(h.Frame().validationErrors.empty());
 }
+
+// ReSTIR DI adds its three passes after the trace; from the second frame on the temporal pass reads
+// the previous frame's primary hits and reservoirs, which swap with this frame's every frame.
+TEST(PathTracer_ReSTIRResamplesAcrossFrames)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.restir", "1"));
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    for (int frame = 0; frame < 4; ++frame)
+    {
+        const auto result = h.Frame();
+        EXPECT(result.validationErrors.empty());
+        for (const char* pass :
+             {"PathTracer.ReSTIR.Initial", "PathTracer.ReSTIR.Temporal", "PathTracer.ReSTIR.Spatial"})
+        {
+            EXPECT(CountLines(result.commands, std::string("BeginEvent '") + pass + "'") == 1);
+        }
+        // This frame writes one set of buffers; from the second frame on it also reads the other.
+        const bool history = frame > 0;
+        const char* current = frame % 2 == 0 ? "PrimaryHits[0]" : "PrimaryHits[1]";
+        const char* previous = frame % 2 == 0 ? "PrimaryHits[1]" : "PrimaryHits[0]";
+        EXPECT(result.graphText.find(current) != std::string::npos);
+        EXPECT((result.graphText.find(previous) != std::string::npos) == history);
+    }
+    const auto status = h.runner->DescribeFeatures().Dump(0);
+    EXPECT(status.find("\"restir\":true") != std::string::npos);
+}
+
+// ReSTIR only replaces NEE where there is one: not for BSDF-only paths, the furnace or the views
+// that show no light.
+TEST(PathTracer_ReSTIROnlyRunsForLitViews)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.restir", "1"));
+    auto restirPasses = [&] { return CountLines(h.Frame().commands, "BeginEvent 'PathTracer.ReSTIR."); };
+    EXPECT(restirPasses() == 3);
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "1")); // normals
+    EXPECT(restirPasses() == 0);
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "8")); // direct light
+    EXPECT(restirPasses() == 3);
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "0"));
+    EXPECT(h.runner->SetParameter("pathtracer.nee", "0"));
+    EXPECT(restirPasses() == 0);
+    EXPECT(h.runner->SetParameter("pathtracer.nee", "1"));
+    EXPECT(h.runner->SetParameter("pathtracer.furnace", "1"));
+    EXPECT(restirPasses() == 0);
+    EXPECT(h.Frame().validationErrors.empty());
+}

@@ -1,15 +1,16 @@
 // GPU path tracer kernel: ray generation + closest hit, bindless resources. Compiled twice:
 // PathTracer.hlsl (DXR 1.1, SM 6.6, every RTX GPU) and PathTracerSer.hlsl (AIR_PT_SER: DXR 1.2 shader
 // execution reordering, SM 6.9); PathTracer.cpp picks one at runtime. The estimator itself is
-// Integrator.hlsli, shared with the CPU reference renderer. This file supplies the platform hooks
-// (TraceRay for closest hits, inline RayQuery for shadow rays) and writes the accumulation buffer,
-// denoiser guides and debug views.
+// Integrator.hlsli, shared with the CPU reference renderer. This file supplies TraceClosest (TraceRay
+// into closest-hit shaders; SceneAccess.hlsli has the other hooks) and writes the accumulation
+// buffer, denoiser guides, debug views and, for ReSTIR DI, the primary hits.
 #ifndef AIR_PT_SER
 #define AIR_PT_SER 0
 #endif
 
 #include "air/renderer/shader/SceneShared.h"
 #include "PathTracerShared.h"
+#include "ReSTIRShared.h"
 
 [[vk::push_constant]] ConstantBuffer<TraceConstants> g : register(b0);
 
@@ -25,53 +26,7 @@ struct [raypayload] Payload
 
 // --- Integrator hooks ----------------------------------------------------------------------------
 
-float BsdfLutLoad(uint index)
-{
-    StructuredBuffer<float> lut = ResourceDescriptorHeap[g.bsdfLut];
-    return lut[index];
-}
-
-InstanceData LoadInstance(uint instance)
-{
-    StructuredBuffer<InstanceData> instances = ResourceDescriptorHeap[g.instances];
-    return instances[instance];
-}
-
-uint LoadInstanceLight(uint instance)
-{
-    StructuredBuffer<uint> instanceLights = ResourceDescriptorHeap[g.instanceLights];
-    return instanceLights[instance];
-}
-
-uint LoadIndex(InstanceData instance, uint index)
-{
-    StructuredBuffer<uint> indices = ResourceDescriptorHeap[NonUniformResourceIndex(instance.indexBuffer)];
-    return indices[index];
-}
-
-Vertex LoadVertex(InstanceData instance, uint index)
-{
-    StructuredBuffer<Vertex> vertices = ResourceDescriptorHeap[NonUniformResourceIndex(instance.vertexBuffer)];
-    return vertices[index];
-}
-
-MaterialData LoadMaterial(uint material)
-{
-    StructuredBuffer<MaterialData> materials = ResourceDescriptorHeap[g.materials];
-    return materials[material];
-}
-
-LightTriangle LoadLight(uint light)
-{
-    StructuredBuffer<LightTriangle> lights = ResourceDescriptorHeap[g.lights];
-    return lights[light];
-}
-
-LightTreeNode LoadLightNode(uint node)
-{
-    StructuredBuffer<LightTreeNode> tree = ResourceDescriptorHeap[g.lightTree];
-    return tree[node];
-}
+#include "SceneAccess.hlsli"
 
 HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
 {
@@ -114,20 +69,6 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     hit.barycentrics = payload.barycentrics;
 #endif
     return hit;
-}
-
-bool TraceVisible(float3 origin, float3 direction, float tMax)
-{
-    RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = direction;
-    ray.TMin = 0.0f;
-    ray.TMax = tMax;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
-    query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
-    query.Proceed();
-    return query.CommittedStatus() == COMMITTED_NOTHING;
 }
 
 #include "Integrator.hlsli"
@@ -216,6 +157,20 @@ void RayGen()
     RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
     float4 previous = (f.flags & kFlagReset) != 0u ? float4(0.0f, 0.0f, 0.0f, 0.0f) : accumulation[pixel];
     accumulation[pixel] = previous + float4(sum, float(f.samplesPerPixel));
+
+    if ((f.flags & kFlagReSTIR) != 0u)
+    {
+        // Every sample left the direct light at its first surface out of `sum`; the ReSTIR passes
+        // add the first sample's, times the sample count, so the average stays unbiased.
+        RWStructuredBuffer<PrimaryHit> primaryHits = ResourceDescriptorHeap[g.primaryHits];
+        PrimaryHit h;
+        h.instance = first.instance;
+        h.primitive = first.primitive;
+        h.barycentrics = first.barycentrics;
+        h.normal = EncodeOctahedral(first.hit ? first.normal : float3(0.0f, 0.0f, 1.0f));
+        h.distance = first.hitDistance;
+        primaryHits[pixel.y * f.width + pixel.x] = h;
+    }
 
     if ((f.flags & kFlagGuides) != 0u)
     {

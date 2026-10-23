@@ -4,6 +4,7 @@ air_add_feature(NAME pathtracer
         src/PathTracer.cpp
         src/PathTracerFeature.cpp
         src/ReferenceRenderer.cpp
+        src/ReSTIR.cpp
     TESTS
         tests/BsdfTests.cpp
         tests/IntegratorTests.cpp

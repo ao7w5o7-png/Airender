@@ -2,9 +2,11 @@
 
 // Progressive GPU path tracer (offline / film quality, and interactive preview).
 //
-// Each frame AddPasses() appends two render graph passes:
+// Each frame AddPasses() appends these render graph passes:
 //   PathTracer.Trace    DispatchRays: N samples per pixel into a persistent RGBA32F accumulation
 //                       buffer, plus first-hit guide textures for denoisers
+//   PathTracer.ReSTIR.* Compute, with restir.enabled: the direct light at the first surface by
+//                       ReSTIR DI (src/ReSTIR.h), added to the accumulation
 //   PathTracer.Resolve  Compute: average * exposure (or a debug view) into the frame output
 // The estimator (shaders/Integrator.hlsli: NEE + MIS over emissive triangles, energy-conserving
 // GGX) is shared with the CPU ReferenceRenderer. The output is scene-linear and exposed
@@ -16,10 +18,29 @@
 #include "air/rhi/RHIDevice.h"
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 
 namespace air::pt
 {
+
+// ReSTIR DI (docs/architecture.md §8.7): the direct light at each pixel's first surface, resampled
+// across pixels and frames (shaders/ReSTIR.hlsli) instead of one NEE sample per path.
+struct ReSTIRSettings
+{
+    bool enabled = false;
+    u32 lightCandidates = 8;     // initial candidates: light points chosen by power
+    u32 bsdfCandidates = 1;      // initial candidates: BSDF rays that may reach an emitter
+    u32 spatialSamples = 2;      // neighbours reused per pixel
+    u32 disocclusionSamples = 8; // neighbours reused where a pixel has no temporal history
+    float spatialRadius = 30.0f; // pixels
+    u32 maxConfidence = 20;      // cap of the temporal history, in frames' worth of candidates
+    // Trace the visibility the MIS weights need (one shadow ray per reused reservoir). Off: fewer
+    // rays, but penumbrae come out darker (the classic biased visibility reuse).
+    bool unbiased = true;
+
+    bool operator==(const ReSTIRSettings&) const = default;
+};
 
 struct PathTracerSettings
 {
@@ -39,6 +60,7 @@ struct PathTracerSettings
     // time (a walk of ~log2(lights) dependent loads per sample): off by default, worth it for
     // offline references of many-light scenes (docs/architecture.md §8.6).
     u32 lightTreeBounces = 0;
+    ReSTIRSettings restir;
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap
@@ -48,6 +70,8 @@ struct PathTracerSettings
     // this kernel's cheap shading the reorder costs more than it saves (docs/architecture.md §8.2).
     bool shaderExecutionReordering = false;
 };
+
+class ReSTIR;
 
 class PathTracer
 {
@@ -76,6 +100,8 @@ public:
         return mSettings.shaderExecutionReordering && mTracePipelineSer.IsValid();
     }
     bool IsConverged() const { return mSettings.accumulate && mAccumulatedSamples >= mSettings.targetSamples; }
+    // True when the last frame's direct light at the first surface came from ReSTIR DI.
+    bool UsesReSTIR() const { return mUsedReSTIR; }
     const PathTracerSettings& GetSettings() const { return mSettings; }
     // Settings other than width/height may change between frames.
     PathTracerSettings& MutableSettings() { return mSettings; }
@@ -95,6 +121,8 @@ private:
     rhi::BufferHandle mBsdfLut;
     rhi::BufferHandle mFrameRing; // StructuredBuffer<FrameData>, framesInFlight + 1 elements
     u32 mFrameRingSize = 0;
+    std::unique_ptr<ReSTIR> mReSTIR;
+    bool mUsedReSTIR = false;
 
     u32 mAccumulatedSamples = 0;
     u32 mFrameIndex = 0;

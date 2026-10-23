@@ -403,7 +403,7 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `lightTreeBounces`, `furnace`, `debugView`, `ser` and `debugScale`.
+`nee`, `lightTreeBounces`, `restir*` (§8.7), `furnace`, `debugView`, `ser` and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -614,6 +614,80 @@ are expensive anyway. The images are unbiased either way: means agree within 0.2
 0.01% at 8192 spp. `tests/LightTreeTests.cpp` checks that every light has a leaf, that the
 sampled frequencies match `LightTreePmf` and sum to at most 1, and that nearby lights win and lights
 behind the horizon get nothing.
+
+### 8.7 ReSTIR DI
+
+`pathtracer.restir=1` estimates the direct light at each pixel's first surface with spatiotemporal
+reservoir resampling (Bitterli et al. 2020) instead of one NEE sample per path, in the generalized
+RIS formulation (Lin et al. 2022; the 2023 SIGGRAPH course "A Gentle Introduction to ReSTIR").
+Files: `shaders/ReSTIR.hlsli` (all of the math), `ReSTIRInitial/Temporal/Spatial.hlsl`,
+`shaders/ReSTIRShared.h`, `src/ReSTIR.h/.cpp` (buffers and passes).
+
+- **Split with the path tracer**: with `kFlagReSTIR`, `PathTracer.Trace` leaves out the direct light
+  from emissive triangles at the first surface (no NEE there, and no emission found by its BSDF
+  sample), and writes the first sample's hit (`PrimaryHit`: instance, primitive, barycentrics, plus a
+  normal and distance for similarity tests). The passes rebuild the surface from it with the
+  integrator's own `LoadSurface`, so they shade exactly what the path tracer would have, and add
+  the result (times the samples per pixel) to the accumulation before `PathTracer.Resolve`. The
+  environment is still reached only by BSDF sampling, and deeper vertices keep NEE.
+- **Samples**: a point on an emissive triangle (light index, barycentrics), the same point in every
+  pixel's domain, so shifts are the identity with Jacobian 1. The target function p̂ is the luminance
+  of the unshadowed contribution f · Le · cos / d². A reservoir (16 bytes) holds the sample, its
+  unbiased contribution weight W and its confidence M.
+- **Passes** (one thread per pixel, 8x8 groups):
+
+  | Pass | Inputs | What it does | Shadow rays |
+  |---|---|---|---|
+  | `ReSTIR.Initial` | primary hits | RIS over `restirLights` points on lights chosen by power and `restirBsdf` BSDF rays that hit an emitter, balance heuristic between the two strategies | 1 BSDF + 1 |
+  | `ReSTIR.Temporal` | + last frame's hits and final reservoirs | reprojects the point with the previous camera; if the surface there is similar, generalized balance heuristic between the two domains, last frame's confidence capped at `restirHistory` | 1 + 1 |
+  | `ReSTIR.Spatial` | temporal reservoirs | `restirSpatial` neighbours in a disc of `restirRadius` pixels (`restirDisocclusion` where the pixel has no history), defensive pairwise MIS (course eq. 7.8); shades and stores the result as next frame's history | k + 1 |
+
+- **Visibility reuse, without bias**: each pass traces the shadow ray of the sample it chose when the
+  sample is new to the pixel, and zeroes W when it is occluded, so a reservoir only ever holds light
+  its own surface sees. That domain restriction must appear in the MIS weights: another pixel's (or
+  frame's) reservoir may get weight for a sample only if that surface sees it. With
+  `restirUnbiased=1` (default) the weights trace exactly that visibility, one ray per reused
+  reservoir. `restirUnbiased=0` assumes the other surface sees the sample: the classic biased
+  visibility reuse, fewer rays, penumbrae and contact shadows darker (-2% on `many_lights`, -2.8% on
+  `cornell_box` direct light).
+- **Neighbour choice**: from geometry only (normal within 60 degrees, distance to the eye within
+  10%), never from the samples, so heuristics change the noise but not the expected value. Pixels
+  without a hit keep empty reservoirs.
+- **History**: primary hits and final reservoirs are double-buffered by frame parity (`ReSTIR` owns
+  them; they exist only once ReSTIR has been used). A scene or setting change, or a frame without
+  ReSTIR, starts without history; a camera move does not (the reprojection handles it).
+- **Limits**: lights must not move between frames (samples are reused as light-list points); light
+  indices have 24 bits. With colored lights one sample per pixel shows as colour noise, which a
+  denoiser (DLSS RR) resolves. Reuse is per-pixel only: large disocclusions recover over a few
+  frames (the disocclusion boost helps); stochastic pairwise MIS over screen-space cells (Hedstrom et
+  al. 2026) is the known fix.
+
+Validation (`aircli render --set pathtracer.debugView=8` isolates the direct light):
+
+- Unbiased: accumulating ReSTIR frames (`accumulate=1`) converges to the NEE reference. Mean
+  difference after 8192 frames: `many_lights` -0.013%, full image -0.010%; `cornell_box` -0.012%
+  and `veach_mis` -0.07% after 4096 (NEE alone: -0.010% and +0.09%). With `spp=4` the scaling holds.
+- Noise of one frame (`accumulate=0, spp=1`, after 30 frames of history), relMSE of the direct
+  light at 1920x1080: `many_lights` NEE 21.8, ReSTIR 0.20 (k=3: 0.18, 16 light candidates: 0.13,
+  no BSDF candidate: 1.95, which the glossy floor needs). At 640x360: `veach_mis` 1.88 -> 0.0098,
+  `cornell_box` 0.0089 -> 0.0019.
+- Cost at 1920x1080 (RTX 5070, defaults):
+
+  | Scene | Trace | Initial | Temporal | Spatial |
+  |---|---|---|---|---|
+  | `cornell_box` | 2.04 ms | 0.32 ms | 0.34 ms | 0.63 ms |
+  | `many_lights` | 3.95 ms | 1.09 ms | 0.70 ms | 1.44 ms |
+  | `sphere_field` | 1.58 ms | 0.56 ms | 0.46 ms | 0.95 ms |
+  | `veach_mis` | 1.24 ms | 0.85 ms | 0.56 ms | 1.24 ms |
+
+  The unbiased MIS rays cost about 0.1 ms; each neighbour about 0.4 ms on `many_lights`, each light
+  candidate about 0.1 ms. Rebuilding a surface from its `PrimaryHit` costs about 0.1 ms per use
+  (six per pixel), cheaper in total than storing a full-precision G-buffer twice.
+- It is off by default: it pays off wherever direct light dominates the noise (one frame of
+  `veach_mis` is 190x less noisy), but where indirect light dominates (`many_lights`) the image as a
+  whole improves less than the extra time would buy in more paths.
+- Tests: `PathTracer_ReSTIRResamplesAcrossFrames` and `PathTracer_ReSTIROnlyRunsForLitViews`
+  (Null backend: passes, buffer ping-pong, which views run it).
 
 ---
 

@@ -4,6 +4,7 @@
 #include "air/renderer/RenderFeature.h"
 
 #include "PathTracerShared.h"
+#include "ReSTIRShared.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +33,23 @@ public:
                         "Path vertices whose NEE chooses lights with the light tree (power, distance, orientation); "
                         "deeper ones choose by power. 0: by power only",
                         0, 64);
+        mParameters.Add("restir", &mSettings.restir.enabled,
+                        "ReSTIR DI: resample the direct light at the first surface across pixels and frames");
+        mParameters.Add("restirLights", &mSettings.restir.lightCandidates,
+                        "ReSTIR initial candidates: light points chosen by power", 0, 64);
+        mParameters.Add("restirBsdf", &mSettings.restir.bsdfCandidates,
+                        "ReSTIR initial candidates: BSDF rays that may reach an emitter", 0, 8);
+        mParameters.Add("restirSpatial", &mSettings.restir.spatialSamples, "ReSTIR neighbours reused per pixel", 0,
+                        gpu::kReSTIRMaxSpatialSamples);
+        mParameters.Add("restirDisocclusion", &mSettings.restir.disocclusionSamples,
+                        "ReSTIR neighbours reused where a pixel has no temporal history", 0,
+                        gpu::kReSTIRMaxSpatialSamples);
+        mParameters.Add("restirRadius", &mSettings.restir.spatialRadius, "ReSTIR neighbour radius in pixels", 1.0f,
+                        256.0f);
+        mParameters.Add("restirHistory", &mSettings.restir.maxConfidence,
+                        "ReSTIR temporal history cap, in frames' worth of candidates", 1, 254);
+        mParameters.Add("restirUnbiased", &mSettings.restir.unbiased,
+                        "ReSTIR MIS weights trace the visibility they need (off: fewer rays, darker penumbrae)");
         mParameters.Add("furnace", &mSettings.furnace,
                         "White furnace: white materials, lights off; energy conservation shows as a flat grey image");
         mParameters.Add("debugView", &mSettings.debugView,
@@ -82,6 +100,7 @@ public:
         status["accumulatedSamples"] = mTracer ? mTracer->GetAccumulatedSamples() : 0u;
         status["converged"] = mTracer && mTracer->IsConverged();
         status["ser"] = mTracer && mTracer->UsesShaderExecutionReordering();
+        status["restir"] = mTracer && mTracer->UsesReSTIR();
         return status;
     }
 
