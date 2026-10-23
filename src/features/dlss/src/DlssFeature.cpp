@@ -16,11 +16,10 @@
 
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
-#include <nvsdk_ngx_helpers_dlssd.h>
 #include <nvsdk_ngx_helpers_dlssd_d3d.h>
 
+#include <array>
 #include <cmath>
-#include <cstring>
 #include <mutex>
 
 namespace air::dlss {
@@ -40,34 +39,26 @@ std::string ResultText(NVSDK_NGX_Result result) {
 
 // Row-major matrices for row vectors (v * M), left-handed view space (x right, y up, z forward)
 // and D3D clip space with depth in [0, 1].
-void ViewMatrices(const renderer::Camera& camera, float aspect, float worldToView[16], float viewToClip[16]) {
+using Matrix = std::array<float, 16>;
+
+void ViewMatrices(const renderer::Camera& camera, float aspect, Matrix& worldToView, Matrix& viewToClip) {
     const renderer::float3 r = camera.Right();
     const renderer::float3 u = camera.Up();
     const renderer::float3 f = camera.Forward();
     const renderer::float3 p = camera.position;
-    const float view[16] = {r.x,
-                            u.x,
-                            f.x,
-                            0.0f,
-                            r.y,
-                            u.y,
-                            f.y,
-                            0.0f,
-                            r.z,
-                            u.z,
-                            f.z,
-                            0.0f,
-                            -hlsl::dot(r, p),
-                            -hlsl::dot(u, p),
-                            -hlsl::dot(f, p),
-                            1.0f};
+    // clang-format off
+    worldToView = {r.x, u.x, f.x, 0.0f,
+                   r.y, u.y, f.y, 0.0f,
+                   r.z, u.z, f.z, 0.0f,
+                   -hlsl::dot(r, p), -hlsl::dot(u, p), -hlsl::dot(f, p), 1.0f};
     const float ys = 1.0f / std::tan(camera.verticalFov * 0.5f);
     const float xs = ys / aspect;
     const float zs = kFar / (kFar - kNear);
-    const float proj[16] = {xs,   0.0f, 0.0f, 0.0f, 0.0f, ys,   0.0f,        0.0f,
-                            0.0f, 0.0f, zs,   1.0f, 0.0f, 0.0f, -kNear * zs, 0.0f};
-    std::memcpy(worldToView, view, sizeof(view));
-    std::memcpy(viewToClip, proj, sizeof(proj));
+    viewToClip = {xs,   0.0f, 0.0f,        0.0f,
+                  0.0f, ys,   0.0f,        0.0f,
+                  0.0f, 0.0f, zs,          1.0f,
+                  0.0f, 0.0f, -kNear * zs, 0.0f};
+    // clang-format on
 }
 
 class DlssFeature final : public renderer::RenderFeature {
@@ -163,7 +154,8 @@ public:
         const float jitterY = float(context.blackboard.GetValue(slots::kJitterY)) * sign;
         const bool reset = mFirstFrame || context.blackboard.GetValue(slots::kHistoryReset) != 0.0;
         mFirstFrame = false;
-        float worldToView[16], viewToClip[16];
+        Matrix worldToView{};
+        Matrix viewToClip{};
         ViewMatrices(context.camera, float(mWidth) / float(mHeight), worldToView, viewToClip);
         const u32 preset = mPreset;
 
@@ -175,8 +167,7 @@ public:
                 }
                 b.Write(in.denoised, Access::UAVCompute);
             },
-            [this, in, jitterX, jitterY, reset, preset, worldToView = std::to_array(worldToView),
-             viewToClip = std::to_array(viewToClip)](rdg::PassContext& ctx) mutable {
+            [this, in, jitterX, jitterY, reset, preset, worldToView, viewToClip](rdg::PassContext& ctx) mutable {
                 auto* list = static_cast<ID3D12GraphicsCommandList*>(ctx.cmd.GetNativeHandle());
                 auto resource = [&](rdg::TextureRef t) {
                     return static_cast<ID3D12Resource*>(ctx.device.GetNativeResource(ctx.Get(t)));
