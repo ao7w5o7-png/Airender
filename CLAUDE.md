@@ -8,6 +8,9 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Gate before pushing: `python3 tools/air.py check` (format + layering + build + all tests). Add
   `--full` (clang-tidy + TSAN) after touching concurrent code.
 - Run a subset of tests: `python3 tools/air.py test <name substring>`.
+- After editing HLSL: `python3 tools/air.py shaders` compiles every shader with the build's exact
+  dxc command lines (no C++ build needed). A running editor hot-reloads saved shaders by itself
+  (docs/architecture.md §9.1).
 - Run the renderer: `python3 tools/air.py run -- render --features pathtracer,example --frames 2 --report out/report.json`
   - The report is JSON: per-frame stats, feature parameters and status, `errors`, `passed`. Exit
     code 0 = passed, 1 = validation errors or leaks, 2 = usage or environment error.

@@ -25,6 +25,7 @@ constexpr size_t kMaxLogLines = 2000;
 constexpr float kResizeDelaySeconds = 0.25f;
 constexpr float kMaxResizeTimerStep = 1.0f / 30.0f; // a slow frame counts as at most this
 constexpr u32 kResizeSettleFrames = 5;
+constexpr u32 kMaxShaderLogLines = 40;
 
 std::string ParameterText(const renderer::ParameterSet::Entry& entry)
 {
@@ -77,6 +78,16 @@ EditorApp::EditorApp(rhi::Device& device, TaskSystem& tasks, EditorOptions optio
         LoadScene("cornell_box");
     }
     CreateRunner(mOptions.width, mOptions.height);
+    mShaderReload = std::make_unique<renderer::ShaderHotReload>(mOptions.shaderRoot);
+    if (mShaderReload->IsAvailable())
+    {
+        AIR_LOG(Info, "Shaders", "hot reload: watching {} files of {} shaders (Ctrl+R recompiles all)",
+                mShaderReload->GetWatchedFileCount(), mShaderReload->GetShaderCount());
+    }
+    else
+    {
+        AIR_LOG(Info, "Shaders", "hot reload unavailable: {}", mShaderReload->GetUnavailableReason());
+    }
 }
 
 EditorApp::~EditorApp()
@@ -313,8 +324,79 @@ bool EditorApp::SaveScreenshot(const std::filesystem::path& path)
 
 // --- UI ------------------------------------------------------------------------------------------
 
+void EditorApp::PollShaderReload()
+{
+    if (!mShaderReload->IsAvailable() ||
+        !(mShaderHotReload || mShaderRecompileRequested || mShaderReload->IsCompiling()))
+    {
+        return;
+    }
+    std::optional<renderer::ShaderCompileResult> result = mShaderReload->Poll();
+    if (!result)
+    {
+        return;
+    }
+    mShaderRecompileRequested = false;
+    if (!result->success)
+    {
+        // One log line per compiler line, so the Log panel shows them in red.
+        mShaderFailed = true;
+        mShaderStatus.clear();
+        std::string_view log = result->log;
+        u32 lines = 0;
+        while (!log.empty() && lines < kMaxShaderLogLines)
+        {
+            const size_t end = log.find('\n');
+            std::string_view line = log.substr(0, end);
+            log = end == std::string_view::npos ? std::string_view() : log.substr(end + 1);
+            if (!line.empty() && line.back() == '\r')
+            {
+                line.remove_suffix(1);
+            }
+            if (line.empty())
+            {
+                continue;
+            }
+            AIR_LOG(Error, "Shaders", "{}", line);
+            if (mShaderStatus.empty() && line.find("error") != std::string_view::npos)
+            {
+                mShaderStatus = line;
+            }
+            ++lines;
+        }
+        AIR_LOG(Error, "Shaders", "compile failed; the previous shaders keep running");
+        if (mShaderStatus.empty())
+        {
+            mShaderStatus = "compile failed";
+        }
+        return;
+    }
+    if (result->shaders.empty())
+    {
+        return;
+    }
+    mShaderFailed = false;
+    std::string names;
+    for (const std::string& name : result->shaders)
+    {
+        names += (names.empty() ? "" : ", ") + name;
+    }
+    mShaderStatus = std::format("{} shader{} reloaded in {:.0f} ms", result->shaders.size(),
+                                result->shaders.size() == 1 ? "" : "s", result->milliseconds);
+    AIR_LOG(Info, "Shaders", "{}: {}", mShaderStatus, names);
+    if (result->sharedHeaderChanged)
+    {
+        AIR_LOG(Warning, "Shaders",
+                "a *Shared.h header changed: rebuild the editor if a struct layout changed (C++ and HLSL must agree)");
+    }
+    const auto& desc = mRunner->GetDesc();
+    CreateRunner(desc.width, desc.height); // every feature reloads its shaders; parameters are kept
+}
+
 void EditorApp::BuildUi(float deltaSeconds)
 {
+    // Before any window is built, like the resize below: a reload recreates the runner.
+    PollShaderReload();
     // Apply a viewport resize once the size stopped changing, for both a while and a few frames: one
     // slow frame (pipelines compiling at startup) must not commit a transient layout size such as
     // 1328x20. Done before any window is built so this frame's draw data only references the new
@@ -457,6 +539,11 @@ void EditorApp::BuildMenuBar()
     {
         mDiagnostics.SetPaused(!mDiagnostics.IsPaused());
     }
+    if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_R, false) && mShaderReload->IsAvailable())
+    {
+        mShaderReload->RecompileAll();
+        mShaderRecompileRequested = true;
+    }
 }
 
 void EditorApp::BuildViewport(float deltaSeconds)
@@ -508,6 +595,15 @@ void EditorApp::BuildViewport(float deltaSeconds)
                         ImVec2(imageMin.x + ImGui::CalcTextSize(overlay.c_str()).x + 12.0f, imageMin.y + 22.0f),
                         IM_COL32(0, 0, 0, 140));
     draw->AddText(ImVec2(imageMin.x + 6.0f, imageMin.y + 4.0f), IM_COL32(230, 230, 230, 255), overlay.c_str());
+    if (mShaderFailed)
+    {
+        const std::string banner =
+            std::format("shader compile failed: {}  (see Log; the previous shaders keep running)", mShaderStatus);
+        draw->AddRectFilled(ImVec2(imageMin.x, imageMin.y + 24.0f),
+                            ImVec2(imageMin.x + ImGui::CalcTextSize(banner.c_str()).x + 12.0f, imageMin.y + 46.0f),
+                            IM_COL32(150, 20, 20, 220));
+        draw->AddText(ImVec2(imageMin.x + 6.0f, imageMin.y + 28.0f), IM_COL32(255, 235, 235, 255), banner.c_str());
+    }
     if (mViewportHovered)
     {
         ImGui::SetItemTooltip("Hold right mouse: look around, WASD/QE: move, wheel: speed, Shift: fast");
@@ -689,6 +785,7 @@ void EditorApp::BuildRenderPanel()
                                   "highest cost. Quality traces 44%% of the pixels with nearly the same image.");
         }
     }
+    BuildShaderSection();
 
     for (const std::string& name : mActiveFeatures)
     {
@@ -707,6 +804,38 @@ void EditorApp::BuildRenderPanel()
         ImGui::PopID();
     }
     ImGui::End();
+}
+
+void EditorApp::BuildShaderSection()
+{
+    ImGui::SeparatorText("Shaders");
+    if (!mShaderReload->IsAvailable())
+    {
+        ImGui::TextDisabled("Hot reload unavailable: %s", mShaderReload->GetUnavailableReason().c_str());
+        return;
+    }
+    ImGui::Checkbox("Hot reload", &mShaderHotReload);
+    ImGui::SetItemTooltip("Watches %zu HLSL files of %zu shaders. Saving one recompiles the shaders that use it\n"
+                          "with the build's dxc command line and reloads them. A compile error keeps the\n"
+                          "previous shaders running and is listed in the Log.",
+                          mShaderReload->GetWatchedFileCount(), mShaderReload->GetShaderCount());
+    ImGui::SameLine();
+    if (ImGui::Button("Recompile all"))
+    {
+        mShaderReload->RecompileAll();
+        mShaderRecompileRequested = true;
+    }
+    ImGui::SetItemTooltip("Ctrl+R");
+    if (mShaderReload->IsCompiling())
+    {
+        ImGui::SameLine();
+        ImGui::TextDisabled("compiling...");
+    }
+    if (!mShaderStatus.empty())
+    {
+        ImGui::TextColored(mShaderFailed ? ImVec4(1.0f, 0.4f, 0.35f, 1.0f) : ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s",
+                           mShaderStatus.c_str());
+    }
 }
 
 void EditorApp::BuildDebugPanel()

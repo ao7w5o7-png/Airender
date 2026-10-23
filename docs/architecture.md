@@ -435,9 +435,33 @@ including each other. Slots live in `renderer::slots`:
 
 Panels: Viewport (fly camera: hold right mouse to look, WASD/QE to move, wheel for speed, Shift
 for fast; F12 saves a screenshot), Scene (scene picker, camera,
-EV100, materials), Render (feature parameters, DLSS toggle, debug views, screenshot), Profiler (GPU
-pass timeline, per-thread CPU scopes, frame/GPU/CPU/samples-per-second history), Memory (VRAM
-budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
+EV100, materials), Render (VSync, DLSS toggle and mode, shader hot reload, feature parameters),
+Debug (debug views, furnace, NEE), Profiler (GPU pass timeline, per-thread CPU scopes,
+frame/GPU/CPU/samples-per-second history; pause with P or Pause and step frame by frame), Memory
+(VRAM budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
+Command line: `aireditor [--scene NAME] [--no-vsync] [--dlss] [--dlss-mode quality|...]`.
+
+### 9.1 Shader hot reload
+
+Saving an `.hlsl`/`.hlsli` (or a header it includes) in a running editor recompiles the shaders
+that use it and shows the result within about 100 ms:
+
+- CMake writes `<build>/shaders/manifest.json` at configure time: the dxc path and, per output,
+  the exact command line of the build and the files it depends on (`cmake/AirShaders.cmake`).
+- `renderer::ShaderHotReload` checks those files' times every 250 ms, waits until they have been
+  quiet for 150 ms (editors save in steps), and compiles the changed shaders on a worker thread
+  into temporary files. Outputs are replaced only if every one compiled; otherwise the previous
+  shaders keep running.
+- The editor then recreates its FrameRunner (parameters are kept), so every feature reloads its
+  pipelines. Compiler errors go to the Log one line each, and a red banner stays on the viewport
+  until a compile succeeds. Ctrl+R or Render > Recompile all forces a full recompile.
+- `*Shared.h` headers are compiled into C++ too: changing a struct layout still needs a rebuild,
+  which the log points out.
+- New shader files need a CMake reconfigure (the manifest lists the files that existed then).
+
+`python3 tools/air.py shaders [filter]` compiles every shader from the same manifest into
+`<build>/shader-check/`, a quick HLSL check that needs no C++ build and leaves a running editor's
+shaders alone.
 
 ---
 

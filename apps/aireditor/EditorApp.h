@@ -15,6 +15,7 @@
 #include "air/core/TaskSystem.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/Scene.h"
+#include "air/renderer/ShaderHotReload.h"
 
 #include <chrono>
 #include <deque>
@@ -96,6 +97,9 @@ public:
     u32 GetDlssMode() const { return mOptions.dlssMode; }
     // A feature parameter as text ("" if the feature or parameter is missing).
     std::string GetParameter(std::string_view feature, std::string_view name) const;
+    // Shader hot reload: polled every BuildUi(); a successful compile recreates the runner.
+    renderer::ShaderHotReload& GetShaderReload() { return *mShaderReload; }
+    bool HasShaderError() const { return mShaderFailed; }
 
 private:
     void CreateRunner(u32 width, u32 height);
@@ -106,6 +110,8 @@ private:
     void BuildDebugPanel();
     void BuildLogPanel();
     void UpdateCamera(float deltaSeconds);
+    void PollShaderReload();
+    void BuildShaderSection();
     std::string SetParameter(const std::string& qualified, const std::string& value);
 
     rhi::Device& mDevice;
@@ -134,6 +140,13 @@ private:
     // Path tracer settings from before DLSS was enabled, restored when it is disabled.
     std::string mPreDlssAccumulate;
     std::string mPreDlssSpp;
+
+    // Shader hot reload of the build's HLSL sources (see renderer::ShaderHotReload).
+    std::unique_ptr<renderer::ShaderHotReload> mShaderReload;
+    bool mShaderHotReload = true;           // watch the sources
+    bool mShaderRecompileRequested = false; // Recompile all / Ctrl+R, also while not watching
+    bool mShaderFailed = false;             // the last compile failed; the previous shaders still run
+    std::string mShaderStatus;
 
     // Windows.
     bool mShowScene = true;

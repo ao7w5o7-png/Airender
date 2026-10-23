@@ -6,6 +6,7 @@ add_library(air_renderer
     src/Transfer.cpp
     src/Scene.cpp
     src/SceneLibrary.cpp
+    src/ShaderHotReload.cpp
     src/ShaderLoader.cpp
 )
 target_include_directories(air_renderer PUBLIC include)
