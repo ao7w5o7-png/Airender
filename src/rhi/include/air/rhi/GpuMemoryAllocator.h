@@ -157,6 +157,7 @@ public:
     // Per heap block usage, for memory visualisation (fragmentation, dedicated heaps).
     struct HeapUsage
     {
+        u64 id = 0; // the native heap's address: ResourceInfo::heapId of the resources in it
         u64 size = 0;
         u64 usedBytes = 0;
         u32 allocationCount = 0;

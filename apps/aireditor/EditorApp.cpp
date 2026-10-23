@@ -4,6 +4,7 @@
 
 #include "air/core/Log.h"
 #include "air/renderer/Diagnostics.h"
+#include "air/renderer/ProfileReport.h"
 #include "air/renderer/Transfer.h"
 
 #include <imgui.h>
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <format>
 #include <numbers>
+#include <utility>
 
 namespace air::editor
 {
@@ -61,6 +63,7 @@ float Radians(float degrees)
 EditorApp::EditorApp(rhi::Device& device, TaskSystem& tasks, EditorOptions options)
     : mDevice(device), mTasks(tasks), mOptions(std::move(options))
 {
+    mFocusWindow = mOptions.focusWindow;
     SetLogSink(
         [this](LogLevel level, std::string_view category, std::string_view message)
         {
@@ -281,12 +284,33 @@ void EditorApp::RenderFrame(const std::function<void(renderer::FrameContext&)>& 
     mLastFrameTime = now;
 
     mScene->Update();
+    // A report requested while a capture still waits for its GPU timings uses that capture.
+    u32 captureTargets = 0;
+    if (mReportRequest != 0 && mPendingCapture)
+    {
+        mPendingTargets |= std::exchange(mReportRequest, 0u);
+    }
+    else if (mReportRequest != 0)
+    {
+        mRunner->RequestCapture();
+        captureTargets = std::exchange(mReportRequest, 0u);
+    }
     Profiler::Get().BeginFrame();
     mLastResult = mRunner->RenderFrame(mScene->Get(), mCamera, uiPass);
     Profiler::Get().EndFrame();
     for (const std::string& error : mLastResult.validationErrors)
     {
         AIR_LOG(Error, "Validation", "{}", error);
+    }
+    if (mLastResult.capture)
+    {
+        mPendingCapture = mLastResult.capture;
+        mPendingTargets = captureTargets;
+        mPendingCaptureFrames = 0;
+    }
+    if (mPendingCapture)
+    {
+        FinishProfileReport();
     }
     // Samples traced this frame: spp when the trace pass ran (it stops once converged).
     u32 samples = 0;
@@ -304,6 +328,55 @@ void EditorApp::RenderFrame(const std::function<void(renderer::FrameContext&)>& 
     }
     const auto& desc = mRunner->GetDesc();
     mDiagnostics.Update(mLastResult, wallMs, samples * desc.width * desc.height);
+}
+
+void EditorApp::ExportProfileReport()
+{
+    mReportRequest |= kReportFile;
+    mDiagnostics.SetReportStatus("capturing the next frame...");
+}
+
+void EditorApp::FinishProfileReport()
+{
+    // The captured frame's GPU timings resolve a few frames after it; report without them if they
+    // never come (GPU profiling off, device lost).
+    const rhi::GpuFrameTimings& gpu = mLastResult.gpu;
+    const bool arrived = gpu.frameIndex != ~0ull && gpu.frameIndex >= mPendingCapture->deviceFrame;
+    if (!arrived && ++mPendingCaptureFrames < 16)
+    {
+        return;
+    }
+    const json::Value report = renderer::MakeProfileReport({.capture = mPendingCapture.get(),
+                                                            .gpu = arrived ? gpu : rhi::GpuFrameTimings{},
+                                                            .backend = rhi::ToString(mDevice.GetBackend()),
+                                                            .adapter = mDevice.GetCapabilities().adapterName,
+                                                            .scene = mSceneName,
+                                                            .features = mRunner->DescribeFeatures()});
+    const u64 frame = mPendingCapture->frameIndex;
+    const u32 targets = std::exchange(mPendingTargets, 0u);
+    mPendingCapture.reset();
+    if ((targets & kReportPanel) && mHtmlView)
+    {
+        mHtmlView->PostJson(report.Dump(0));
+    }
+    if (!(targets & kReportFile))
+    {
+        return;
+    }
+    const std::filesystem::path path = mOptions.profileDirectory / std::format("{}-frame{}.html", mSceneName, frame);
+    if (!renderer::WriteProfileHtml(path, report))
+    {
+        AIR_LOG(Error, "Editor", "could not write the profile report {}", path.string());
+        mDiagnostics.SetReportStatus("could not write " + path.string());
+        return;
+    }
+    mLastProfileReport = std::filesystem::absolute(path);
+    AIR_LOG(Info, "Editor", "profile report: {}", mLastProfileReport.string());
+    mDiagnostics.SetReportStatus("wrote " + path.generic_string());
+    if (mOptions.openFile)
+    {
+        mOptions.openFile(mLastProfileReport);
+    }
 }
 
 bool EditorApp::SaveScreenshot(const std::filesystem::path& path)
@@ -447,6 +520,7 @@ void EditorApp::BuildUi(float deltaSeconds)
             ImGui::DockBuilderDockWindow("Render", right);
             ImGui::DockBuilderDockWindow("Debug", right);
             ImGui::DockBuilderDockWindow("Profiler", bottom);
+            ImGui::DockBuilderDockWindow(kHtmlProfilerWindow, bottom);
             ImGui::DockBuilderDockWindow("Memory", bottom);
             ImGui::DockBuilderDockWindow("Log", bottom);
             ImGui::DockBuilderFinish(dockspace);
@@ -468,6 +542,18 @@ void EditorApp::BuildUi(float deltaSeconds)
     if (mShowProfiler)
     {
         mDiagnostics.BuildProfiler(&mShowProfiler);
+        if (mDiagnostics.TakeReportRequest())
+        {
+            ExportProfileReport();
+        }
+    }
+    if (mShowHtmlProfiler)
+    {
+        BuildHtmlProfiler();
+    }
+    else if (mHtmlView)
+    {
+        mHtmlView->SetBounds(0, 0, 0, 0, false);
     }
     if (mShowMemory)
     {
@@ -480,6 +566,76 @@ void EditorApp::BuildUi(float deltaSeconds)
     if (mShowImGuiDemo)
     {
         ImGui::ShowDemoWindow(&mShowImGuiDemo);
+    }
+    // Once the window exists (it may take a frame), focus it: a docked window's tab gets selected.
+    if (!mFocusWindow.empty() && ImGui::FindWindowByName(mFocusWindow.c_str()))
+    {
+        ImGui::SetWindowFocus(mFocusWindow.c_str());
+        mFocusWindow.clear();
+    }
+}
+
+// The profile report of §9.2 in a web view over this panel, refreshed while visible.
+void EditorApp::BuildHtmlProfiler()
+{
+    // A layout saved before this panel existed: dock it next to the ImGui profiler.
+    if (const ImGuiWindow* profiler = ImGui::FindWindowByName("Profiler"); profiler && profiler->DockId != 0)
+    {
+        ImGui::SetNextWindowDockID(profiler->DockId, ImGuiCond_FirstUseEver);
+    }
+    bool visible = false;
+    ImVec2 origin(0.0f, 0.0f), size(0.0f, 0.0f);
+    if (ImGui::Begin(kHtmlProfilerWindow, &mShowHtmlProfiler))
+    {
+        ImGui::Checkbox("Live", &mHtmlLive);
+        ImGui::SetItemTooltip("Capture a frame for the page every %.1f s while this panel is visible; the "
+                              "profiler's Pause (P) holds it.",
+                              mOptions.htmlProfilerInterval);
+        ImGui::SameLine();
+        if (ImGui::Button("Capture"))
+        {
+            mReportRequest |= kReportPanel;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Open in browser"))
+        {
+            ExportProfileReport();
+        }
+        if (mHtmlView)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", mHtmlView->GetStatus().c_str());
+        }
+        origin = ImGui::GetCursorScreenPos();
+        size = ImGui::GetContentRegionAvail();
+        if (!mOptions.createHtmlView)
+        {
+            ImGui::TextWrapped("No web view on this platform: Open in browser shows the same report.");
+        }
+        else
+        {
+            if (!mHtmlView)
+            {
+                mHtmlView = mOptions.createHtmlView();
+                mHtmlView->LoadPage(renderer::MakeProfileHtml(json::Value())); // waits for the first capture
+            }
+            ImGui::Dummy(size); // the page covers this area
+            // A popup (a menu, a combo) under the web view would be hidden by it.
+            visible = size.x >= 16.0f && size.y >= 16.0f &&
+                      !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
+            const auto now = std::chrono::steady_clock::now();
+            if (visible && mHtmlLive && !mDiagnostics.IsPaused() && !mPendingCapture && mReportRequest == 0 &&
+                now - mLastHtmlCapture >= std::chrono::duration<float>(mOptions.htmlProfilerInterval))
+            {
+                mReportRequest |= kReportPanel;
+                mLastHtmlCapture = now;
+            }
+        }
+    }
+    ImGui::End();
+    if (mHtmlView)
+    {
+        mHtmlView->SetBounds(int(origin.x), int(origin.y), int(size.x), int(size.y), visible);
     }
 }
 
@@ -494,6 +650,10 @@ void EditorApp::BuildMenuBar()
         if (ImGui::MenuItem("Save screenshot", "F12"))
         {
             SaveScreenshot(std::format("airender_{:03}", mScreenshotCounter++));
+        }
+        if (ImGui::MenuItem("Export frame profile (HTML)"))
+        {
+            ExportProfileReport();
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Alt+F4"))
@@ -519,6 +679,7 @@ void EditorApp::BuildMenuBar()
         ImGui::MenuItem("Render", nullptr, &mShowRender);
         ImGui::MenuItem("Debug", nullptr, &mShowDebug);
         ImGui::MenuItem("Profiler", nullptr, &mShowProfiler);
+        ImGui::MenuItem(kHtmlProfilerWindow, nullptr, &mShowHtmlProfiler);
         ImGui::MenuItem("Memory", nullptr, &mShowMemory);
         ImGui::MenuItem("Log", nullptr, &mShowLog);
         ImGui::Separator();

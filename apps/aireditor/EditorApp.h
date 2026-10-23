@@ -10,6 +10,7 @@
 //              app.RenderFrame([&](FrameContext& c) { /* add the swapchain UI pass */ });
 
 #include "DiagnosticsPanels.h"
+#include "HtmlView.h"
 
 #include "air/core/Image.h"
 #include "air/core/TaskSystem.h"
@@ -51,7 +52,16 @@ struct EditorOptions
     u32 height = 720;
     bool vsync = true; // off: present as fast as possible (uncapped frame rate, tearing when supported)
     u32 dlssMode = 1;  // index into kDlssModes, used while dlss is enabled (Quality)
+    // Opens a written file (the profile report) in the system's default application. Unset in tests.
+    std::function<void(const std::filesystem::path&)> openFile;
+    std::filesystem::path profileDirectory = "out/profiles"; // where ExportProfileReport() writes
+    // The web view of the HTML profiler panel (WebView2 on Windows); unset, the panel offers the browser.
+    std::function<std::unique_ptr<HtmlView>()> createHtmlView;
+    float htmlProfilerInterval = 1.0f; // seconds between the panel's live captures
+    std::string focusWindow;           // a window brought to front at startup (selects its dock tab)
 };
+
+inline constexpr const char* kHtmlProfilerWindow = "Profiler (HTML)";
 
 struct LogLine
 {
@@ -85,6 +95,16 @@ public:
 
     // Saves the displayed frame as <path>.ppm (display-encoded) and <path>.pfm.
     bool SaveScreenshot(const std::filesystem::path& path);
+    // Captures the next frame and, once its GPU timings arrive a few frames later, writes its HTML
+    // profile report (renderer/ProfileReport.h) to <profileDirectory>/<scene>-frame<N>.html and opens it.
+    void ExportProfileReport();
+    const std::filesystem::path& GetLastProfileReport() const { return mLastProfileReport; } // empty until written
+    // The HTML profiler panel shows the same report in a web view, refreshed every
+    // htmlProfilerInterval seconds while it is visible ("Live") and the profiler is not paused.
+    void SetHtmlProfilerLive(bool live) { mHtmlLive = live; }
+    HtmlView* GetHtmlView() const { return mHtmlView.get(); }
+    // Brings a window to front on the next frame; for a docked one this selects its tab.
+    void FocusWindow(std::string name) { mFocusWindow = std::move(name); }
     // Applies a resolution change now (the UI otherwise waits until the viewport stops resizing).
     void Resize(u32 width, u32 height);
     bool LoadScene(const std::string& name);
@@ -112,6 +132,8 @@ private:
     void UpdateCamera(float deltaSeconds);
     void PollShaderReload();
     void BuildShaderSection();
+    void BuildHtmlProfiler();
+    void FinishProfileReport();
     std::string SetParameter(const std::string& qualified, const std::string& value);
 
     rhi::Device& mDevice;
@@ -148,11 +170,25 @@ private:
     bool mShaderFailed = false;             // the last compile failed; the previous shaders still run
     std::string mShaderStatus;
 
+    // Profile reports: where the next capture goes, and the captured frame waiting for its GPU timings.
+    static constexpr u32 kReportFile = 1;  // written and opened (ExportProfileReport)
+    static constexpr u32 kReportPanel = 2; // sent to the HTML profiler panel
+    u32 mReportRequest = 0;
+    u32 mPendingTargets = 0;
+    std::shared_ptr<const renderer::FrameCapture> mPendingCapture;
+    u32 mPendingCaptureFrames = 0;
+    std::filesystem::path mLastProfileReport;
+    std::unique_ptr<HtmlView> mHtmlView;
+    bool mHtmlLive = true;
+    std::chrono::steady_clock::time_point mLastHtmlCapture;
+    std::string mFocusWindow;
+
     // Windows.
     bool mShowScene = true;
     bool mShowRender = true;
     bool mShowDebug = true;
     bool mShowProfiler = true;
+    bool mShowHtmlProfiler = true;
     bool mShowMemory = true;
     bool mShowLog = true;
     bool mShowImGuiDemo = false;

@@ -9,6 +9,7 @@ add_executable(air_tests
     RendererTests.cpp
     GoldenTests.cpp
     DiagnosticsTests.cpp
+    ProfileReportTests.cpp
     ShaderHotReloadTests.cpp
     SceneTests.cpp
     ${feature_tests}

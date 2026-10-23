@@ -2,9 +2,14 @@
 //
 //   aireditor [--scene NAME] [--shaders DIR] [--features a,b,...] [--no-vsync] [--dlss]
 //             [--dlss-mode dlaa|quality|balanced|performance|ultra] [--gpu-validation] [--no-validation]
+//             [--focus WINDOW]
 //
 // --features replaces the feature chain (default pathtracer,tonemap); dlss is inserted after the
-// path tracer when enabled.
+// path tracer when enabled. --focus brings a window to front at startup (selects its dock tab),
+// e.g. --focus "Profiler (HTML)".
+//
+// The HTML profiler panel is a WebView2 control (WebViewHost.cpp) in a child window over the
+// panel; the main window clips its children so the swapchain does not paint over it.
 //
 // The UI is drawn by one render graph pass at the end of every frame, into the swapchain back
 // buffer, reading the frame output as a shader resource. ImGui's textures (font atlas) and the
@@ -12,6 +17,9 @@
 // shader-visible heap.
 
 #include "EditorApp.h"
+#if AIR_WITH_WEBVIEW2
+#include "WebViewHost.h"
+#endif
 
 #include "air/core/Log.h"
 #include "air/rhi/RHIDevice.h"
@@ -23,6 +31,7 @@
 #include <windows.h>
 
 #include <d3d12.h>
+#include <objbase.h>
 #include <shellapi.h>
 
 #include <algorithm>
@@ -76,6 +85,18 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                      suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
         return 0;
     }
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        // Clicking the editor takes the keyboard back from the HTML profiler's web view.
+        if (GetFocus() != hwnd)
+        {
+            SetFocus(hwnd);
+        }
+        break;
+#if AIR_WITH_WEBVIEW2
+    case WM_MOVE: editor::NotifyWebViewParentMoved(); break;
+#endif
     case WM_DESTROY: PostQuitMessage(0); return 0;
     default: break;
     }
@@ -129,6 +150,8 @@ void ApplyStyle(float dpiScale)
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
 {
+    // WebView2 (the HTML profiler panel) needs a single-threaded apartment on the UI thread.
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     editor::EditorOptions options;
     rhi::DeviceDesc deviceDesc{.backend = rhi::Backend::D3D12};
     bool dlss = false;
@@ -194,9 +217,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             {
                 deviceDesc.enableValidation = false;
             }
+            else if (arg == "--focus" && i + 1 < argc)
+            {
+                options.focusWindow = Narrow(argv[++i]);
+            }
         }
         LocalFree(argv);
     }
+    // Profile reports open in the default browser.
+    options.openFile = [](const std::filesystem::path& path)
+    { ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL); };
     // Next to the executable first (installed layout), then the build tree.
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -219,8 +249,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     RegisterClassExW(&windowClass);
     gWindow.width = u32(1600 * dpiScale);
     gWindow.height = u32(900 * dpiScale);
-    HWND hwnd = CreateWindowW(windowClass.lpszClassName, L"Airender Editor", WS_OVERLAPPEDWINDOW, 100, 100,
-                              int(gWindow.width), int(gWindow.height), nullptr, nullptr, instance, nullptr);
+    HWND hwnd = CreateWindowW(windowClass.lpszClassName, L"Airender Editor", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, 100,
+                              100, int(gWindow.width), int(gWindow.height), nullptr, nullptr, instance, nullptr);
+#if AIR_WITH_WEBVIEW2
+    // The HTML profiler panel's web view keeps its cache in the user's local application data.
+    options.createHtmlView = [hwnd]
+    {
+        wchar_t localAppData[MAX_PATH] = {};
+        const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+        const std::filesystem::path base = length > 0 && length < MAX_PATH ? std::filesystem::path(localAppData)
+                                                                           : std::filesystem::temp_directory_path();
+        return editor::CreateWebViewHost(hwnd, base / "Airender" / "WebView2");
+    };
+#endif
 
     auto device = rhi::CreateDevice(deviceDesc);
     if (!device)
@@ -346,5 +387,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     device->WaitIdle();
     DestroyWindow(hwnd);
     UnregisterClassW(windowClass.lpszClassName, instance);
+    CoUninitialize();
     return 0;
 }

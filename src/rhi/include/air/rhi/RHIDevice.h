@@ -153,6 +153,10 @@ struct ResourceInfo
     u64 sizeBytes = 0;
     MemoryLocation location = MemoryLocation::DeviceLocal;
     bool placedInHeap = false; // lives inside a CreateHeap() heap (render graph transient memory)
+    // Where the memory is: the allocator heap (GpuMemoryAllocator::HeapUsage::id) and the byte offset
+    // in it; resources placed in a CreateHeap() heap share that heap's id. 0 when not known.
+    u64 heapId = 0;
+    u64 heapOffset = 0;
 };
 
 // GPU duration of one BeginEvent/EndEvent scope.

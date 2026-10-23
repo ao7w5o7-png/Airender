@@ -5,7 +5,7 @@
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
 //                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
-//                   [--no-async-compute]
+//                   [--no-async-compute] [--html profile.html]   (profile report of the last frame)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
@@ -23,6 +23,7 @@
 #include "air/features/pathtracer/ReferenceRenderer.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
+#include "air/renderer/ProfileReport.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
 #include "air/renderer/Transfer.h"
@@ -54,7 +55,7 @@ int Usage()
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
                "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
-               "                [--no-validation] [--no-async-compute]\n"
+               "                [--no-validation] [--no-async-compute] [--html profile.html]\n"
                "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee]\n"
@@ -301,6 +302,7 @@ int CommandRender(Args& args)
     std::vector<std::string> sets;
     std::string dumpGraph;
     std::string reportPath;
+    std::string htmlPath;
     std::string sceneName = "cornell_box";
     std::string outputPath;
     bool dumpCommands = false;
@@ -364,6 +366,11 @@ int CommandRender(Args& args)
         else if (arg == "--no-async-compute")
         {
             desc.graphConfig.enableAsyncCompute = false; // async passes run on the graphics queue
+        }
+        else if (arg == "--html")
+        {
+            htmlPath = args.Next();
+            desc.profile = true; // the report shows GPU timings
         }
         else if (arg == "--scene")
         {
@@ -451,12 +458,21 @@ int CommandRender(Args& args)
 
         json::Value frameReports = json::Value::MakeArray();
         json::Value commands = json::Value::MakeArray();
+        std::shared_ptr<const renderer::FrameCapture> capture; // the last frame's, for --html
         for (u32 frame = 0; frame < frames; ++frame)
         {
+            if (!htmlPath.empty() && frame + 1 == frames)
+            {
+                runner.RequestCapture();
+            }
             Profiler::Get().BeginFrame();
             scene.Update();
             renderer::FrameResult result = runner.RenderFrame(scene.Get(), camera);
             Profiler::Get().EndFrame();
+            if (result.capture)
+            {
+                capture = result.capture;
+            }
             if (frame == 0)
             {
                 std::fputs(result.graphText.c_str(), stdout);
@@ -506,6 +522,27 @@ int CommandRender(Args& args)
             report["cpuProfile"] = renderer::ToJson(Profiler::Get().GetLastFrame());
             report["memory"] = renderer::ToJson(device->GetMemoryStats());
             report["processMemory"] = renderer::ToJson(GetProcessMemory());
+        }
+        if (capture)
+        {
+            // After WaitIdle the GPU timings are the last frame's: the captured one.
+            const json::Value profile = renderer::MakeProfileReport({.capture = capture.get(),
+                                                                     .gpu = device->GetGpuTimings(),
+                                                                     .backend = rhi::ToString(device->GetBackend()),
+                                                                     .adapter = device->GetCapabilities().adapterName,
+                                                                     .scene = sceneName,
+                                                                     .features = runner.DescribeFeatures()});
+            if (renderer::WriteProfileHtml(htmlPath, profile))
+            {
+                AIR_LOG(Info, "aircli", "wrote {}", htmlPath);
+                report["html"] = htmlPath;
+            }
+            else
+            {
+                AIR_LOG(Error, "aircli", "could not write '{}'", htmlPath);
+                errors.Push("could not write " + htmlPath);
+                failed = true;
+            }
         }
         if (dumpCommands)
         {
