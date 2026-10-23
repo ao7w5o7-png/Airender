@@ -112,11 +112,13 @@ json::Value ToJson(const rhi::GpuFrameTimings& timings)
     out["available"] = true;
     out["frame"] = timings.frameIndex;
     out["frameMs"] = timings.frameMs;
+    out["busyMs"] = timings.busyMs;
     json::Value scopes = json::Value::MakeArray();
     for (const auto& scope : timings.scopes)
     {
         json::Value s = json::Value::MakeObject();
         s["name"] = scope.name;
+        s["queue"] = rhi::ToString(scope.queue);
         s["depth"] = scope.depth;
         s["beginMs"] = scope.beginMs;
         s["ms"] = scope.durationMs;

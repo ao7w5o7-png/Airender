@@ -5,6 +5,7 @@
 //   aircli render   [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...
 //                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
+//                   [--no-async-compute]
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
@@ -53,7 +54,7 @@ int Usage()
                "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
                "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
-               "                [--no-validation]\n"
+               "                [--no-validation] [--no-async-compute]\n"
                "                [--scene NAME] [--output image.pfm|image.ppm]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee]\n"
@@ -359,6 +360,10 @@ int CommandRender(Args& args)
         else if (arg == "--no-validation")
         {
             validation = false; // no D3D12 debug layer / DRED: timings like a release run
+        }
+        else if (arg == "--no-async-compute")
+        {
+            desc.graphConfig.enableAsyncCompute = false; // async passes run on the graphics queue
         }
         else if (arg == "--scene")
         {

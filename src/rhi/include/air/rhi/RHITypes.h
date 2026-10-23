@@ -27,6 +27,7 @@ enum class QueueType : u8
     Copy,
     Count
 };
+const char* ToString(QueueType queue);
 
 enum class Format : u16
 {
@@ -131,6 +132,19 @@ std::string ToString(Access access);
 inline bool IsWriteAccess(Access access)
 {
     return Any(access & Access::WritableMask);
+}
+
+// Whether a queue can use (and transition to and from) an access state. The graphics queue supports
+// every state; the compute queue lacks the graphics-only ones (render targets, depth, vertex input,
+// pixel-shader reads, present); the copy queue only copies.
+inline bool IsAccessLegalOnQueue(Access access, QueueType queue)
+{
+    constexpr Access kCompute = Access::CopySrc | Access::CopyDst | Access::Constant | Access::SRVCompute |
+                                Access::UAVCompute | Access::IndirectArgs | Access::AccelStructRead |
+                                Access::AccelStructWrite;
+    constexpr Access kCopy = Access::CopySrc | Access::CopyDst;
+    const u32 allowed = queue == QueueType::Graphics ? ~0u : queue == QueueType::Compute ? u32(kCompute) : u32(kCopy);
+    return (u32(access) & ~allowed) == 0;
 }
 
 // ---------------------------------------------------------------------------

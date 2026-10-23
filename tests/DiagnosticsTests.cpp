@@ -69,6 +69,21 @@ TEST(Diagnostics_FormatBytes)
     EXPECT(renderer::FormatBytes(3ull << 30) == "3.00 GiB");
 }
 
+// GPU busy time counts overlapping scopes (async compute, nesting) once and skips the gaps where the
+// queues waited, e.g. for a swapchain buffer at vsync.
+TEST(Diagnostics_GpuBusyTimeSkipsWaits)
+{
+    using rhi::QueueType;
+    const std::vector<rhi::GpuTimingScope> scopes = {
+        {"Trace", QueueType::Graphics, 0, 0.0, 2.0},
+        {"Trace.Inner", QueueType::Graphics, 1, 0.5, 1.0}, // nested: already counted
+        {"Generate", QueueType::Compute, 0, 1.5, 1.0},     // overlaps Trace by 0.5
+        {"UI", QueueType::Graphics, 0, 6.0, 0.5},          // after waiting 3.5 for vsync
+    };
+    EXPECT(std::abs(rhi::ComputeBusyMs(scopes) - 3.0) < 1e-9);
+    EXPECT(rhi::ComputeBusyMs({}) == 0.0);
+}
+
 // Destroyed resources wait for the GPU before they are released; the resource list must hide them
 // immediately, or its length depends on how far the GPU is behind (the editor list flickers).
 TEST(Device_ResourceListHidesResourcesPendingDeletion)

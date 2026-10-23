@@ -2,6 +2,11 @@
 
 #include "air/core/Log.h"
 
+#include <algorithm>
+#include <limits>
+#include <utility>
+#include <vector>
+
 namespace air::rhi
 {
 
@@ -117,6 +122,37 @@ const char* ToString(MemoryLocation location)
     case MemoryLocation::Count: break;
     }
     return "?";
+}
+
+const char* ToString(QueueType queue)
+{
+    switch (queue)
+    {
+    case QueueType::Graphics: return "Graphics";
+    case QueueType::Compute: return "Compute";
+    case QueueType::Copy: return "Copy";
+    case QueueType::Count: break;
+    }
+    return "?";
+}
+
+double ComputeBusyMs(std::span<const GpuTimingScope> scopes)
+{
+    std::vector<std::pair<double, double>> intervals;
+    intervals.reserve(scopes.size());
+    for (const GpuTimingScope& scope : scopes)
+    {
+        intervals.emplace_back(scope.beginMs, scope.beginMs + scope.durationMs);
+    }
+    std::sort(intervals.begin(), intervals.end());
+    double busy = 0.0;
+    double covered = -std::numeric_limits<double>::infinity(); // end of the time counted so far
+    for (const auto& [begin, end] : intervals)
+    {
+        busy += std::max(0.0, end - std::max(begin, covered));
+        covered = std::max(covered, end);
+    }
+    return busy;
 }
 
 std::string ToString(Access access)

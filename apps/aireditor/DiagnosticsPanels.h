@@ -25,8 +25,9 @@ public:
     void BuildProfiler(bool* open);
     void BuildMemory(rhi::Device& device, bool* open);
 
-    // Live values for the menu bar and viewport overlay; they keep updating while paused.
-    double GetGpuFrameMs() const { return mLiveGpuMs; }
+    // Live values for the menu bar and viewport overlay; they keep updating while paused. GPU time is
+    // busy time: waits (for another queue, for a swapchain buffer at vsync) are not counted.
+    double GetGpuBusyMs() const { return mLiveGpuMs; }
     float GetFps() const;
     float GetSamplesPerSecond() const { return mLiveSamplesPerSecond; }
 

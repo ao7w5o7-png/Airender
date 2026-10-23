@@ -9,7 +9,7 @@ Passes:
       barrier FrameOutput: None -> UAVCompute
       read  PathTracer.Accumulation as SRVCompute
       write FrameOutput as UAVCompute
-  [2] Example.Generate (Compute)
+  [2] Example.Generate (Compute|AsyncCompute)
       barrier Example.Pattern: None -> UAVCompute (discard)
       write Example.Pattern as UAVCompute
   [3] Example.Composite (Compute)
@@ -17,6 +17,11 @@ Passes:
       barrier FrameOutput: UAVCompute -> UAVCompute
       read  Example.Pattern as SRVCompute
       write FrameOutput as UAVCompute
+Submissions:
+  (0) Graphics: fork
+  (1) Graphics: [0] [1]
+  (2) Compute: [2], waits for (0)
+  (3) Graphics: [3], waits for (2), final barriers
 Resources:
   tex FrameOutput (imported) passes [1, 3] final SRVCompute
   tex PathTracer.Accumulation (imported) passes [0, 1] final SRVCompute
@@ -37,12 +42,14 @@ Resources:
 [Graphics] PushConstants 16 bytes
 [Graphics] Dispatch 8x4x1
 [Graphics] EndEvent
-[Graphics] Barrier [tex 'Example.Pattern' None -> UAVCompute discard]
-[Graphics] BeginEvent 'Example.Generate'
-[Graphics] SetPipeline pipeline 'Example.Generate'
-[Graphics] PushConstants 32 bytes
-[Graphics] Dispatch 8x4x1
-[Graphics] EndEvent
+[Compute] Wait Graphics fence 3
+[Compute] Barrier [tex 'Example.Pattern' None -> UAVCompute discard]
+[Compute] BeginEvent 'Example.Generate'
+[Compute] SetPipeline pipeline 'Example.Generate'
+[Compute] PushConstants 32 bytes
+[Compute] Dispatch 8x4x1
+[Compute] EndEvent
+[Graphics] Wait Compute fence 1
 [Graphics] Barrier [tex 'Example.Pattern' UAVCompute -> SRVCompute] [tex 'FrameOutput' UAVCompute -> UAVCompute]
 [Graphics] BeginEvent 'Example.Composite'
 [Graphics] SetPipeline pipeline 'Example.Composite'

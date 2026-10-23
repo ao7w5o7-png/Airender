@@ -161,22 +161,31 @@ struct D3D12Pipeline
 };
 
 // GPU timestamps of one frame. Command lists reserve blocks of query indices, resolve them into
-// the readback buffer at End(), and append their scopes at Submit() (so scopes are in GPU order).
+// their queue's readback buffer at End(), and append their scopes at Submit() (so scopes are in
+// GPU order).
 struct TimestampScope
 {
     std::string name;
+    QueueType queue = QueueType::Graphics;
     u32 depth = 0;
-    u32 begin = 0; // query indices
+    u32 begin = 0; // query indices in the queue's heap
     u32 end = 0;
 };
 
-struct TimestampFrame
+// Each timed queue resolves into its own buffer: queues running at the same time must not write
+// one resource, even at different offsets.
+struct TimestampQueries
 {
     ComPtr<ID3D12QueryHeap> heap;
     ComPtr<ID3D12Resource> readback;
     const u64* mapped = nullptr;
     std::atomic<u32> next{0};
-    std::mutex mutex; // guards scopes and frame
+};
+
+struct TimestampFrame
+{
+    TimestampQueries queues[size_t(QueueType::Count)]; // the copy queue's stays empty: copies are not timed
+    std::mutex mutex;                                  // guards scopes and frame
     std::vector<TimestampScope> scopes;
     u64 frame = ~0ull;
 };
@@ -325,6 +334,7 @@ public:
 
     std::unique_ptr<CommandList> CreateCommandList(QueueType queue) override;
     u64 Submit(QueueType queue, std::span<CommandList* const> lists) override;
+    void QueueWait(QueueType waiter, QueueType signaler, u64 fenceValue) override;
     bool IsFenceComplete(QueueType queue, u64 fenceValue) override;
     void WaitForFence(QueueType queue, u64 fenceValue) override;
     void WaitIdle() override;
@@ -367,7 +377,7 @@ public:
 
     // Timestamp storage for the frame being recorded; nullptr when profiling is off.
     TimestampFrame* CurrentTimestampFrame();
-    void AppendTimestampScopes(TimestampFrame* frame, std::vector<TimestampScope>& scopes);
+    void AppendTimestampScopes(TimestampFrame* frame, std::vector<TimestampScope>& scopes, QueueType queue);
 
     void ReportValidation(std::string message);
     void LogDeviceRemoved(HRESULT hr, std::string_view where);

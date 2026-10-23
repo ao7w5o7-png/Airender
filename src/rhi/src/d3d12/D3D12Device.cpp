@@ -187,9 +187,10 @@ D3D12_RESOURCE_STATES ToStates(Access access)
     add(Access::CopyDst, D3D12_RESOURCE_STATE_COPY_DEST);
     add(Access::VertexOrIndex, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER);
     add(Access::Constant, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
-    // SRVs are always readable from every stage: avoids pixel <-> non-pixel transitions when an
-    // image produced by compute is displayed by a pixel shader (editor viewport).
-    add(Access::SRVGraphics | Access::SRVCompute, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    // Compute reads use the non-pixel state, which the compute queue supports too (async compute);
+    // graphics reads include pixel shaders (the editor shows the output in one).
+    add(Access::SRVCompute, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    add(Access::SRVGraphics, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
     add(Access::UAVGraphics | Access::UAVCompute, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     add(Access::RenderTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
     add(Access::DepthRead, D3D12_RESOURCE_STATE_DEPTH_READ);
@@ -302,17 +303,21 @@ bool D3D12Device::Initialize()
     for (u32 i = 0; i < mDesc.framesInFlight + 1; ++i)
     {
         auto frame = std::make_unique<TimestampFrame>();
-        D3D12_QUERY_HEAP_DESC queryDesc = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kMaxTimestampsPerFrame, 0};
-        AIR_D3D12_CHECK(mDevice->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&frame->heap)));
-        D3D12_HEAP_PROPERTIES readback = {D3D12_HEAP_TYPE_READBACK};
-        D3D12_RESOURCE_DESC bufferDesc = MakeBufferResourceDesc({.size = kMaxTimestampsPerFrame * 8});
-        AIR_D3D12_CHECK(mDevice->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &bufferDesc,
-                                                         D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                         IID_PPV_ARGS(&frame->readback)));
-        void* mapped = nullptr;
-        AIR_D3D12_CHECK(frame->readback->Map(0, nullptr, &mapped));
-        frame->mapped = static_cast<const u64*>(mapped);
-        SetName(frame->readback.Get(), "Timestamps");
+        for (QueueType type : {QueueType::Graphics, QueueType::Compute})
+        {
+            TimestampQueries& queries = frame->queues[size_t(type)];
+            D3D12_QUERY_HEAP_DESC queryDesc = {D3D12_QUERY_HEAP_TYPE_TIMESTAMP, kMaxTimestampsPerFrame, 0};
+            AIR_D3D12_CHECK(mDevice->CreateQueryHeap(&queryDesc, IID_PPV_ARGS(&queries.heap)));
+            D3D12_HEAP_PROPERTIES readback = {D3D12_HEAP_TYPE_READBACK};
+            D3D12_RESOURCE_DESC bufferDesc = MakeBufferResourceDesc({.size = kMaxTimestampsPerFrame * 8});
+            AIR_D3D12_CHECK(mDevice->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &bufferDesc,
+                                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                             IID_PPV_ARGS(&queries.readback)));
+            void* mapped = nullptr;
+            AIR_D3D12_CHECK(queries.readback->Map(0, nullptr, &mapped));
+            queries.mapped = static_cast<const u64*>(mapped);
+            SetName(queries.readback.Get(), std::format("Timestamps ({})", ToString(type)));
+        }
         mTimestampFrames.push_back(std::move(frame));
     }
 
@@ -1171,7 +1176,7 @@ u64 D3D12Device::Submit(QueueType type, std::span<CommandList* const> lists)
         native.push_back(contexts.back()->list.Get());
         if (TimestampFrame* timestamps = d3dList->Timestamps())
         {
-            AppendTimestampScopes(timestamps, d3dList->TimestampScopes());
+            AppendTimestampScopes(timestamps, d3dList->TimestampScopes(), type);
         }
         static constexpr const char* kQueueNames[] = {"Graphics", "Compute", "Copy"};
         for (std::string& line : d3dList->Captured())
@@ -1206,6 +1211,24 @@ u64 D3D12Device::Submit(QueueType type, std::span<CommandList* const> lists)
         }
     }
     return value;
+}
+
+void D3D12Device::QueueWait(QueueType waiter, QueueType signaler, u64 value)
+{
+    Queue& queue = mQueues[size_t(waiter)];
+    {
+        std::lock_guard lock(queue.mutex); // ordered with this queue's submissions
+        const HRESULT hr = queue.queue->Wait(mQueues[size_t(signaler)].fence.Get(), value);
+        if (FAILED(hr))
+        {
+            LogDeviceRemoved(hr, "Wait");
+        }
+    }
+    if (CaptureEnabled())
+    {
+        std::lock_guard lock(mCaptureMutex);
+        mCaptured.push_back(std::format("[{}] Wait {} fence {}", ToString(waiter), ToString(signaler), value));
+    }
 }
 
 bool D3D12Device::IsFenceComplete(QueueType type, u64 value)
@@ -1370,16 +1393,20 @@ TimestampFrame* D3D12Device::CurrentTimestampFrame()
     {
         slot->frame = frame;
         slot->scopes.clear();
-        slot->next.store(0);
+        for (TimestampQueries& queries : slot->queues)
+        {
+            queries.next.store(0);
+        }
     }
     return slot;
 }
 
-void D3D12Device::AppendTimestampScopes(TimestampFrame* frame, std::vector<TimestampScope>& scopes)
+void D3D12Device::AppendTimestampScopes(TimestampFrame* frame, std::vector<TimestampScope>& scopes, QueueType queue)
 {
     std::lock_guard lock(frame->mutex);
     for (TimestampScope& scope : scopes)
     {
+        scope.queue = queue;
         frame->scopes.push_back(std::move(scope));
     }
     scopes.clear();
@@ -1395,21 +1422,48 @@ void D3D12Device::ReadTimestamps(u64 frame)
         {
             return;
         }
-        u64 first = ~0ull;
-        u64 last = 0;
+        // Every queue counts its own ticks. A fresh calibration maps each onto the CPU clock, so scopes
+        // on different queues share one timeline and async overlap shows.
+        double msPerTick[size_t(QueueType::Count)] = {};
+        double offsetMs[size_t(QueueType::Count)] = {}; // CPU time of tick 0
+        LARGE_INTEGER cpuFrequency = {};
+        QueryPerformanceFrequency(&cpuFrequency);
+        for (size_t q = 0; q < size_t(QueueType::Count); ++q)
+        {
+            UINT64 frequency = 0;
+            UINT64 gpu = 0;
+            UINT64 cpu = 0;
+            ID3D12CommandQueue* queue = mQueues[q].queue.Get();
+            if (queue && SUCCEEDED(queue->GetTimestampFrequency(&frequency)) && frequency &&
+                SUCCEEDED(queue->GetClockCalibration(&gpu, &cpu)))
+            {
+                msPerTick[q] = 1000.0 / double(frequency);
+                offsetMs[q] = double(cpu) * 1000.0 / double(cpuFrequency.QuadPart) - double(gpu) * msPerTick[q];
+            }
+            else
+            {
+                msPerTick[q] = 1.0 / mTimestampFrequency;
+            }
+        }
+        auto toMs = [&](const TimestampScope& scope, u64 ticks)
+        { return offsetMs[size_t(scope.queue)] + double(ticks) * msPerTick[size_t(scope.queue)]; };
+        auto ticks = [&](const TimestampScope& scope, u32 index)
+        { return slot->queues[size_t(scope.queue)].mapped[index]; };
+        double first = 1e300;
+        double last = -1e300;
         for (const TimestampScope& scope : slot->scopes)
         {
-            first = std::min(first, slot->mapped[scope.begin]);
-            last = std::max(last, slot->mapped[scope.end]);
+            first = std::min(first, toMs(scope, ticks(scope, scope.begin)));
+            last = std::max(last, toMs(scope, ticks(scope, scope.end)));
         }
         timings.frameIndex = frame;
-        timings.frameMs = double(last - first) / mTimestampFrequency;
+        timings.frameMs = last - first;
         for (const TimestampScope& scope : slot->scopes)
         {
-            const u64 begin = slot->mapped[scope.begin];
-            const u64 end = std::max(begin, slot->mapped[scope.end]);
-            timings.scopes.push_back({scope.name, scope.depth, double(begin - first) / mTimestampFrequency,
-                                      double(end - begin) / mTimestampFrequency});
+            const u64 begin = ticks(scope, scope.begin);
+            const u64 end = std::max(begin, ticks(scope, scope.end));
+            timings.scopes.push_back({scope.name, scope.queue, scope.depth, toMs(scope, begin) - first,
+                                      double(end - begin) * msPerTick[size_t(scope.queue)]});
         }
         slot->scopes.clear();
         slot->frame = ~0ull;
@@ -1417,6 +1471,7 @@ void D3D12Device::ReadTimestamps(u64 frame)
     // Scopes close inner-first; present them in start order (parents before children).
     std::stable_sort(timings.scopes.begin(), timings.scopes.end(), [](const GpuTimingScope& a, const GpuTimingScope& b)
                      { return a.beginMs < b.beginMs || (a.beginMs == b.beginMs && a.depth < b.depth); });
+    timings.busyMs = ComputeBusyMs(timings.scopes);
     std::lock_guard lock(mTimingsMutex);
     mLastTimings = std::move(timings);
 }

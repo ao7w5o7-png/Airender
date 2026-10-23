@@ -33,6 +33,9 @@ json::Value FrameResult::ToJson() const
     out["culledPasses"] = graphStats.culledPassCount;
     out["barriers"] = graphStats.barrierCount;
     out["commandLists"] = graphStats.commandListCount;
+    out["asyncComputePasses"] = graphStats.asyncComputePassCount;
+    out["submissions"] = graphStats.submissionCount;
+    out["queueWaits"] = graphStats.queueWaitCount;
     out["transientResources"] = graphStats.transientResourceCount;
     out["transientHeapBytes"] = graphStats.transientHeapSize;
     out["transientBytesUnaliased"] = graphStats.transientBytesUnaliased;

@@ -74,6 +74,8 @@ public:
 
     rhi::TextureHandle GetOutput() const { return mOutput; }
     const FrameRunnerDesc& GetDesc() const { return mDesc; }
+    // Every frame builds a new graph, so this takes effect on the next RenderFrame().
+    void SetGraphConfig(const rdg::RenderGraph::Config& config) { mDesc.graphConfig = config; }
     // Scene stage resolution: the output resolution scaled by FrameRunnerDesc::renderScale.
     u32 GetRenderWidth() const { return mRenderWidth; }
     u32 GetRenderHeight() const { return mRenderHeight; }

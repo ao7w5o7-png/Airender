@@ -52,7 +52,7 @@ void DiagnosticsPanels::Update(const renderer::FrameResult& frame, double wallMs
     }
     if (frame.gpu.frameIndex != ~0ull)
     {
-        mLiveGpuMs = frame.gpu.frameMs;
+        mLiveGpuMs = frame.gpu.busyMs;
     }
     if (mPaused)
     {
@@ -72,7 +72,7 @@ void DiagnosticsPanels::Update(const renderer::FrameResult& frame, double wallMs
     if (frame.gpu.frameIndex != ~0ull)
     {
         mLastGpu = frame.gpu;
-        mGpuMs.Push(float(frame.gpu.frameMs));
+        mGpuMs.Push(float(frame.gpu.busyMs));
         for (const rhi::GpuTimingScope& scope : frame.gpu.scopes)
         {
             ScopeStats& s = mGpuScopes[scope.name];
@@ -141,7 +141,7 @@ void DiagnosticsPanels::BuildProfiler(bool* open)
     BuildPauseControls();
     const float averageMs = mWallMs.Average(); // of the captured frames, not the live ones
     ImGui::Text("%.1f fps   frame %s   GPU %s   CPU record %s", averageMs > 0.0f ? 1000.0f / averageMs : 0.0f,
-                FormatMs(mWallMs.Last()).c_str(), FormatMs(mLastGpu.frameMs).c_str(), FormatMs(mCpuMs.Last()).c_str());
+                FormatMs(mWallMs.Last()).c_str(), FormatMs(mLastGpu.busyMs).c_str(), FormatMs(mCpuMs.Last()).c_str());
     PlotHistory("Frame", mWallMs, "ms", kGraphHeight);
     PlotHistory("GPU", mGpuMs, "ms", kGraphHeight);
     PlotHistory("CPU", mCpuMs, "ms", kGraphHeight);
@@ -171,16 +171,20 @@ void DiagnosticsPanels::BuildGpuSection()
         ImGui::TextDisabled("No GPU timings yet (the GPU reports a few frames late).");
         return;
     }
-    ImGui::Text("GPU frame %llu: %s", static_cast<unsigned long long>(mLastGpu.frameIndex),
-                FormatMs(mLastGpu.frameMs).c_str());
+    ImGui::Text("GPU frame %llu: busy %s, span %s", static_cast<unsigned long long>(mLastGpu.frameIndex),
+                FormatMs(mLastGpu.busyMs).c_str(), FormatMs(mLastGpu.frameMs).c_str());
+    ImGui::SetItemTooltip("Busy: time some queue ran a pass. Span: first to last timestamp, as the timeline "
+                          "shows it. The difference is waiting: a queue waiting for another, or a submission "
+                          "that writes the swapchain waiting for its buffer at vsync.");
     DrawGpuTimeline(22.0f);
-    if (ImGui::BeginTable("gpuScopes", 5,
+    if (ImGui::BeginTable("gpuScopes", 6,
                           ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
                               ImGuiTableFlags_ScrollY,
                           ImVec2(0.0f, 0.0f)))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("Pass", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Queue");
         ImGui::TableSetupColumn("Last");
         ImGui::TableSetupColumn("Average");
         ImGui::TableSetupColumn("Max");
@@ -198,38 +202,64 @@ void DiagnosticsPanels::BuildGpuSection()
             ImGui::TextUnformatted(scope.name.c_str());
             ImGui::Unindent(float(scope.depth) * 12.0f);
             ImGui::TableNextColumn();
+            ImGui::TextUnformatted(rhi::ToString(scope.queue));
+            ImGui::TableNextColumn();
             ImGui::TextUnformatted(FormatMs(s.lastMs).c_str());
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(FormatMs(s.averageMs).c_str());
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(FormatMs(s.maxMs).c_str());
             ImGui::TableNextColumn();
-            const double share = mLastGpu.frameMs > 0.0 ? s.lastMs / mLastGpu.frameMs : 0.0;
+            const double share = mLastGpu.busyMs > 0.0 ? s.lastMs / mLastGpu.busyMs : 0.0;
             UsageBar(float(share), std::format("{:.0f}%", share * 100.0).c_str(), ColorForName(scope.name));
         }
         ImGui::EndTable();
     }
 }
 
+// One lane per queue that ran work this frame, so async compute shows next to the graphics work it
+// overlaps. A lane is as deep as its scopes nest.
 void DiagnosticsPanels::DrawGpuTimeline(float rowHeight)
 {
-    u32 maxDepth = 0;
+    constexpr float kLabel = 70.0f;
+    constexpr size_t kQueues = size_t(rhi::QueueType::Count);
+    u32 rows[kQueues] = {}; // 0: the queue ran nothing
     for (const auto& scope : mLastGpu.scopes)
     {
-        maxDepth = std::max(maxDepth, scope.depth);
+        rows[size_t(scope.queue)] = std::max(rows[size_t(scope.queue)], scope.depth + 1);
+    }
+    float laneTop[kQueues] = {};
+    float height = 0.0f;
+    for (size_t q = 0; q < kQueues; ++q)
+    {
+        laneTop[q] = height;
+        if (rows[q] > 0)
+        {
+            height += float(rows[q]) * (rowHeight + 2.0f) + 4.0f;
+        }
     }
     const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const float width = std::max(ImGui::GetContentRegionAvail().x, 50.0f);
-    const float height = float(maxDepth + 1) * (rowHeight + 2.0f);
-    ImGui::InvisibleButton("gpuTimeline", ImVec2(width, height));
+    const float width = std::max(ImGui::GetContentRegionAvail().x - kLabel, 50.0f);
+    ImGui::InvisibleButton("gpuTimeline", ImVec2(width + kLabel, std::max(height, 1.0f)));
     ImDrawList* draw = ImGui::GetWindowDrawList();
-    draw->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height), IM_COL32(30, 30, 34, 255));
+    for (size_t q = 0; q < kQueues; ++q)
+    {
+        if (rows[q] == 0)
+        {
+            continue;
+        }
+        const float y0 = origin.y + laneTop[q];
+        const float y1 = y0 + float(rows[q]) * (rowHeight + 2.0f);
+        draw->AddRectFilled(ImVec2(origin.x + kLabel, y0), ImVec2(origin.x + kLabel + width, y1),
+                            IM_COL32(30, 30, 34, 255));
+        draw->AddText(ImVec2(origin.x, y0 + 2.0f), ImGui::GetColorU32(ImGuiCol_Text), rhi::ToString(rhi::QueueType(q)));
+    }
     const double scale = mLastGpu.frameMs > 0.0 ? width / mLastGpu.frameMs : 0.0;
     for (const rhi::GpuTimingScope& scope : mLastGpu.scopes)
     {
-        const float x0 = origin.x + float(scope.beginMs * scale);
-        const float x1 = std::max(x0 + 1.0f, origin.x + float((scope.beginMs + scope.durationMs) * scale));
-        const float y0 = origin.y + float(scope.depth) * (rowHeight + 2.0f);
+        const float x0 = origin.x + kLabel + float(scope.beginMs * scale);
+        const float x1 = std::max(x0 + 1.0f, origin.x + kLabel + float((scope.beginMs + scope.durationMs) * scale));
+        const float y0 = origin.y + laneTop[size_t(scope.queue)] + float(scope.depth) * (rowHeight + 2.0f);
         TimelineBar(draw, ImVec2(x0, y0), ImVec2(x1, y0 + rowHeight), scope.name, scope.durationMs);
     }
 }

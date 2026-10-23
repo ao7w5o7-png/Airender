@@ -8,6 +8,8 @@
 //   * CommandList: NOT thread-safe. One thread records one list at a time. Record different lists
 //     on different threads in parallel and submit them in the order you want them executed.
 //   * Submit(): thread-safe; submissions to one queue are serialised in call order.
+//   * Queues run concurrently. Work on one queue that depends on another's waits for it on the GPU
+//     with QueueWait(); the render graph inserts those waits for async compute passes.
 
 #include "air/rhi/GpuMemoryAllocator.h"
 #include "air/rhi/RHITypes.h"
@@ -157,8 +159,9 @@ struct ResourceInfo
 struct GpuTimingScope
 {
     std::string name;
-    u32 depth = 0;        // nesting level
-    double beginMs = 0.0; // relative to the frame's first timestamp
+    QueueType queue = QueueType::Graphics; // scopes on different queues may overlap in time
+    u32 depth = 0;                         // nesting level within its queue
+    double beginMs = 0.0;                  // relative to the frame's first timestamp
     double durationMs = 0.0;
 };
 
@@ -166,8 +169,14 @@ struct GpuFrameTimings
 {
     u64 frameIndex = ~0ull; // ~0: nothing measured yet
     double frameMs = 0.0;   // first timestamp to last timestamp
+    // Time some queue was inside a scope: frameMs without the gaps where queues waited, for another
+    // queue or for a swapchain buffer (at vsync, a submission that writes one waits on the GPU).
+    double busyMs = 0.0;
     std::vector<GpuTimingScope> scopes;
 };
+
+// The time covered by at least one scope (the union of their intervals, any queue or depth).
+double ComputeBusyMs(std::span<const GpuTimingScope> scopes);
 
 class Device
 {
@@ -230,6 +239,9 @@ public:
     virtual std::unique_ptr<CommandList> CreateCommandList(QueueType queue) = 0;
     // Returns a fence value that completes when the GPU finished these lists.
     virtual u64 Submit(QueueType queue, std::span<CommandList* const> lists) = 0;
+    // GPU-side wait, no CPU blocking: work submitted to `waiter` after this call starts once
+    // `signaler` has completed `fenceValue` (a value Submit() returned for that queue).
+    virtual void QueueWait(QueueType waiter, QueueType signaler, u64 fenceValue) = 0;
     virtual bool IsFenceComplete(QueueType queue, u64 fenceValue) = 0;
     virtual void WaitForFence(QueueType queue, u64 fenceValue) = 0;
     virtual void WaitIdle() = 0;

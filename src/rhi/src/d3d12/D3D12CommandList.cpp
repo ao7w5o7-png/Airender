@@ -51,12 +51,13 @@ void D3D12CommandList::End()
     AIR_CHECK(mEventDepth == 0, "{} unbalanced BeginEvent()", mEventDepth);
     if (mTimestamps)
     {
+        const TimestampQueries& queries = mTimestamps->queues[size_t(mQueue)];
         for (const TimestampBlock& block : mTimestampBlocks)
         {
             if (block.used > block.begin)
             {
-                mList->ResolveQueryData(mTimestamps->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, block.begin,
-                                        block.used - block.begin, mTimestamps->readback.Get(), u64(block.begin) * 8);
+                mList->ResolveQueryData(queries.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, block.begin,
+                                        block.used - block.begin, queries.readback.Get(), u64(block.begin) * 8);
             }
         }
     }
@@ -362,7 +363,7 @@ u32 D3D12CommandList::AllocateTimestamp()
 {
     if (mTimestampBlocks.empty() || mTimestampBlocks.back().used == mTimestampBlocks.back().begin + kTimestampBlock)
     {
-        const u32 begin = mTimestamps->next.fetch_add(kTimestampBlock);
+        const u32 begin = mTimestamps->queues[size_t(mQueue)].next.fetch_add(kTimestampBlock);
         if (begin + kTimestampBlock > kMaxTimestampsPerFrame)
         {
             return ~0u; // out of queries this frame: the scope is not timed
@@ -383,7 +384,7 @@ void D3D12CommandList::BeginEvent(std::string_view name)
         const u32 index = AllocateTimestamp();
         if (index != ~0u)
         {
-            mList->EndQuery(mTimestamps->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
+            mList->EndQuery(mTimestamps->queues[size_t(mQueue)].heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
         }
         mOpenScopes.push_back({std::move(text), index});
     }
@@ -401,8 +402,8 @@ void D3D12CommandList::EndEvent()
         const u32 index = scope.begin == ~0u ? ~0u : AllocateTimestamp();
         if (index != ~0u)
         {
-            mList->EndQuery(mTimestamps->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
-            mClosedScopes.push_back({std::move(scope.name), u32(mOpenScopes.size()), scope.begin, index});
+            mList->EndQuery(mTimestamps->queues[size_t(mQueue)].heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
+            mClosedScopes.push_back({std::move(scope.name), mQueue, u32(mOpenScopes.size()), scope.begin, index});
         }
     }
     mList->EndEvent();

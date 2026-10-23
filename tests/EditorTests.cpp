@@ -97,8 +97,12 @@ TEST(Editor_ResizeKeepsParameters)
     editor::EditorApp app(*device, tasks, SmallOptions());
     EXPECT(app.GetRunner()->SetParameter("pathtracer.maxBounces", "3"));
     EXPECT(app.GetRunner()->SetParameter("tonemap.operator", "2"));
+    rdg::RenderGraph::Config graphConfig = app.GetRunner()->GetDesc().graphConfig;
+    graphConfig.enableAsyncCompute = false; // the Debug panel's "Async compute" checkbox
+    app.GetRunner()->SetGraphConfig(graphConfig);
     app.Resize(128, 72);
     EXPECT(app.GetRunner()->GetDesc().width == 128 && app.GetRunner()->GetDesc().height == 72);
+    EXPECT(!app.GetRunner()->GetDesc().graphConfig.enableAsyncCompute);
     for (const auto& entry : app.GetRunner()->FindFeature("pathtracer")->Parameters().Entries())
     {
         if (entry.name == "maxBounces")

@@ -95,9 +95,10 @@ Files: `src/rhi/include/air/rhi/`
    puts indices into push constants; there are no root signature or descriptor set layouts to
    manage. New passes need almost no boilerplate, and it is the binding model that AI gets wrong
    least often.
-3. **Access states + barriers**: resource state is the `rhi::Access` bit set and a barrier is `before -> after`. Backends translate them to D3D12 Enhanced
-   Barriers / Vulkan synchronization2. The render graph generates barriers; pass code never
-   writes them by hand.
+3. **Access states + barriers**: resource state is the `rhi::Access` bit set and a barrier is
+   `before -> after`. The D3D12 backend maps them to resource states (`ResourceBarrier`); Enhanced
+   Barriers and Vulkan synchronization2 fit the same model. The render graph generates barriers;
+   pass code never writes them by hand.
 4. **One HLSL source, two bytecodes**: DXC compiles to DXIL (D3D12) and SPIR-V (Vulkan).
 5. **Command capture**: after `Device::SetCommandCapture(true)` every submitted command becomes a
    readable line such as `[Graphics] Barrier [tex 'SceneColor' UAVCompute -> SRVCompute]`. The Null
@@ -110,14 +111,31 @@ Files: `src/rhi/include/air/rhi/`
 | Backend | Status | Notes |
 |---|---|---|
 | Null | ✅ working | No GPU; real memory bookkeeping, command capture and barrier validation. Used by unit tests, CI and GPU-less debugging |
-| D3D12 | 🚧 stub | Plan: DXGI adapter selection → `ID3D12Device5+`, DXR 1.1, Enhanced Barriers, GPU-based validation |
+| D3D12 | ✅ working | Agility SDK 1.619, SM 6.6 bindless, DXR 1.1 pipelines (1.2 shader execution reordering when available), graphics + async compute queues, per-queue GPU timestamps, debug layer and DRED with `enableValidation` |
 | Vulkan | 🚧 stub | Plan: Vulkan 1.3 (dynamic rendering, sync2, timeline semaphores), KHR ray tracing pipeline + ray query |
 
 ### 3.3 Queues
 
-There are `Graphics`, `Compute` and `Copy` queues. The first render graph version submits
-everything to Graphics. Async compute (BVH builds, denoising in parallel with raster) comes later;
-the render graph already has the information it needs to split work across queues.
+There are `Graphics`, `Compute` and `Copy` queues. The render graph submits to Graphics, and to
+Compute for passes flagged `PassFlags::AsyncCompute` (§5.4).
+
+- `Device::Submit(queue, lists)` returns the fence value the submission signals on its queue.
+  `Device::QueueWait(waiter, signaler, value)` makes one queue wait on the GPU until another
+  queue's fence reaches `value`; the CPU does not block.
+- `IsAccessLegalOnQueue(access, queue)`: the compute queue cannot use, or transition from,
+  graphics-only states (render targets, depth, vertex input, pixel-shader reads `SRVGraphics`,
+  present); the copy queue only copies. On D3D12 `SRVCompute` maps to
+  `NON_PIXEL_SHADER_RESOURCE`, so compute reads are legal on both queues.
+- The Null device validates cross-queue use: touching a resource last used on another queue
+  without waiting for that use, or using a state the queue does not support, is a `VALIDATION:`
+  error. Captured commands carry the queue (`[Compute] Dispatch ...`, `[Graphics] Wait Compute fence 3`).
+- GPU timestamps are per queue: each queue has its own query heap and readback buffer (queues
+  running at the same time must not write one resource). `GetClockCalibration` maps every
+  queue's ticks onto the CPU clock, so `GpuFrameTimings` puts all queues on one timeline and each
+  scope names its `queue`. `frameMs` spans the first to the last timestamp; `busyMs` is the time
+  some queue was inside a scope (`ComputeBusyMs`). They differ by waits: a queue waiting for
+  another, or, at vsync, a submission that writes a swapchain buffer waiting on the GPU for it
+  (the editor's last batch, once async compute splits the frame). The editor shows busy time.
 
 ---
 
@@ -168,6 +186,9 @@ Temporary resources created inside the render graph do not use the pools above. 
 `transientBytesUnaliased` (without). The first barrier of a resource carries a `discard` flag so
 the backend can issue an aliasing barrier / drop old contents.
 
+A transient touched by an async compute pass may be in use while any graphics pass runs, so it
+never shares memory: its lifetime counts as the whole frame.
+
 Next: cache transient heaps across frames instead of
 creating one per frame.
 
@@ -214,6 +235,7 @@ A pass author does two things: **declare which resources are used and how**, and
 | Barriers | State changes derived in declaration order; consecutive UAV writes get UAV barriers; imported resources end in their requested final state |
 | Transient resources | Created on first use, memory aliased, released (deferred) after execution |
 | Parallel recording | Live passes are split into chunks of `passesPerCommandList`, each chunk is recorded into its own command list on the task system, and lists are submitted in declaration order |
+| Async compute | Passes flagged `AsyncCompute` run on the compute queue; cross-queue waits and hand-over barriers are inserted (§5.4) |
 | Cross-frame resources | `ImportTexture` (external resources) / `ExtractTexture` (keep a transient resource for the next frame, e.g. TAA history, path tracing accumulation) |
 
 ### 5.2 Debugging and error messages (for AI)
@@ -223,7 +245,9 @@ A pass author does two things: **declare which resources are used and how**, and
   `UnorderedAccess`), one pass using one resource in two different states. Every message names
   the pass and the resource.
 - Checked at execution time: using a resource that was not declared in setup is an error.
-- `DumpText()`: per pass state, barriers, reads and writes; per resource lifetime and heap offset.
+- `DumpText()`: per pass state, barriers, reads and writes; per resource lifetime and heap offset;
+  with async compute, the submissions: queue, passes, waits and hand-over barriers, e.g.
+  `(3) Graphics: [3], waits for (2), final barriers`.
 - `DumpGraphviz()`: a dot graph (culled passes grey, imported resources blue, extracted resources green).
 
 ### 5.3 Explicit dependency declaration
@@ -232,6 +256,50 @@ Some render graphs reflect resource dependencies from shader parameter structs. 
 declare them explicitly through `PassBuilder`: no macros or reflection, shorter
 code, and easier for AI to get right. Code generation on top of the shared HLSL/C++ headers can
 later keep push constant structs and declarations in sync automatically.
+
+### 5.4 Async compute
+
+Flag a compute pass `PassFlags::Compute | PassFlags::AsyncCompute` and it runs on the compute
+queue, overlapping the graphics passes around it. Good candidates depend on little and are
+needed late: the example feature's pattern today; BVH refits, light structure builds and
+denoiser pre-passes later. The pass is written as usual, except that it may only use states
+the compute queue supports: `AddPass` rejects `AsyncCompute | Raster`, and `Read`/`Write` reject
+graphics-only accesses on an async pass.
+
+The graph schedules it in `Compile()`:
+
+1. **Batches**: live passes are split, in declaration order, into runs on one queue; each batch
+   is one submission (its command lists still record in parallel). Batch 0 is a graphics
+   prologue without passes.
+2. **Fork**: the first compute batch waits at least for the prologue, which is then submitted
+   even when empty. Without it, a compute batch with no graphics input starts as soon as it is
+   submitted, while the graphics queue (frames in flight behind the CPU) may still be on the
+   previous frame and using an imported resource the batch writes (a LUT, a reservoir buffer).
+   With it, compute work overlaps this frame's graphics passes, and a frame's GPU timings
+   (first to last timestamp) cover only that frame.
+3. **Waits**: any use of a resource last used on another queue waits for the batch of that use.
+   This covers read after write, write after read and state changes; two reads in a row also
+   wait (conservative). Waiting for a later batch of a queue covers its earlier ones, so a batch
+   keeps one wait per queue.
+4. **Hand-over**: a transition the compute queue cannot make (e.g. `RenderTarget -> SRVCompute`)
+   is recorded at the end of the graphics batch that used the resource last (the prologue for an
+   imported resource), and the compute batch waits for that batch.
+5. **Join**: the graph's final barriers are recorded on the graphics queue after it waits for the
+   last compute batch (an epilogue batch is added when needed), so the frame's graphics fence and
+   imported resources' final states include the compute work. The next frame's graphics passes
+   therefore come after this frame's compute work, and its compute passes after the fork.
+6. **Memory**: transients touched by an async pass are not aliased (§4.3).
+
+`DumpText()` prints the schedule under `Submissions:`, one line per submission, e.g.
+`(0) Graphics: fork`, `(1) Graphics: [0] [1]`, `(2) Compute: [2], waits for (0)`,
+`(3) Graphics: [3], waits for (2), final barriers`.
+
+`RenderGraph::Config::enableAsyncCompute = false` runs async passes on the graphics queue in
+declaration order, for A/B timing: `aircli render --no-async-compute`, or the editor's Debug >
+Frame > Async compute. `Stats` has `asyncComputePassCount`, `submissionCount` and
+`queueWaitCount` (frame JSON: `asyncComputePasses`, `submissions`, `queueWaits`). The editor's
+GPU profiler draws one lane per queue; `aircli render --profile --report r.json` writes every
+GPU scope with its `queue`, `beginMs` and `ms`, so overlap can be checked from the report.
 
 ---
 
@@ -489,10 +557,12 @@ including each other. Slots live in `renderer::slots`:
 Panels: Viewport (fly camera: hold right mouse to look, WASD/QE to move, wheel for speed, Shift
 for fast; F12 saves a screenshot), Scene (scene picker, camera,
 EV100, materials), Render (VSync, DLSS toggle and mode, shader hot reload, feature parameters),
-Debug (debug views, furnace, NEE), Profiler (GPU pass timeline, per-thread CPU scopes,
+Debug (debug views, furnace, NEE), Profiler (GPU pass timeline with one lane per queue, per-thread CPU scopes,
 frame/GPU/CPU/samples-per-second history; pause with P or Pause and step frame by frame), Memory
 (VRAM budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
-Command line: `aireditor [--scene NAME] [--no-vsync] [--dlss] [--dlss-mode quality|...]`.
+Command line: `aireditor [--scene NAME] [--features pathtracer,example,tonemap] [--no-vsync] [--dlss]
+[--dlss-mode quality|...]`; `--features` replaces the feature chain, e.g. to try a new feature or
+an async compute pass in the editor.
 
 ### 9.1 Shader hot reload
 

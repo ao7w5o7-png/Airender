@@ -27,6 +27,7 @@ public:
         mParameters.Add("scale", &mScale, "Spatial frequency of the pattern", 0.0f, 1000.0f);
         mParameters.Add("opacity", &mOpacity, "Blend factor over the existing output", 0.0f, 1.0f);
         mParameters.Add("animate", &mAnimate, "Advance the pattern every frame");
+        mParameters.Add("async", &mAsync, "Generate the pattern on the compute queue (async compute)");
     }
 
     ~ExampleFeature() override
@@ -58,7 +59,8 @@ public:
         const u32 width = context.width;
         const u32 height = context.height;
 
-        // Transient: lives only inside this frame's graph, its memory may be shared with other passes.
+        // Transient: lives only inside this frame's graph. Its memory is shared with other passes unless
+        // an async compute pass uses it, as Generate does here.
         rdg::TextureRef pattern =
             graph.CreateTexture({.format = rhi::Format::RGBA16_FLOAT,
                                  .width = width,
@@ -74,8 +76,12 @@ public:
         generate.scale = mScale;
         const rhi::PipelineHandle generatePipeline = mGenerate;
 
+        // The pattern depends on nothing else in the frame, so it is generated on the compute queue,
+        // overlapping the passes before it (the path tracer's trace). Composite, on the graphics queue,
+        // waits for it; the render graph inserts that wait and keeps the pattern's memory unaliased.
         graph.AddPass(
-            "Example.Generate", rdg::PassFlags::Compute,
+            "Example.Generate",
+            mAsync ? rdg::PassFlags::Compute | rdg::PassFlags::AsyncCompute : rdg::PassFlags::Compute,
             [&](rdg::PassBuilder& b) { b.Write(pattern, Access::UAVCompute); },
             [=](rdg::PassContext& ctx) mutable
             {
@@ -114,8 +120,9 @@ private:
     rhi::PipelineHandle mGenerate;
     rhi::PipelineHandle mComposite;
     float mScale = 20.0f;
-    float mOpacity = 1.0f;
+    float mOpacity = 0.25f; // a light overlay: the image below stays visible
     bool mAnimate = true;
+    bool mAsync = true;
 };
 
 } // namespace

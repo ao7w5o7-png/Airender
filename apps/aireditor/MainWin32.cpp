@@ -1,8 +1,10 @@
 // aireditor: Win32 window + DXGI swapchain + Dear ImGui (Win32 / DX12 backends) around EditorApp.
 //
-//   aireditor [--scene NAME] [--shaders DIR] [--no-vsync] [--dlss] [--dlss-mode
-//   dlaa|quality|balanced|performance|ultra]
-//             [--gpu-validation] [--no-validation]
+//   aireditor [--scene NAME] [--shaders DIR] [--features a,b,...] [--no-vsync] [--dlss]
+//             [--dlss-mode dlaa|quality|balanced|performance|ultra] [--gpu-validation] [--no-validation]
+//
+// --features replaces the feature chain (default pathtracer,tonemap); dlss is inserted after the
+// path tracer when enabled.
 //
 // The UI is drawn by one render graph pass at the end of every frame, into the swapchain back
 // buffer, reading the frame output as a shader resource. ImGui's textures (font atlas) and the
@@ -23,6 +25,7 @@
 #include <d3d12.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <unordered_map>
@@ -145,6 +148,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             else if (arg == "--shaders" && i + 1 < argc)
             {
                 options.shaderRoot = Narrow(argv[++i]);
+            }
+            else if (arg == "--features" && i + 1 < argc)
+            {
+                options.features.clear();
+                const std::string list = Narrow(argv[++i]);
+                for (size_t begin = 0; begin <= list.size();)
+                {
+                    const size_t end = std::min(list.find(',', begin), list.size());
+                    if (end > begin)
+                    {
+                        options.features.push_back(list.substr(begin, end - begin));
+                    }
+                    begin = end + 1;
+                }
             }
             else if (arg == "--dlss")
             {

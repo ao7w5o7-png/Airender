@@ -120,10 +120,12 @@ void EditorApp::CreateRunner(u32 width, u32 height)
 {
     width = std::max(width, 8u);
     height = std::max(height, 8u);
-    // Keep parameter values across the rebuild.
+    // Keep parameter values and render graph settings across the rebuild.
     std::vector<std::pair<std::string, std::string>> saved;
+    rdg::RenderGraph::Config graphConfig;
     if (mRunner)
     {
+        graphConfig = mRunner->GetDesc().graphConfig;
         for (const std::string& name : mActiveFeatures)
         {
             if (renderer::RenderFeature* feature = mRunner->FindFeature(name))
@@ -144,6 +146,7 @@ void EditorApp::CreateRunner(u32 width, u32 height)
     // With DLSS the path tracer renders below the output size and Ray Reconstruction upscales.
     desc.renderScale = IsDlssEnabled() ? kDlssModes[mOptions.dlssMode].renderScale : 1.0f;
     desc.shaderRoot = mOptions.shaderRoot;
+    desc.graphConfig = graphConfig;
     desc.profile = true;
     mRunner = std::make_unique<renderer::FrameRunner>(mDevice, mTasks, desc);
     renderer::FeatureRegistry registry;
@@ -525,7 +528,7 @@ void EditorApp::BuildMenuBar()
     const std::string stats =
         std::format("{}{} | {:.1f} fps{} | GPU {} ", mDiagnostics.IsPaused() ? "PROFILER PAUSED | " : "",
                     mDevice.GetCapabilities().adapterName, mDiagnostics.GetFps(), mOptions.vsync ? "" : " (uncapped)",
-                    FormatMs(mDiagnostics.GetGpuFrameMs()));
+                    FormatMs(mDiagnostics.GetGpuBusyMs()));
     ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::CalcTextSize(stats.c_str()).x - 12.0f);
     ImGui::TextDisabled("%s", stats.c_str());
     ImGui::EndMainMenuBar();
@@ -915,6 +918,19 @@ void EditorApp::BuildDebugPanel()
                 stats.culledPassCount, stats.barrierCount, stats.commandListCount);
     ImGui::Text("Transient memory: %s (%s without aliasing)", renderer::FormatBytes(stats.transientHeapSize).c_str(),
                 renderer::FormatBytes(stats.transientBytesUnaliased).c_str());
+    if (mRunner)
+    {
+        rdg::RenderGraph::Config config = mRunner->GetDesc().graphConfig;
+        if (ImGui::Checkbox("Async compute", &config.enableAsyncCompute))
+        {
+            mRunner->SetGraphConfig(config);
+        }
+        ImGui::SetItemTooltip("Run passes marked AsyncCompute on the compute queue, overlapping graphics work.\n"
+                              "Off: they run on the graphics queue in declaration order (for A/B timing).");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%u async passes, %u submissions, %u queue waits", stats.asyncComputePassCount,
+                            stats.submissionCount, stats.queueWaitCount);
+    }
     ImGui::Text("Validation errors this frame: %zu", mLastResult.validationErrors.size());
     ImGui::End();
 }

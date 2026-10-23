@@ -569,7 +569,7 @@ public:
             {
                 for (const Barrier& barrier : command.barriers)
                 {
-                    ValidateBarrierLocked(queue, barrier);
+                    ValidateBarrierLocked(queue, barrier, mFence[size_t(queue)] + 1);
                 }
                 for (const StateRequirement& requirement : command.requirements)
                 {
@@ -577,7 +577,7 @@ public:
                 }
                 if (mProfiling && command.event == RecordedCommand::Event::Begin)
                 {
-                    mFrameScopes.push_back({command.eventName, mScopeDepth++, 0.0, 0.0});
+                    mFrameScopes.push_back({command.eventName, queue, mScopeDepth++, 0.0, 0.0});
                 }
                 else if (mProfiling && command.event == RecordedCommand::Event::End && mScopeDepth > 0)
                 {
@@ -590,6 +590,23 @@ public:
             }
         }
         return ++mFence[size_t(queue)]; // the null GPU finishes instantly
+    }
+
+    void QueueWait(QueueType waiter, QueueType signaler, u64 value) override
+    {
+        std::lock_guard lock(mSubmitMutex);
+        if (value > mFence[size_t(signaler)])
+        {
+            Report(waiter, std::format("VALIDATION: {} waits for {} fence {}, which was never submitted (the GPU "
+                                       "would hang)",
+                                       QueueName(waiter), QueueName(signaler), value));
+        }
+        u64& waited = mWaited[size_t(waiter)][size_t(signaler)];
+        waited = std::max(waited, value);
+        if (mCapture)
+        {
+            mCaptured.push_back(std::format("[{}] Wait {} fence {}", QueueName(waiter), QueueName(signaler), value));
+        }
     }
 
     bool IsFenceComplete(QueueType queue, u64 value) override
@@ -767,13 +784,41 @@ private:
     static u64 StateKey(TextureHandle h) { return (1ull << 62) | (u64(h.index) << 32) | h.generation; }
     static u64 StateKey(BufferHandle h) { return (2ull << 62) | (u64(h.index) << 32) | h.generation; }
 
-    void ValidateBarrierLocked(QueueType queue, const Barrier& barrier)
+    void Report(QueueType queue, const std::string& message)
+    {
+        AIR_LOG(Error, "NullRHI", "{}", message);
+        if (mCapture)
+        {
+            mCaptured.push_back(std::format("[{}] {}", QueueName(queue), message));
+        }
+    }
+
+    // `fence` is the value the submission containing the barrier will signal on `queue`.
+    void ValidateBarrierLocked(QueueType queue, const Barrier& barrier, u64 fence)
     {
         if (barrier.type == Barrier::Type::Aliasing || barrier.type == Barrier::Type::AccelStruct)
         {
             return;
         }
         const u64 key = barrier.type == Barrier::Type::Texture ? StateKey(barrier.texture) : StateKey(barrier.buffer);
+        const auto describe = [&]
+        { return barrier.type == Barrier::Type::Texture ? Describe(barrier.texture) : Describe(barrier.buffer); };
+        // States a queue cannot use (render targets, pixel-shader reads, ... on the compute queue).
+        if (!IsAccessLegalOnQueue(barrier.after, queue) ||
+            (!barrier.discard && !IsAccessLegalOnQueue(barrier.before, queue)))
+        {
+            Report(queue, std::format("VALIDATION: barrier on {} ({} -> {}) uses a state the {} queue does not support",
+                                      describe(), ToString(barrier.before), ToString(barrier.after), QueueName(queue)));
+        }
+        // A resource last used on another queue must not be touched before waiting for that use.
+        LastUse& last = mLastUse[key];
+        if (last.fence != 0 && last.queue != queue && mWaited[size_t(queue)][size_t(last.queue)] < last.fence)
+        {
+            Report(queue, std::format("VALIDATION: {} was last used on the {} queue (fence {}) and is used on the {} "
+                                      "queue without waiting for it",
+                                      describe(), QueueName(last.queue), last.fence, QueueName(queue)));
+        }
+        last = {queue, fence};
         auto [it, inserted] = mTrackedState.try_emplace(key, Access::None);
         if (!barrier.discard && it->second != barrier.before)
         {
@@ -810,6 +855,7 @@ private:
     {
         std::lock_guard lock(mSubmitMutex);
         mTrackedState.erase(key);
+        mLastUse.erase(key);
     }
 
     void DeferDelete(std::function<void()> fn)
@@ -877,6 +923,14 @@ private:
 
     std::mutex mSubmitMutex; // guards fences, tracked state and capture
     u64 mFence[size_t(QueueType::Count)] = {};
+    // mWaited[waiter][signaler]: the highest signaler fence the waiter queue waited for.
+    u64 mWaited[size_t(QueueType::Count)][size_t(QueueType::Count)] = {};
+    struct LastUse
+    {
+        QueueType queue = QueueType::Graphics;
+        u64 fence = 0; // 0: never used
+    };
+    std::unordered_map<u64, LastUse> mLastUse; // barrier-visible uses, by StateKey
     std::unordered_map<u64, Access> mTrackedState;
     bool mCapture = false;
     std::vector<std::string> mCaptured;

@@ -56,6 +56,7 @@ std::string FlagsToString(PassFlags flags)
     add(PassFlags::RayTracing, "RayTracing");
     add(PassFlags::Copy, "Copy");
     add(PassFlags::NeverCull, "NeverCull");
+    add(PassFlags::AsyncCompute, "AsyncCompute");
     return s.empty() ? "None" : s;
 }
 
@@ -207,6 +208,8 @@ u32 RenderGraph::AddPassInternal(std::string name, PassFlags flags, std::functio
 {
     CheckThread();
     AIR_CHECK(!mCompiled, "AddPass('{}') after Compile()", name);
+    AIR_CHECK(!Any(flags & PassFlags::AsyncCompute) || !Any(flags & PassFlags::Raster),
+              "pass '{}': AsyncCompute cannot be a raster pass (the compute queue does not rasterize)", name);
     Pass pass;
     pass.name = std::move(name);
     pass.flags = flags;
@@ -232,6 +235,9 @@ void RenderGraph::AddAccess(u32 passIndex, u32 id, ResourceKind kind, Access acc
         AIR_CHECK(!IsWriteAccess(access), "pass '{}' declares Read on '{}' with writable access {}", pass.name, r.name,
                   rhi::ToString(access));
     }
+    AIR_CHECK(!Any(pass.flags & PassFlags::AsyncCompute) || IsAccessLegalOnQueue(access, rhi::QueueType::Compute),
+              "pass '{}' is AsyncCompute but uses '{}' as {}, which the compute queue does not support", pass.name,
+              r.name, rhi::ToString(access));
     const bool supported =
         kind == ResourceKind::Texture ? TextureSupports(r.textureDesc, access) : BufferSupports(r.bufferDesc, access);
     AIR_CHECK(supported, "pass '{}': '{}' is not created with the usage flags needed for {}", pass.name, r.name,
@@ -284,6 +290,7 @@ void RenderGraph::Compile()
     mStats.passCount = u32(mPasses.size());
 
     CullPasses();
+    BuildBatches();
     ComputeLifetimes();
     AllocateTransientMemory();
     BuildBarriers();
@@ -329,6 +336,29 @@ void RenderGraph::CullPasses()
     }
 }
 
+void RenderGraph::BuildBatches()
+{
+    mBatches.clear();
+    mBatches.push_back({}); // the graphics prologue
+    for (u32 live = 0; live < mLivePasses.size(); ++live)
+    {
+        Pass& pass = mPasses[mLivePasses[live]];
+        const bool async = mConfig.enableAsyncCompute && Any(pass.flags & PassFlags::AsyncCompute);
+        pass.queue = async ? rhi::QueueType::Compute : rhi::QueueType::Graphics;
+        mStats.asyncComputePassCount += async ? 1u : 0u;
+        if (mBatches.size() == 1 || mBatches.back().queue != pass.queue)
+        {
+            Batch batch;
+            batch.queue = pass.queue;
+            batch.begin = live;
+            batch.end = live;
+            mBatches.push_back(std::move(batch));
+        }
+        pass.batch = u32(mBatches.size() - 1);
+        mBatches.back().end = live + 1;
+    }
+}
+
 void RenderGraph::ComputeLifetimes()
 {
     for (u32 p : mLivePasses)
@@ -339,6 +369,7 @@ void RenderGraph::ComputeLifetimes()
             r.used = true;
             r.firstPass = std::min(r.firstPass, p);
             r.lastPass = std::max(r.lastPass, p);
+            r.asyncUse = r.asyncUse || mPasses[p].queue != rhi::QueueType::Graphics;
         }
     }
 }
@@ -349,6 +380,7 @@ void RenderGraph::AllocateTransientMemory()
     {
         u32 first, last;
         u64 begin, end;
+        bool async;
     };
     std::vector<u32> order;
     for (u32 i = 0; i < mResources.size(); ++i)
@@ -383,7 +415,9 @@ void RenderGraph::AllocateTransientMemory()
                 moved = false;
                 for (const Placed& p : placed)
                 {
-                    const bool timeOverlap = p.first <= r.lastPass && r.firstPass <= p.last;
+                    // Declaration order says nothing about when a compute-queue pass runs relative to
+                    // graphics passes, so anything touched by one overlaps everything.
+                    const bool timeOverlap = r.asyncUse || p.async || (p.first <= r.lastPass && r.firstPass <= p.last);
                     const bool memOverlap = p.begin < offset + r.allocation.size && offset < p.end;
                     if (timeOverlap && memOverlap)
                     {
@@ -398,7 +432,7 @@ void RenderGraph::AllocateTransientMemory()
             offset = AlignUp(heapSize, r.allocation.alignment);
         }
         r.heapOffset = offset;
-        placed.push_back({r.firstPass, r.lastPass, offset, offset + r.allocation.size});
+        placed.push_back({r.firstPass, r.lastPass, offset, offset + r.allocation.size, r.asyncUse});
         heapSize = std::max(heapSize, offset + r.allocation.size);
     }
     mStats.transientHeapSize = heapSize;
@@ -430,6 +464,14 @@ void RenderGraph::BuildBarriers()
         resources.push_back(resource);
     };
 
+    // The batch that used each resource last (any queue); 0 is the prologue, ~0u none yet.
+    std::vector<u32> lastBatch(mResources.size(), ~0u);
+    auto waitFor = [&](u32 batch, u32 other)
+    {
+        u32& wait = mBatches[batch].waitFor[size_t(mBatches[other].queue)];
+        wait = wait == ~0u ? other : std::max(wait, other);
+    };
+
     for (u32 p : mLivePasses)
     {
         Pass& pass = mPasses[p];
@@ -439,6 +481,13 @@ void RenderGraph::BuildBarriers()
         {
             const Resource& r = mResources[a.resource];
             const Access before = state[a.resource];
+            // Any use of a resource last used on another queue waits for that use: covers read after
+            // write, write after read and state changes (two reads in a row also wait: conservative).
+            const u32 previous = lastBatch[a.resource];
+            if (previous != ~0u && mBatches[previous].queue != pass.queue)
+            {
+                waitFor(pass.batch, previous);
+            }
             if (!touched[a.resource] && !r.imported)
             {
                 // First use of a graph-created resource: contents are undefined (and possibly aliased).
@@ -447,14 +496,63 @@ void RenderGraph::BuildBarriers()
             }
             else if (before != a.access || Any(a.access & Access::UAVMask))
             {
-                // A state change, or UAV -> UAV to order the writes of consecutive passes.
-                add(pass.barriersBefore, pass.barrierResources, MakeBarrier(r, before, a.access, false), a.resource);
+                const Barrier barrier = MakeBarrier(r, before, a.access, false);
+                if (IsAccessLegalOnQueue(before, pass.queue))
+                {
+                    // A state change, or UAV -> UAV to order the writes of consecutive passes.
+                    add(pass.barriersBefore, pass.barrierResources, barrier, a.resource);
+                }
+                else
+                {
+                    // This queue cannot leave a graphics-only state: the graphics queue transitions the
+                    // resource after its last use there (or in the prologue), and this batch waits.
+                    const u32 owner = previous != ~0u ? previous : 0u;
+                    AIR_CHECK(mBatches[owner].queue == rhi::QueueType::Graphics,
+                              "'{}' in {} on the {} queue cannot be handed to pass '{}'", r.name, rhi::ToString(before),
+                              rhi::ToString(mBatches[owner].queue), pass.name);
+                    add(mBatches[owner].barriersAfter, mBatches[owner].barriersAfterResources, barrier, a.resource);
+                    waitFor(pass.batch, owner);
+                    ++mStats.barrierCount;
+                }
             }
             touched[a.resource] = true;
             state[a.resource] = a.access;
+            lastBatch[a.resource] = pass.batch;
         }
         mStats.barrierCount += u32(pass.barriersBefore.size());
     }
+
+    // The compute queue starts the frame at the graphics prologue (the fork). Without it, a compute
+    // batch with no graphics input runs as soon as it is submitted, while the graphics queue may still
+    // be on the previous frame and using the imported resources that batch writes.
+    for (u32 b = 1; b < mBatches.size(); ++b)
+    {
+        if (mBatches[b].queue == rhi::QueueType::Compute)
+        {
+            waitFor(b, 0);
+            mBatches[0].fork = mBatches[b].waitFor[size_t(rhi::QueueType::Graphics)] == 0;
+            break;
+        }
+    }
+
+    // The frame ends on the graphics queue, after all compute work: exported resources leave in their
+    // final states (some graphics-only) and the next frame starts from a joined state.
+    u32 lastCompute = ~0u;
+    for (u32 b = 0; b < mBatches.size(); ++b)
+    {
+        lastCompute = mBatches[b].queue == rhi::QueueType::Compute ? b : lastCompute;
+    }
+    Batch* holder = &mBatches.back();
+    if (lastCompute != ~0u &&
+        (holder->queue != rhi::QueueType::Graphics || holder->waitFor[size_t(rhi::QueueType::Compute)] != lastCompute))
+    {
+        Batch epilogue;
+        epilogue.begin = epilogue.end = u32(mLivePasses.size());
+        epilogue.waitFor[size_t(rhi::QueueType::Compute)] = lastCompute;
+        mBatches.push_back(std::move(epilogue));
+        holder = &mBatches.back();
+    }
+    holder->finalBarriers = true;
 
     mFinalBarriers.clear();
     mFinalBarrierResources.clear();
@@ -474,7 +572,7 @@ void RenderGraph::BuildBarriers()
 // RenderGraph: execute
 // ===========================================================================
 
-void RenderGraph::RecordRange(rhi::CommandList& cmd, u32 begin, u32 end, bool last)
+void RenderGraph::RecordRange(rhi::CommandList& cmd, u32 begin, u32 end)
 {
     for (u32 i = begin; i < end; ++i)
     {
@@ -491,10 +589,6 @@ void RenderGraph::RecordRange(rhi::CommandList& cmd, u32 begin, u32 end, bool la
             pass.cpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         }
         cmd.EndEvent();
-    }
-    if (last)
-    {
-        cmd.Barriers(mFinalBarriers);
     }
 }
 
@@ -557,48 +651,106 @@ u64 RenderGraph::Execute()
     {
         resolve(mPasses[p].barriersBefore, mPasses[p].barrierResources);
     }
+    for (Batch& batch : mBatches)
+    {
+        resolve(batch.barriersAfter, batch.barriersAfterResources);
+    }
     resolve(mFinalBarriers, mFinalBarrierResources);
 
-    // 3. Record. Each chunk of passes goes into its own command list; chunks record in parallel and
-    //    are submitted in declaration order, so GPU execution order matches the graph.
-    const u32 liveCount = u32(mLivePasses.size());
+    // 3. Record. Each batch splits into chunks of passes, one command list each; every chunk of every
+    //    batch records in parallel. A batch's hand-over (and the final) barriers end its last chunk.
+    struct Chunk
+    {
+        u32 batch;
+        u32 begin, end; // range in mLivePasses
+        bool last;
+    };
+    std::vector<Chunk> chunks;
     const u32 chunkSize = mConfig.passesPerCommandList;
-    const u32 chunkCount = std::max(1u, (liveCount + chunkSize - 1) / chunkSize);
-    std::vector<std::unique_ptr<rhi::CommandList>> lists(chunkCount);
-    for (auto& list : lists)
+    for (u32 b = 0; b < mBatches.size(); ++b)
     {
-        list = mDevice.CreateCommandList(rhi::QueueType::Graphics);
+        const Batch& batch = mBatches[b];
+        if (batch.begin == batch.end)
+        {
+            if (!batch.barriersAfter.empty() || batch.finalBarriers || batch.fork)
+            {
+                chunks.push_back({b, batch.begin, batch.end, true}); // barriers only (or nothing: the fork)
+            }
+            continue;
+        }
+        for (u32 begin = batch.begin; begin < batch.end; begin += chunkSize)
+        {
+            const u32 end = std::min(batch.end, begin + chunkSize);
+            chunks.push_back({b, begin, end, end == batch.end});
+        }
     }
-    auto recordChunk = [&](u32 chunk)
+    std::vector<std::unique_ptr<rhi::CommandList>> lists(chunks.size());
+    for (size_t c = 0; c < chunks.size(); ++c)
     {
-        rhi::CommandList& cmd = *lists[chunk];
+        lists[c] = mDevice.CreateCommandList(mBatches[chunks[c].batch].queue);
+    }
+    auto recordChunk = [&](u32 c)
+    {
+        const Chunk& chunk = chunks[c];
+        const Batch& batch = mBatches[chunk.batch];
+        rhi::CommandList& cmd = *lists[c];
         cmd.Begin();
-        const u32 begin = chunk * chunkSize;
-        RecordRange(cmd, begin, std::min(liveCount, begin + chunkSize), chunk == chunkCount - 1);
+        RecordRange(cmd, chunk.begin, chunk.end);
+        if (chunk.last)
+        {
+            cmd.Barriers(batch.barriersAfter);
+            if (batch.finalBarriers)
+            {
+                cmd.Barriers(mFinalBarriers);
+            }
+        }
         cmd.End();
     };
-    if (mConfig.parallelRecording && mTasks && chunkCount > 1)
+    if (mConfig.parallelRecording && mTasks && chunks.size() > 1)
     {
-        mTasks->ParallelFor(chunkCount, recordChunk);
+        mTasks->ParallelFor(u32(chunks.size()), recordChunk);
     }
     else
     {
-        for (u32 c = 0; c < chunkCount; ++c)
+        for (u32 c = 0; c < chunks.size(); ++c)
         {
             recordChunk(c);
         }
     }
-    mStats.commandListCount = chunkCount;
+    mStats.commandListCount = u32(chunks.size());
 
-    std::vector<rhi::CommandList*> raw;
-    raw.reserve(lists.size());
-    for (auto& list : lists)
+    // 4. Submit batch by batch in declaration order; a batch first waits (on the GPU) for the batches
+    //    of the other queue it depends on, which were all submitted before it.
+    std::vector<u64> fences(mBatches.size(), 0);
+    u64 fence = 0;
+    size_t next = 0;
+    for (u32 b = 0; b < mBatches.size(); ++b)
     {
-        raw.push_back(list.get());
+        std::vector<rhi::CommandList*> raw;
+        while (next < chunks.size() && chunks[next].batch == b)
+        {
+            raw.push_back(lists[next++].get());
+        }
+        if (raw.empty())
+        {
+            continue;
+        }
+        const Batch& batch = mBatches[b];
+        for (size_t q = 0; q < size_t(rhi::QueueType::Count); ++q)
+        {
+            const u32 wait = batch.waitFor[q];
+            if (wait != ~0u && fences[wait] != 0)
+            {
+                mDevice.QueueWait(batch.queue, rhi::QueueType(q), fences[wait]);
+                ++mStats.queueWaitCount;
+            }
+        }
+        fences[b] = mDevice.Submit(batch.queue, raw);
+        ++mStats.submissionCount;
+        fence = batch.queue == rhi::QueueType::Graphics ? fences[b] : fence;
     }
-    const u64 fence = mDevice.Submit(rhi::QueueType::Graphics, raw);
 
-    // 4. Release transient resources (deferred by the device until the GPU is done) and hand out extractions.
+    // 5. Release transient resources (deferred by the device until the GPU is done) and hand out extractions.
     for (Resource& r : mResources)
     {
         if (r.extracted)
@@ -662,6 +814,43 @@ std::string RenderGraph::DumpText() const
         {
             out << std::format("      {} {} as {}\n", IsWriteAccess(a.access) ? "write" : "read ",
                                mResources[a.resource].name, rhi::ToString(a.access));
+        }
+    }
+    // The queue schedule, only when it is more than one graphics submission.
+    if (mStats.asyncComputePassCount > 0)
+    {
+        auto submitted = [&](const Batch& batch)
+        { return batch.begin != batch.end || !batch.barriersAfter.empty() || batch.finalBarriers || batch.fork; };
+        out << "Submissions:\n";
+        for (u32 b = 0; b < mBatches.size(); ++b)
+        {
+            const Batch& batch = mBatches[b];
+            if (!submitted(batch))
+            {
+                continue;
+            }
+            std::string line = std::format("  ({}) {}:", b, rhi::ToString(batch.queue));
+            line += batch.fork ? " fork" : "";
+            for (u32 i = batch.begin; i < batch.end; ++i)
+            {
+                line += std::format(" [{}]", mLivePasses[i]);
+            }
+            for (size_t q = 0; q < size_t(rhi::QueueType::Count); ++q)
+            {
+                const u32 wait = batch.waitFor[q];
+                if (wait != ~0u && submitted(mBatches[wait]))
+                {
+                    line += std::format(", waits for ({})", wait);
+                }
+            }
+            out << line << (batch.finalBarriers ? ", final barriers\n" : "\n");
+            for (size_t i = 0; i < batch.barriersAfter.size(); ++i)
+            {
+                const Barrier& barrier = batch.barriersAfter[i];
+                out << std::format("      then barrier {}: {} -> {} (for another queue)\n",
+                                   mResources[batch.barriersAfterResources[i]].name, rhi::ToString(barrier.before),
+                                   rhi::ToString(barrier.after));
+            }
         }
     }
     out << "Resources:\n";

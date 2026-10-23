@@ -54,6 +54,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Execute lambdas may run concurrently on worker threads: capture by value or read only immutable data.
 - Every new pass gets at least one Null backend test (`Headless` in `tests/TestHelpers.h`)
   asserting there are no validation errors.
+- A compute pass that depends on little and is needed late can run on the compute queue: add
+  `PassFlags::AsyncCompute`. The graph inserts the cross-queue waits and hand-over barriers; the
+  pass may only use compute-queue states (no `SRVGraphics`, render targets, depth). Check the
+  schedule in `DumpText()` (`Submissions:`), and compare GPU timings with `--no-async-compute`
+  (docs/architecture.md §5.4).
 
 ## Features talk through the blackboard
 - Publish and consume per-frame textures and values via `ctx.blackboard` with the keys in
