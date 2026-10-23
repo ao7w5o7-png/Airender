@@ -29,8 +29,9 @@ struct Image {
 
 bool WritePfm(const std::filesystem::path& path, const Image& image);
 std::optional<Image> ReadPfm(const std::filesystem::path& path);
-// Clamps to [0,1] and applies sRGB encoding.
-bool WritePpm(const std::filesystem::path& path, const Image& image);
+// Clamps to [0,1] and applies sRGB encoding (or writes the values as they are when the image is
+// already display-encoded, e.g. a tonemapped frame).
+bool WritePpm(const std::filesystem::path& path, const Image& image, bool encodeSrgb = true);
 std::optional<Image> ReadPpm(const std::filesystem::path& path);
 // Picks the reader from the extension (.pfm / .ppm).
 std::optional<Image> ReadImage(const std::filesystem::path& path);

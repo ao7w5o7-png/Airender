@@ -100,7 +100,7 @@ std::optional<Image> ReadPfm(const std::filesystem::path& path) {
     return image;
 }
 
-bool WritePpm(const std::filesystem::path& path, const Image& image) {
+bool WritePpm(const std::filesystem::path& path, const Image& image, bool encodeSrgb) {
     std::ofstream out(path, std::ios::binary);
     if (!out) {
         return false;
@@ -111,7 +111,8 @@ bool WritePpm(const std::filesystem::path& path, const Image& image) {
         for (u32 x = 0; x < image.width; ++x) {
             const float* p = image.At(x, y);
             for (u32 c = 0; c < 3; ++c) {
-                row[x * 3 + c] = u8(std::lround(LinearToSrgb(p[c]) * 255.0f));
+                const float v = encodeSrgb ? LinearToSrgb(p[c]) : std::clamp(p[c], 0.0f, 1.0f);
+                row[x * 3 + c] = u8(std::lround(v * 255.0f));
             }
         }
         out.write(reinterpret_cast<const char*>(row.data()), std::streamsize(row.size()));

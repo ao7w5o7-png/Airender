@@ -9,6 +9,7 @@
 #include "air/rdg/RenderGraph.h"
 #include "air/renderer/RenderFeature.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -59,7 +60,10 @@ public:
     // "feature.parameter" = value, e.g. SetParameter("pathtracer.maxBounces", "4", &error).
     bool SetParameter(std::string_view qualifiedName, std::string_view value, std::string* error = nullptr);
 
-    FrameResult RenderFrame(const GpuScene& scene, const Camera& camera);
+    // `extraPasses` runs after every feature, in the same graph (e.g. an editor drawing its UI
+    // into the swapchain while reading the output).
+    FrameResult RenderFrame(const GpuScene& scene, const Camera& camera,
+                            const std::function<void(FrameContext&)>& extraPasses = {});
 
     rhi::TextureHandle GetOutput() const { return mOutput; }
     const FrameRunnerDesc& GetDesc() const { return mDesc; }

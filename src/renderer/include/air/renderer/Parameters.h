@@ -33,7 +33,6 @@ public:
     // {"name": {"value": ..., "type": "u32", "min": ..., "max": ..., "description": ...}}
     json::Value ToJson() const;
 
-private:
     struct Entry {
         std::string name;
         std::string description;
@@ -41,6 +40,11 @@ private:
         double min = 0;
         double max = 0;
     };
+    // For UIs that edit the bound fields directly: call Touch() after changing one.
+    const std::vector<Entry>& Entries() const { return mEntries; }
+    void Touch() { ++mVersion; }
+
+private:
     const Entry* Find(std::string_view name) const;
 
     std::vector<Entry> mEntries;

@@ -12,7 +12,8 @@
 #
 # Targets / functions defined here:
 #   air_agility_sdk               INTERFACE: Agility SDK headers (must win over the Windows SDK ones)
-#   air_imgui                     STATIC: ImGui core + Win32 + DX12 backends (editor only)
+#   air_imgui_core                STATIC: ImGui core (editor UI library, any platform)
+#   air_imgui                     STATIC: Win32 + DX12 backends (editor executable, Windows)
 #   air_dlss                      INTERFACE: NGX headers + import library
 #   air_target_d3d12_runtime(t)   exports the Agility SDK version from executable t and copies the runtime DLLs
 #   air_target_dlss_runtime(t)    copies the DLSS DLLs next to executable t
@@ -159,22 +160,31 @@ if(AIR_BUILD_EDITOR)
             imconfig.h imstb_rectpack.h imstb_textedit.h imstb_truetype.h LICENSE.txt
             backends/imgui_impl_dx12.h backends/imgui_impl_dx12.cpp
             backends/imgui_impl_win32.h backends/imgui_impl_win32.cpp)
-        if(NOT imguiDir)
-            message(FATAL_ERROR "Airender: could not download Dear ImGui; set AIR_IMGUI_DIR")
+        if(imguiDir)
+            set(AIR_IMGUI_DIR "${imguiDir}" CACHE PATH "" FORCE)
         endif()
-        set(AIR_IMGUI_DIR "${imguiDir}" CACHE PATH "" FORCE)
     endif()
-    add_library(air_imgui STATIC
+    if(NOT AIR_IMGUI_DIR)
+        message(WARNING "Airender: could not download Dear ImGui (set AIR_IMGUI_DIR); building without the editor")
+        set(AIR_BUILD_EDITOR OFF)
+    endif()
+endif()
+if(AIR_BUILD_EDITOR)
+    # Core only: the editor UI library and its headless tests build on every platform.
+    add_library(air_imgui_core STATIC
         ${AIR_IMGUI_DIR}/imgui.cpp
         ${AIR_IMGUI_DIR}/imgui_draw.cpp
         ${AIR_IMGUI_DIR}/imgui_tables.cpp
         ${AIR_IMGUI_DIR}/imgui_widgets.cpp
-        ${AIR_IMGUI_DIR}/imgui_demo.cpp
-        ${AIR_IMGUI_DIR}/backends/imgui_impl_dx12.cpp
-        ${AIR_IMGUI_DIR}/backends/imgui_impl_win32.cpp)
-    target_include_directories(air_imgui SYSTEM PUBLIC ${AIR_IMGUI_DIR} ${AIR_IMGUI_DIR}/backends)
-    target_compile_definitions(air_imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
-    target_link_libraries(air_imgui PUBLIC air_agility_sdk d3d12 dxgi d3dcompiler dwmapi)
+        ${AIR_IMGUI_DIR}/imgui_demo.cpp)
+    target_include_directories(air_imgui_core SYSTEM PUBLIC ${AIR_IMGUI_DIR} ${AIR_IMGUI_DIR}/backends)
+    target_compile_definitions(air_imgui_core PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+    if(AIR_RHI_D3D12)
+        add_library(air_imgui STATIC
+            ${AIR_IMGUI_DIR}/backends/imgui_impl_dx12.cpp
+            ${AIR_IMGUI_DIR}/backends/imgui_impl_win32.cpp)
+        target_link_libraries(air_imgui PUBLIC air_imgui_core air_agility_sdk d3d12 dxgi d3dcompiler dwmapi)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

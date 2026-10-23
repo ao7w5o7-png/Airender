@@ -100,7 +100,8 @@ bool FrameRunner::SetParameter(std::string_view qualifiedName, std::string_view 
     return feature->Parameters().Set(qualifiedName.substr(dot + 1), value, error);
 }
 
-FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera) {
+FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera,
+                                     const std::function<void(FrameContext&)>& extraPasses) {
     AIR_PROFILE_SCOPE("FrameRunner.RenderFrame");
     const auto start = std::chrono::steady_clock::now();
     FrameResult result;
@@ -121,6 +122,9 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
             for (Entry& e : mFeatures) {
                 AIR_PROFILE_SCOPE(e.name);
                 e.feature->AddPasses(context);
+            }
+            if (extraPasses) {
+                extraPasses(context);
             }
         }
         graph.Execute();
