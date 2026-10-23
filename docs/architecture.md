@@ -300,55 +300,121 @@ Principles:
 5. **CI runs the same commands**: `.github/workflows/ci.yml` calls `tools/air.py`, so passing
    locally means passing in CI.
 
-Image golden tests: `Image` reads and writes PFM (linear HDR, exact) and PPM (8-bit preview).
-Once a real backend supports readback, `render --screenshot` will write PFM to compare against
-`tests/golden/images/`; the comparison tool and metrics are already in place.
+Image tests: `Image` reads and writes PFM (linear HDR, exact) and PPM (8-bit preview).
+`render --output` reads the final frame back; `aircli compare` measures rmse / psnr against a
+reference (see §8.3).
 
 ---
 
-## 8. GPU Path Tracer (Fast Offline Rendering)
+## 8. GPU Path Tracer (Physically Based, Energy Conserving)
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
-`pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples` and `exposure`.
+`pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
+`nee`, `furnace`, `debugView` and `debugScale`.
 
-### 8.1 Current implementation
+### 8.1 Units and scene
 
-- Hardware ray tracing: DXR 1.1 / `VK_KHR_ray_tracing_pipeline`, one raygen + miss + closest-hit.
-- **The bounce loop lives in raygen** with `maxRecursionDepth = 1`: a small stack and scheduler
-  friendly, as in most GPU offline renderers.
-- Progressive accumulation: a persistent `RGBA32F` accumulation buffer (rgb = radiance sum,
-  a = sample count) gains `samplesPerPixelPerFrame` samples per frame; the `Resolve` pass averages,
-  applies exposure and an ACES tonemap.
-- Camera or scene changes call `ResetAccumulation()`; once `IsConverged()` reaches
-  `targetSamples` the frame is final.
-- Materials: Lambert + emission only for now, with a gradient sky; Russian roulette from the
-  third bounce.
-- Shaders and C++ share `PathTracerShared.h`, so push constant / struct layouts are defined once
-  and their sizes are checked with `static_assert`.
+- Metres for distance, radiance in nits (cd/m²). Emissive materials store a color normalized to
+  luminance 1 times an intensity in nits; the environment is a constant radiance.
+- Camera exposure follows photographic EV100: `exposure = 1 / (1.2 * 2^EV100)`. The Cornell box
+  (3000 nit light) uses EV100 8.
+- `renderer::Scene` uploads a `SceneDesc` (meshes, instances, materials, camera, environment):
+  device-local vertex/index buffers, one BLAS per mesh and a TLAS. Materials and the emissive
+  triangle light list live in per-frame upload rings so they can be edited live; `GpuScene::version`
+  changes whenever a frame's data must be re-accumulated.
+- Built-in scenes (`MakeBuiltinScene`): `cornell_box` and `furnace` (spheres of roughness 0..1 in a
+  uniform environment, used to verify energy conservation).
 
-### 8.2 Roadmap for fast offline rendering
+### 8.2 Integrator
 
-| Priority | Item | Benefit |
+The integrator is written once in `shaders/Integrator.hlsli` and `shaders/Bsdf.hlsli` and compiled
+both as HLSL and as C++ through `air/renderer/shader/HlslCompat.h` (see coding standards §8). The
+GPU path tracer and the CPU reference renderer therefore run the same code; only the hooks
+(`TraceClosest`, `TraceVisible`, `LoadInstance`, `LoadMaterial`, `LoadLight`, `BsdfLutLoad`, ...)
+differ.
+
+- **BSDF**: GGX with height-correlated Smith G2, sampled with visible normals (spherical caps).
+  Kulla-Conty multiple scattering restores the energy lost by single-scatter microfacets; the
+  dielectric is a GGX coat (F0 = 0.04) over a Lambert base that receives exactly the energy the coat
+  did not reflect. A white material reflects 100% at every roughness and angle (white furnace).
+  The albedo tables are built on the CPU at startup (`GetBsdfLut`) and uploaded once.
+- **Light transport**: next event estimation over emissive triangles chosen by power, combined
+  with BSDF sampling by the power heuristic (MIS). Emitters are one sided (front = `cross(e1, e2)`).
+  Russian roulette from the third bounce.
+- **Hardware ray tracing**: DXR raygen + closest hit for primary and bounce rays (20 byte payload,
+  bounce loop in raygen, recursion depth 1); inline `RayQuery` for shadow rays and the intersection
+  heatmap. Push constants only carry bindless indices; per-frame data comes from an upload ring.
+- **Accumulation**: a persistent `RGBA32F` buffer averages samples until `targetSamples`, then
+  tracing stops. Camera, scene version or image-affecting setting changes reset it. With
+  `accumulate=0` the camera is jittered (Halton) every frame for a temporal denoiser.
+
+### 8.3 Validation
+
+- `tests/BsdfTests.cpp`: white furnace for metal and dielectric, energy bound, reciprocity, sampled
+  weight equals evaluation, sampling matches uniform integration.
+- `tests/IntegratorTests.cpp`: an emissive white room collects exactly `B + 1` times the emission
+  (B = bounces), NEE and BSDF-only estimators agree, furnace spheres average 0.18.
+- `aircli reference` renders the same scene with the CPU reference renderer (BVH + the shared
+  integrator, multithreaded). Compare a GPU frame with it:
+  ```bash
+  aircli reference --scene cornell_box --spp 1024 --output ref.pfm
+  aircli render --backend d3d12 --scene cornell_box --frames 300 \
+                --output gpu.pfm
+  aircli compare ref.pfm gpu.pfm --diff diff.ppm
+  ```
+
+### 8.4 Debug views
+
+`pathtracer.debugView` selects what `Resolve` writes: 0 lit, 1 normals, 2 base color,
+3 roughness, 4 metallic, 5 first-hit distance, 6 intersection count heatmap (Turbo colormap),
+7 path length heatmap, 8 direct light only, 9 indirect light only. `debugScale` scales the distance and heatmap views. `furnace=1` turns every
+material white and every emitter off with a uniform environment, so any visible structure is an
+energy error.
+
+### 8.5 Feature chain and the blackboard
+
+Features communicate only through `renderer::Blackboard` (`FrameContext::blackboard`), never by
+including each other. Slots live in `renderer::slots`:
+
+| Slot | Producer | Contents |
 |---|---|---|
-| P0 | Next event estimation (NEE) + MIS, area light / environment importance sampling | Much less noise at the same spp |
-| P0 | GGX metal/roughness materials, bindless textures | Presentable images |
-| P0 | Offline mode: high spp per frame, batched DispatchRays, no vsync, saturate the GPU | Throughput |
-| P1 | AI denoising (OIDN / OptiX with albedo + normal guides) | Final frames at low spp |
-| P1 | Blue noise / Sobol low-discrepancy sequences instead of PCG | Faster convergence |
-| P1 | Adaptive sampling: stop per pixel by variance | Spend samples where the noise is |
-| P2 | Shader Execution Reordering (SER, RTX 40+) / material sorting | SIMD efficiency for divergent paths |
-| P2 | Tiled rendering to avoid TDRs and support huge resolutions | Stability |
-| P2 | Motion blur, depth of field, volumes | Cinematic effects |
+| `kDiffuseAlbedo`, `kSpecularAlbedo` | pathtracer (`guides=1`) | First-hit albedos |
+| `kNormalRoughness` | pathtracer | World normal + roughness |
+| `kViewDepth` | pathtracer | Distance along the view axis in metres |
+| `kMotionVectors` | pathtracer | Previous minus current position, in pixels |
+| `kJitterX/Y`, `kHistoryReset` | pathtracer | Sub-pixel jitter; history is invalid this frame |
+| `kOutputIsDisplay` | pathtracer | Output is a display-referred debug view: do not tonemap or denoise |
 
-### 8.3 Producing cinematic video
-
-One offline frame = run frames until converged → read back → write an EXR/PNG sequence →
-assemble with ffmpeg. Camera paths and animation come from a higher-level script (which AI can
-generate later).
+- **dlss** (Windows, D3D12, `AIR_WITH_DLSS`): NVIDIA DLSS Ray Reconstruction (NGX DLSS-D) at 1:1
+  (DLAA) on the noisy HDR output, using the guides above. Run the path tracer with
+  `accumulate=0, spp=1` in front of it. It disables itself on other backends or when guides are
+  missing.
+- **tonemap**: exposure is applied by the path tracer; tonemap maps HDR to display with `clamp`,
+  `aces` or `neutral` (Khronos PBR Neutral), highlights NaN/Inf (magenta) and negative values
+  (cyan), and optionally encodes sRGB.
 
 ---
 
-## 9. Building
+## 9. Editor
+
+`apps/aireditor/` is split in two:
+
+- `air_editor_ui` (all platforms): `EditorApp` plus the diagnostics panels, built on ImGui core.
+  `tests/EditorTests.cpp` drives it headless on the Null backend.
+- `aireditor` (Windows, D3D12): Win32 window, swap chain and the ImGui DX12 backend. ImGui's
+  descriptors come from the bindless heap; the UI is recorded by an RDG pass `Editor.UI` added
+  through `FrameRunner::RenderFrame`'s `extraPasses` hook, so it gets automatic barriers like any
+  other pass.
+
+Panels: Viewport (fly camera: hold right mouse to look, WASD/QE to move, wheel for speed, Shift
+for fast; F12 saves a screenshot), Scene (scene picker, camera,
+EV100, materials), Render (feature parameters, DLSS toggle, debug views, screenshot), Profiler (GPU
+pass timeline, per-thread CPU scopes, frame/GPU/CPU/samples-per-second history), Memory (VRAM
+budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
+
+---
+
+## 10. Building
 
 ```bash
 python3 tools/air.py check                     # configure + build + every check
@@ -359,22 +425,22 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build build && 
 
 | Option | Default | Description |
 |---|---|---|
-| `AIR_RHI_D3D12` | ON on Windows | D3D12 backend |
+| `AIR_RHI_D3D12` | ON on Windows | D3D12 backend (Agility SDK and DXC are downloaded) |
 | `AIR_RHI_VULKAN` | OFF | Vulkan backend (requires the Vulkan SDK) |
+| `AIR_BUILD_EDITOR` | ON | Editor UI library and tests everywhere, `aireditor.exe` with D3D12 |
+| `AIR_WITH_DLSS` | ON with D3D12 | `dlss` feature; the SDK is downloaded or taken from `AIR_DLSS_SDK_DIR` |
 | `AIR_BUILD_TESTS` | ON | Unit tests |
 | `AIR_ENABLE_ASAN` / `AIR_ENABLE_TSAN` | OFF | Address / thread sanitizers |
 
-Shaders: with DXC installed, each feature's `shaders/` can be compiled (`-T lib_6_6` for DXIL,
-add `-spirv` for SPIR-V). Build integration lands together with the D3D12 backend.
+Shaders are compiled by CMake with DXC when a GPU backend is enabled and copied next to the
+executables.
 
 ---
 
-## 10. Next Steps
+## 11. Next Steps
 
-1. D3D12 backend: device, queues/fences, heap provider, bindless descriptor heap, Enhanced
-   Barriers, DXR pipelines and shader tables.
-2. Shader compilation integration (DXC, compiled by CMake + runtime hot reload).
-3. Scene system: glTF loading → vertex/index buffers → BLAS/TLAS → instance/material buffers.
-4. Path tracer P0 items (NEE + MIS, GGX, offline mode).
-5. Readback + `render --screenshot` (PFM/EXR) + image golden tests + image sequence rendering.
-6. Vulkan backend.
+1. Vulkan backend (ray tracing pipeline, bindless descriptor buffers).
+2. Textures and glTF scene loading; environment map importance sampling.
+3. Low-discrepancy sampling (Sobol / blue noise) and adaptive sampling.
+4. Offline mode: batched dispatches, tiling for huge resolutions, image sequence output.
+5. Shader hot reload in the editor.

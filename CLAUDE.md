@@ -18,7 +18,12 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - A failing golden snapshot (`tests/golden/`) means the command stream or render graph changed:
   once the change is confirmed as intended, run `python3 tools/air.py golden-update` and say so in
   the PR.
-- All of the above works without a GPU (Null backend).
+- Rendering correctness: `aircli reference --scene cornell_box --output ref.pfm` renders on the CPU
+  with the same `.hlsli` integrator; compare a GPU `render --output gpu.pfm` against it. BSDF and
+  integrator changes must keep `BsdfTests` / `IntegratorTests` (white furnace, energy) green.
+- Debug a frame with `--set pathtracer.debugView=N` (normals, albedo, depth, heatmaps, direct /
+  indirect) or `--set pathtracer.furnace=1`; see docs/architecture.md §8.4.
+- All of the above works without a GPU (Null backend), except GPU renders.
 
 ## New algorithm = new feature
 - `python3 tools/air.py new-feature <lower_snake_name>` creates a skeleton from
@@ -37,6 +42,12 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Execute lambdas may run concurrently on worker threads: capture by value or read only immutable data.
 - Every new pass gets at least one Null backend test (`Headless` in `tests/TestHelpers.h`)
   asserting there are no validation errors.
+
+## Features talk through the blackboard
+- Publish and consume per-frame textures and values via `ctx.blackboard` with the keys in
+  `renderer::slots` (guides, jitter, history reset); add new slots there rather than coupling features.
+- The editor (`apps/aireditor`) is a UI over `FrameRunner`: its logic lives in `air_editor_ui`
+  and is tested headless in `tests/EditorTests.cpp`.
 
 ## Thread safety
 Device is thread-safe; CommandList is not; render graph construction is single threaded; prefer

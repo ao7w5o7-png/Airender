@@ -99,6 +99,11 @@ See `docs/architecture.md` §2.2. Additional rules:
   sides, and have their sizes locked with `static_assert`.
 - One entry point per `.hlsl` file (Vulkan allows one push constant block per entry point);
   compiled outputs are named `<Stem>.cs.dxil|spv` and `<Stem>.lib.dxil|spv`.
+- Code that must match on the GPU and the CPU (BSDFs, the integrator) goes in `.hlsli` files that
+  compile as both HLSL and C++ through `air/renderer/shader/HlslCompat.h`: use only the types and
+  intrinsics it provides, `AIR_INOUT` / `AIR_OUT` for out parameters and `AIR_CONST` for constants.
+  Resource access goes through hook functions that the including file defines (HLSL: descriptor
+  loads; C++: a test kernel or the reference renderer), and CPU tests cover the shared code.
 
 ## 9. Language
 
