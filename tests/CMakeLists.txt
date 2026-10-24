@@ -16,6 +16,8 @@ add_executable(air_tests
     CloudTests.cpp
     VolumeTests.cpp
     VdbTests.cpp
+    MomentTests.cpp
+    VolumeBricksTests.cpp
     MlpTests.cpp
     ${feature_tests}
 )

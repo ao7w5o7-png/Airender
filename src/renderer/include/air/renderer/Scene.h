@@ -131,6 +131,8 @@ void SceneBounds(const SceneDesc& desc, float3& lo, float3& hi);
 // the materials, which is why they live in per-frame buffers rather than in the instance data.
 std::vector<u32> FirstLightIndices(const SceneDesc& desc);
 std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, double* totalPower = nullptr);
+// One group per emissive instance (gpu::LightGroup) over BuildLightTriangles' list, in its order.
+std::vector<gpu::LightGroup> BuildLightGroups(const std::vector<gpu::LightTriangle>& lights, const SceneDesc& desc);
 // The light tree over `lights` (gpu::LightTreeNode), which also gets each light's tree trail and
 // depth. Lights without power are left out; with none, the tree is one leaf without power.
 std::vector<gpu::LightTreeNode> BuildLightTree(std::vector<gpu::LightTriangle>& lights);
@@ -149,7 +151,11 @@ struct GpuScene
     rhi::BufferHandle instanceLights;
     u32 lightCount = 0;
     float lightPower = 0.0f; // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
-    float3 boundsMin{};      // the box around the geometry (SceneBounds)
+    // StructuredBuffer<gpu::LightGroup>, one per emissive instance (at least one element), written with
+    // `lights`; `lightGroups` is the same on the CPU (empty without emitters).
+    rhi::BufferHandle lightGroupTable;
+    std::vector<gpu::LightGroup> lightGroups;
+    float3 boundsMin{}; // the box around the geometry (SceneBounds)
     float3 boundsMax{};
     gpu::SkyData sky{};         // the sun and how to read skyTable (uniform radiance when width == 0)
     rhi::BufferHandle skyTable; // StructuredBuffer<float>: 3 per texel, at least 3
@@ -170,6 +176,14 @@ struct GpuScene
     // (StructuredBuffer<gpu::VolumeData>; none without volumes).
     std::vector<gpu::VolumeData> volumes;
     rhi::BufferHandle volumeTable;
+    // Their real-time view (VolumeBricksShared.h), in the same order and with the bindless indices of
+    // the bricks and the occlusion texture filled in: a gpu::VolumeMarchData per volume in
+    // `volumeMarchTable` and its kVolumeLevels gpu::VolumeBrickLevel in `volumeLevelTable`
+    // (StructuredBuffers; none without volumes).
+    std::vector<gpu::VolumeMarchData> volumeMarch;
+    std::vector<gpu::VolumeBrickLevel> volumeLevels;
+    rhi::BufferHandle volumeMarchTable;
+    rhi::BufferHandle volumeLevelTable;
     u64 version = 0; // bumped whenever anything that changes the image changes
 };
 
@@ -225,6 +239,8 @@ private:
     std::vector<rhi::BufferHandle> mLightTreeRing;
     std::vector<u32> mLightTreeRingCapacity;
     std::vector<rhi::BufferHandle> mInstanceLightRing;
+    std::vector<rhi::BufferHandle> mLightGroupRing;
+    std::vector<u32> mLightGroupRingCapacity;
     std::vector<rhi::BufferHandle> mSkyRing;
     std::vector<u32> mSkyRingCapacity;
     SkyTable mSkyTable; // of mSkyTableFor
@@ -244,6 +260,12 @@ private:
         gpu::VolumeData data{}; // enabled == 0: none (disabled, or its file could not be read)
         rhi::TextureHandle density;
         rhi::BufferHandle majorants;
+        // The bricks: per level its indirection, occupancy, bricks and ranges, and the occlusion
+        // texture; `march` and `levels` with their bindless indices (march.levels is set with the table).
+        std::vector<rhi::BufferHandle> brickBuffers;
+        rhi::TextureHandle ao;
+        gpu::VolumeMarchData march{};
+        gpu::VolumeBrickLevel levels[gpu::kVolumeLevels]{};
         std::string error;
         // The voxels its file or plume gave, kept (up to 512 MiB over all volumes) for edits of the
         // optics or the placement, which then need no new read of the file; shared by the volumes

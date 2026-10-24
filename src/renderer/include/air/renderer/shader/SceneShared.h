@@ -66,6 +66,23 @@ struct LightTriangle
     uint treeTrailLow;  // trail bits 0-31
     uint treeTrailHigh; // trail bits 32-63
     uint treeDepth;     // depth of its leaf; kInvalidIndex: not in the tree (no power)
+    uint group;         // its LightGroup (the emissive instance it belongs to)
+};
+
+// The triangles of one emissive instance seen as one light, consecutive entries of the light list:
+// what lights volumes in real time (docs/architecture.md §8.13), which takes a few of these at each
+// step of a march rather than a sample among all the triangles.
+struct LightGroup
+{
+    float3 centre; // area-weighted centroid of its triangles
+    float area;    // their total area
+    float3 radiance;
+    uint firstLight;   // its triangles in the light list
+    float3 normalArea; // sum of area x emitting normal: its length is the area for a flat emitter, 0 for a closed one
+    uint lightCount;
+    float radius; // of the sphere around its triangles centred on `centre`
+    float power;  // luminance x area x pi (one-sided Lambertian emitters)
+    uint instance;
     uint pad0;
 };
 
@@ -94,6 +111,7 @@ static_assert(sizeof(Vertex) == 32);
 static_assert(sizeof(MaterialData) == 32);
 static_assert(sizeof(InstanceData) == 112);
 static_assert(sizeof(LightTriangle) == 80);
+static_assert(sizeof(LightGroup) == 64);
 static_assert(sizeof(LightTreeNode) == 64);
 } // namespace air::gpu
 #endif

@@ -1,4 +1,5 @@
 add_library(air_renderer
+    src/BlueNoise.cpp
     src/Clouds.cpp
     src/Diagnostics.cpp
     src/FeatureRegistry.cpp
@@ -17,6 +18,7 @@ add_library(air_renderer
     src/TextureSampling.cpp
     src/Vdb.cpp
     src/Volume.cpp
+    src/VolumeBricks.cpp
     src/ShaderHotReload.cpp
     src/ShaderLoader.cpp
 )

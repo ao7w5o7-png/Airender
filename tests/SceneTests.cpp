@@ -113,6 +113,47 @@ TEST(Scene_LightListHoldsOnlyEmitters)
     device->WaitIdle();
 }
 
+// Every emissive instance is one light group over its consecutive triangles: the Cornell box's panel
+// (0.5 x 0.4 m at 3000 nits, facing down), and in the many-light hall one group per emitter whose
+// triangles all name it.
+TEST(Scene_LightGroupsGatherEachEmitter)
+{
+    const renderer::SceneDesc cornell = *renderer::MakeBuiltinScene("cornell_box");
+    const std::vector<gpu::LightTriangle> lights = renderer::BuildLightTriangles(cornell);
+    const std::vector<gpu::LightGroup> groups = renderer::BuildLightGroups(lights, cornell);
+    EXPECT(groups.size() == 1);
+    const gpu::LightGroup& panel = groups[0];
+    EXPECT(panel.firstLight == 0 && panel.lightCount == 2);
+    EXPECT(std::abs(panel.area - 0.2f) < 1e-5f);
+    EXPECT(std::abs(panel.centre.x) < 1e-5f && std::abs(panel.centre.y - 1.995f) < 1e-5f &&
+           std::abs(panel.centre.z) < 1e-5f);
+    EXPECT(std::abs(panel.normalArea.y + 0.2f) < 1e-5f && std::abs(panel.normalArea.x) < 1e-6f);
+    EXPECT(std::abs(panel.radius - std::sqrt(0.25f * 0.25f + 0.2f * 0.2f)) < 1e-5f);
+    EXPECT(std::abs(panel.power - 3000.0f * 0.2f * 3.14159265f) < 0.1f);
+    EXPECT(cornell.instances[panel.instance].name == "Light");
+
+    const renderer::SceneDesc hall = *renderer::MakeBuiltinScene("many_lights");
+    const std::vector<gpu::LightTriangle> hallLights = renderer::BuildLightTriangles(hall);
+    const std::vector<gpu::LightGroup> hallGroups = renderer::BuildLightGroups(hallLights, hall);
+    EXPECT(hallGroups.size() == EmissiveInstances(hall));
+    double area = 0.0;
+    for (u32 g = 0; g < hallGroups.size(); ++g)
+    {
+        const gpu::LightGroup& group = hallGroups[g];
+        area += group.area;
+        for (u32 i = group.firstLight; i < group.firstLight + group.lightCount; ++i)
+        {
+            EXPECT(hallLights[i].group == g);
+        }
+    }
+    double lightArea = 0.0;
+    for (const gpu::LightTriangle& light : hallLights)
+    {
+        lightArea += light.area;
+    }
+    EXPECT(std::abs(area / lightArea - 1.0) < 1e-6);
+}
+
 // The light list's alias table selects every light with exactly its probability: entry i is drawn
 // with 1/N and kept with aliasThreshold, otherwise it hands the draw to its alias.
 TEST(Scene_LightAliasTableReproducesProbabilities)

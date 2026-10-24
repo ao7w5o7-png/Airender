@@ -281,6 +281,7 @@ VolumeResources BuildVolume(const Volume& volume, const VolumeGrid& source)
             }
         }
     }
+    out.bricks = BuildVolumeBricks(volume, grid, origin, voxelSize);
     return out;
 }
 

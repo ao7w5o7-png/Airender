@@ -191,6 +191,21 @@ inline float asfloat(uint u)
     std::memcpy(&v, &u, 4);
     return v;
 }
+// The half float in the low 16 bits of h.
+inline float f16tof32(uint h)
+{
+    const uint sign = (h & 0x8000u) << 16;
+    const uint exponent = (h >> 10) & 0x1Fu;
+    const uint mantissa = h & 0x3FFu;
+    if (exponent == 0)
+    {
+        const float subnormal = float(mantissa) * 5.9604644775390625e-8f; // 2^-24
+        return sign != 0 ? -subnormal : subnormal;
+    }
+    const uint bits =
+        exponent == 31 ? sign | 0x7F800000u | (mantissa << 13) : sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    return asfloat(bits);
+}
 
 // Vector intrinsics.
 constexpr float dot(float2 a, float2 b)
