@@ -244,6 +244,7 @@ Scene::~Scene()
         mDevice.DestroyBuffer(buffer);
     }
     DestroyClouds();
+    DestroyVolume();
     DestroyAerial();
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
@@ -374,6 +375,15 @@ void Scene::SetClouds(const Clouds& clouds)
     if (!(mDesc.clouds == clouds))
     {
         mDesc.clouds = clouds;
+        mDirty = true;
+    }
+}
+
+void Scene::SetVolume(const Volume& volume)
+{
+    if (!(mDesc.volume == volume))
+    {
+        mDesc.volume = volume;
         mDirty = true;
     }
 }
@@ -518,6 +528,63 @@ void Scene::WriteDynamicData()
         mCloudsFor = mDesc.clouds;
         mCloudsBuilt = true;
     }
+
+    // The volume likewise. Its voxels are read again only when where they come from changed.
+    if (!mVolumeBuilt || !(mVolumeFor == mDesc.volume))
+    {
+        DestroyVolume();
+        const Volume& desc = mDesc.volume;
+        const bool sameSource = mVolumeFor.enabled && desc.file == mVolumeFor.file && desc.grid == mVolumeFor.grid &&
+                                desc.maxResolution == mVolumeFor.maxResolution && desc.seed == mVolumeFor.seed;
+        if (!desc.enabled || !sameSource)
+        {
+            mVolumeGrid.reset();
+        }
+        VolumeResources volume;
+        mVolumeError.clear();
+        if (desc.enabled)
+        {
+            std::optional<VolumeGrid> grid;
+            grid.swap(mVolumeGrid); // empties the cache: refilled below if the grid is small enough
+            if (!grid)
+            {
+                grid = LoadVolumeGrid(desc, &mVolumeError);
+                if (!grid)
+                {
+                    AIR_LOG(Error, "Volume", "{}", mVolumeError);
+                }
+            }
+            if (grid)
+            {
+                volume = BuildVolume(desc, *grid);
+                if (grid->density.size() * sizeof(float) <= (size_t(512) << 20))
+                {
+                    mVolumeGrid = std::move(grid);
+                }
+            }
+        }
+        mGpu.volume = volume.data;
+        if (volume.data.enabled != 0)
+        {
+            const gpu::VolumeData& v = volume.data;
+            mGpu.volumeDensity = CreateTextureWithData(mDevice,
+                                                       {.dimension = rhi::TextureDimension::Tex3D,
+                                                        .format = rhi::Format::R16_FLOAT,
+                                                        .width = v.sizeX + 2,
+                                                        .height = v.sizeY + 2,
+                                                        .depthOrArraySize = v.sizeZ + 2,
+                                                        .debugName = std::format("{}.VolumeDensity", mDesc.name)},
+                                                       volume.density.data());
+            mGpu.volumeMajorants =
+                CreateBufferWithData(mDevice,
+                                     {.stride = sizeof(float),
+                                      .usage = BufferUsage::ShaderResource,
+                                      .debugName = std::format("{}.VolumeMajorants", mDesc.name)},
+                                     volume.majorants.data(), volume.majorants.size() * sizeof(float));
+        }
+        mVolumeFor = mDesc.volume;
+        mVolumeBuilt = true;
+    }
 }
 
 void Scene::DestroyAerial()
@@ -529,6 +596,17 @@ void Scene::DestroyAerial()
     }
     mGpu.aerialInscatter = {};
     mGpu.aerialTransmittance = {};
+}
+
+void Scene::DestroyVolume()
+{
+    if (mGpu.volumeDensity.IsValid())
+    {
+        mDevice.DestroyTexture(mGpu.volumeDensity);
+        mDevice.DestroyBuffer(mGpu.volumeMajorants);
+    }
+    mGpu.volumeDensity = {};
+    mGpu.volumeMajorants = {};
 }
 
 void Scene::DestroyClouds()

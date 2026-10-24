@@ -15,6 +15,8 @@ add_library(air_renderer
     src/Sky.cpp
     src/TestScenes.cpp
     src/TextureSampling.cpp
+    src/Vdb.cpp
+    src/Volume.cpp
     src/ShaderHotReload.cpp
     src/ShaderLoader.cpp
 )

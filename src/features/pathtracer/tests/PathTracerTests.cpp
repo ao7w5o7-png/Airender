@@ -254,3 +254,32 @@ TEST(PathTracer_RadianceCacheTrainsEveryFrame)
     EXPECT(CountLines(off.commands, "BeginEvent 'NRC.") == 0);
     EXPECT(CountLines(off.commands, "BeginEvent 'PathTracer.ReSTIRGI.") == 2);
 }
+
+// A volume (smoke in the Cornell box): the plain kernel traces it, while ReSTIR and the radiance
+// cache, which do not model media, step aside until it is gone.
+TEST(PathTracer_VolumeTurnsReSTIRAndTheCacheOff)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    h.scene->SetVolume({.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f});
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        const auto result = h.Frame();
+        EXPECT(result.validationErrors.empty());
+        EXPECT(CountLines(result.commands, "BeginEvent 'PathTracer.ReSTIR") == 0);
+        EXPECT(CountLines(result.commands, "DispatchRays 64x32x1") == 1);
+    }
+    EXPECT(h.scene->Get().volume.enabled == 1 && h.scene->Get().volumeDensity.IsValid());
+    EXPECT(h.runner->SetParameter("pathtracer.nrc", "1"));
+    const auto cache = h.Frame();
+    EXPECT(cache.validationErrors.empty());
+    EXPECT(CountLines(cache.commands, "BeginEvent 'NRC.") == 0);
+    std::string status = h.runner->DescribeFeatures().Dump(0);
+    EXPECT(status.find("\"restirDi\":false") != std::string::npos && status.find("\"nrc\":false") != std::string::npos);
+
+    h.scene->SetVolume({});
+    const auto without = h.Frame();
+    EXPECT(without.validationErrors.empty());
+    EXPECT(CountLines(without.commands, "BeginEvent 'NRC.Train[") == 4);
+    EXPECT(CountLines(without.commands, "BeginEvent 'PathTracer.ReSTIRDI.") == 3);
+}

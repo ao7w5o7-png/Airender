@@ -97,6 +97,9 @@ struct PathTracerSettings
     // Scattering events a path's walk through the clouds may take before it is given up (its light
     // lost). Thick clouds scatter light hundreds of times before it leaves them.
     u32 cloudEvents = 256;
+    // Scattering events a path may take in the scene's volume, on top of its maxBounces surfaces,
+    // before its light is given up. A bright medium (albedo near 1) needs hundreds.
+    u32 volumeEvents = 256;
     ReSTIRSettings restir;
     RadianceCacheSettings nrc;
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
@@ -162,6 +165,9 @@ private:
     rhi::PipelineHandle mTracePipeline;
     rhi::PipelineHandle mTracePipelineSer; // PathTracerSer.lib (SM 6.9), when the device reorders
     rhi::PipelineHandle mTracePipelineGi;  // PathTracerGi.lib: records ReSTIR GI's candidates
+    // The kernel with the scene's volume (AIR_PT_VOLUME), created the first time a scene has one.
+    rhi::RayTracingPipelineDesc mTraceVolumeDesc;
+    rhi::PipelineHandle mTracePipelineVolume;
     // PathTracerNrc.cs (paths end in the cache, linear algebra) and PathTracerNrcPortable.cs (float32),
     // created the first time the cache runs.
     renderer::LazyComputePipeline mTraceNrc;

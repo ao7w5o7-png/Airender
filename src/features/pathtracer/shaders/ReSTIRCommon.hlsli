@@ -49,11 +49,13 @@ IntegratorParams MakeParams(FrameData f)
     IntegratorParams params;
     params.sky = f.sky;
     params.clouds = f.clouds;
+    params.volume = f.volume;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
     params.lightTreeBounces = f.lightTreeBounces;
     params.cloudEvents = f.cloudEvents;
+    params.volumeEvents = f.volumeEvents;
     params.nrcSpread = 0.0f; // ReSTIR's paths do not end in the radiance cache
     params.nrcSlot = 0u;
     params.nrcRecords = 0u;

@@ -179,3 +179,42 @@ TEST(Scene_CloudResourcesFollowEdits)
     device->WaitIdle();
     EXPECT(device->GetMemoryStats().liveBuffers == 0 && device->GetMemoryStats().liveTextures == 0);
 }
+
+// The volume is built and uploaded when it changes and released when it goes; a file that cannot be
+// read leaves none and says why.
+TEST(Scene_VolumeResourcesFollowEdits)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    {
+        renderer::Scene scene(*device, *renderer::MakeBuiltinScene("smoke"));
+        scene.Update();
+        EXPECT(scene.Get().volume.enabled == 1 && scene.Get().volumeDensity.IsValid() &&
+               scene.Get().volumeMajorants.IsValid() && scene.VolumeError().empty());
+        renderer::Volume volume = scene.Desc().volume;
+        const u64 version = scene.Get().version;
+        scene.SetVolume(volume); // unchanged
+        scene.Update();
+        EXPECT(scene.Get().version == version);
+        volume.file = "does/not/exist.vdb";
+        scene.SetVolume(volume);
+        scene.Update();
+        EXPECT(scene.Get().version != version);
+        EXPECT(scene.Get().volume.enabled == 0 && !scene.Get().volumeDensity.IsValid() &&
+               scene.VolumeError().find("does/not/exist.vdb") != std::string::npos);
+        volume.enabled = false;
+        volume.file.clear();
+        scene.SetVolume(volume);
+        scene.Update();
+        EXPECT(scene.Get().volume.enabled == 0 && scene.VolumeError().empty());
+    }
+    device->WaitIdle();
+    EXPECT(device->GetMemoryStats().liveBuffers == 0 && device->GetMemoryStats().liveTextures == 0);
+
+    renderer::SceneDesc desc = *renderer::MakeBuiltinScene("smoke");
+    EXPECT(renderer::Validate(desc).empty());
+    desc.volume.albedo = 1.5f;
+    EXPECT(renderer::Validate(desc).find("volume") != std::string::npos);
+    desc.volume.albedo = 0.9f;
+    desc.volume.maxResolution = 4096; // beyond a 3D texture's 2048
+    EXPECT(!renderer::Validate(desc).empty());
+}

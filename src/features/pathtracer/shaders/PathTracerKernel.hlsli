@@ -206,11 +206,13 @@ void TracePixel(uint2 pixel)
     IntegratorParams params;
     params.sky = f.sky;
     params.clouds = f.clouds;
+    params.volume = f.volume;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
     params.lightTreeBounces = f.lightTreeBounces;
     params.cloudEvents = f.cloudEvents;
+    params.volumeEvents = f.volumeEvents;
     params.nrcSpread = f.nrc.spread;
     params.nrcSlot = 0u;
     params.nrcRecords = f.nrc.recordsPerPath;

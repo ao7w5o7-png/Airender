@@ -152,6 +152,22 @@ TEST(Editor_SwitchesScenesAndDebugViews)
     EXPECT(std::filesystem::exists(path.string() + ".ppm") && std::filesystem::exists(path.string() + ".pfm"));
 }
 
+// The smoke scene: its volume in the Scene panel (and its controls' IDs clash with no others) and
+// in the frames.
+TEST(Editor_ShowsTheSmokeScenesVolume)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorApp app(*device, tasks, SmallOptions());
+    EXPECT(app.LoadScene("smoke"));
+    for (int i = 0; i < 3; ++i)
+    {
+        ui.Frame(app);
+        EXPECT(app.GetLastResult().validationErrors.empty());
+    }
+}
+
 // Paused, the profiler keeps the captured frame while frames keep rendering; Step captures one more.
 TEST(Editor_ProfilerPauseFreezesCapturedFrame)
 {

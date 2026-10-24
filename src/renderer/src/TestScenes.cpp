@@ -602,4 +602,47 @@ SceneDesc MakeCumulus()
     return scene;
 }
 
+// Smoke rising from a brazier in a walled yard in the evening (Volume.h): the low sun behind the
+// plume lights it above the wall's shadow (forward scattering), the embers light it from below and
+// the sky from everywhere. Next event estimation of triangles and the sun from inside the medium,
+// its transmittance on the surfaces' NEE and multiple scattering all show.
+SceneDesc MakeSmoke()
+{
+    SceneDesc scene;
+    scene.name = "smoke";
+    const u32 paving = AddMaterial(scene, {.name = "Paving", .baseColor = {0.32f, 0.3f, 0.27f}, .roughness = 0.85f});
+    const u32 plaster = AddMaterial(scene, {.name = "Plaster", .baseColor = {0.7f, 0.66f, 0.6f}, .roughness = 0.8f});
+    const u32 iron =
+        AddMaterial(scene, {.name = "Iron", .baseColor = {0.35f, 0.33f, 0.3f}, .roughness = 0.55f, .metallic = 1.0f});
+    const u32 embers = AddMaterial(scene, {.name = "Embers",
+                                           .baseColor = {0.05f, 0.05f, 0.05f},
+                                           .roughness = 0.9f,
+                                           .emissionColor = {1.0f, 0.32f, 0.06f},
+                                           .emissionNits = 6000.0f});
+    constexpr float kHalf = 20.0f;
+    AddInstance(scene, "Yard",
+                AddMesh(scene, MakeQuad("Yard", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                paving);
+    AddBox(scene, "BackWall", {0.0f, 1.3f, -2.6f}, {6.0f, 1.3f, 0.15f}, plaster);
+    AddBox(scene, "SideWall", {-4.5f, 1.75f, 0.4f}, {0.15f, 1.75f, 2.9f}, plaster);
+    AddBox(scene, "Brazier", {0.0f, 0.28f, 0.0f}, {0.38f, 0.28f, 0.38f}, iron);
+    const float e = 0.32f;
+    AddInstance(scene, "Embers",
+                AddMesh(scene, MakeQuad("Embers", {-e, 0.565f, e}, {e, 0.565f, e}, {e, 0.565f, -e}, {-e, 0.565f, -e},
+                                        {0.0f, 1.0f, 0.0f})),
+                embers);
+    scene.volume = {.enabled = true,
+                    .position = {0.0f, 0.58f, 0.0f},
+                    .extinction = 24.0f,
+                    .albedo = 0.85f,
+                    .anisotropy = 0.35f,
+                    .seed = 3};
+    AddSky(scene, 20.0f, 140.0f);
+    LookAt(scene.camera, {0.5f, 1.6f, 6.0f}, {0.0f, 1.7f, 0.0f});
+    scene.camera.verticalFov = 0.84f;
+    scene.camera.ev100 = 14.0f;
+    return scene;
+}
+
 } // namespace air::renderer::detail

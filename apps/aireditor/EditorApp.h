@@ -166,6 +166,8 @@ private:
     std::optional<renderer::Sky> mSkyEdit;
     // Likewise the clouds (Scene::SetClouds rebakes them), whose base stays above mSceneTop.
     std::optional<renderer::Clouds> mCloudsEdit;
+    // And the volume (Scene::SetVolume reads its file again).
+    std::optional<renderer::Volume> mVolumeEdit;
     float mSceneTop = 0.0f;
     // Path tracer settings from before DLSS was enabled, restored when it is disabled.
     std::string mPreDlssAccumulate;

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
 
 using namespace air;
 using renderer::float3;
@@ -251,5 +252,109 @@ TEST(Integrator_CloudSunNeeAndPhaseSamplingAgree)
         EXPECT(withNee > 0.0);
         EXPECT(Near(withNee, phaseOnly, 0.05,
                     exact ? "clouds (exact phase), NEE vs phase sampling" : "clouds, NEE vs phase sampling"));
+    }
+}
+
+// A volume that scatters without absorbing (albedo 1 in the furnace) returns the environment along
+// every path through it, pixel by pixel: no energy is lost or made at its scattering events. Its
+// only surface is a speck far below, so that no path meets the BSDFs' Russian roulette.
+TEST(Integrator_VolumeVanishesInAWhiteFurnace)
+{
+    TaskSystem tasks(4);
+    renderer::SceneDesc scene = airtest::BuiltinScene("smoke");
+    scene.instances.resize(1);
+    scene.meshes[scene.instances[0].mesh] =
+        renderer::MakeQuad("Speck", {-0.01f, -1000.0f, 0.01f}, {0.01f, -1000.0f, 0.01f}, {0.01f, -1000.0f, -0.01f},
+                           {-0.01f, -1000.0f, -0.01f}, {0.0f, 1.0f, 0.0f}); // instance 0, the yard, is not moved
+    scene.volume.extinction = 8.0f;
+    scene.camera.position = {0.0f, 1.9f, 3.0f};
+    scene.camera.yaw = 0.0f;
+    scene.camera.pitch = 0.0f;
+    scene.camera.verticalFov = 1.0f;
+    pt::ReferenceSettings settings = Settings(tasks, 16, 4);
+    settings.furnace = true;
+    settings.volumeEvents = 4096;  // walks longer than this would lose their light
+    settings.applyExposure = true; // the environment maps to 0.18
+    const Image image = pt::RenderReference(scene, scene.camera, settings);
+    double lowest = 1e30;
+    double highest = 0.0;
+    for (u32 y = 0; y < image.height; ++y)
+    {
+        for (u32 x = 0; x < image.width; ++x)
+        {
+            const float* p = image.At(x, y);
+            const double l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+            lowest = std::min(lowest, l);
+            highest = std::max(highest, l);
+        }
+    }
+    EXPECT(Near(lowest, 0.18, 1e-3, "darkest pixel"));
+    EXPECT(Near(highest, 0.18, 1e-3, "brightest pixel"));
+}
+
+// In and behind a volume, lights are reached two ways: by next event estimation (their transmittance
+// by ratio tracking, from the medium's scattering events and from the surfaces) and by phase or BSDF
+// sampling (delta tracking decides whether the ray gets through), weighed by MIS: both together must
+// give what sampling alone gives. Three views, lit by the sun alone (made 12 degrees wide so that
+// sampling finds it often enough) or by a 3 m lamp (a triangle light): the plume's shadow on the
+// wall, the plume lit from the side (half of it in its own shadow), and the plume and its shadow on
+// the ground under the lamp. Sampling alone is the noisier of the two, about 1% here; at 16 times
+// the samples they agree to 0.3%. Removing the transmittance from any of the four NEE estimates fails
+// the test.
+TEST(Integrator_VolumeNeeAndPhaseSamplingAgree)
+{
+    TaskSystem tasks(4);
+    constexpr const char* kViews[] = {"its shadow in the sun", "the plume in the sun", "the plume under a lamp"};
+    for (int view = 0; view < 3; ++view)
+    {
+        renderer::SceneDesc scene = airtest::BuiltinScene("smoke");
+        for (renderer::Material& material : scene.materials)
+        {
+            material.emissionNits = 0.0f;
+        }
+        u32 spp = 1024;
+        if (view == 0)
+        {
+            scene.sky.sunElevation = 25.0f;
+            scene.sky.sunAzimuth = 35.0f;
+            scene.sky.sunAngularRadius = 12.0f;
+            scene.camera.position = {-1.2f, 1.3f, 1.8f};
+            scene.camera.yaw = 0.25f;
+            scene.camera.pitch = -0.05f;
+            spp = 512;
+        }
+        else if (view == 1)
+        {
+            scene.sky.sunElevation = 25.0f;
+            scene.sky.sunAzimuth = -90.0f; // from the left
+            scene.sky.sunAngularRadius = 12.0f;
+            scene.camera.position = {0.0f, 1.6f, 2.2f};
+            scene.camera.yaw = 0.0f;
+            scene.camera.pitch = 0.03f;
+        }
+        else
+        {
+            scene.sky.physical = false; // a black environment
+            scene.materials.push_back({.name = "Lamp", .baseColor = {0.0f, 0.0f, 0.0f}, .emissionNits = 20000.0f});
+            scene.meshes.push_back(renderer::MakeQuad("Lamp", {-0.5f, 4.5f, -1.5f}, {2.5f, 4.5f, -1.5f},
+                                                      {2.5f, 4.5f, 1.5f}, {-0.5f, 4.5f, 1.5f}, {0.0f, -1.0f, 0.0f}));
+            renderer::Instance lamp;
+            lamp.name = "Lamp";
+            lamp.mesh = u32(scene.meshes.size() - 1);
+            lamp.material = u32(scene.materials.size() - 1);
+            scene.instances.push_back(lamp);
+            scene.camera.position = {-1.0f, 2.4f, 2.4f};
+            scene.camera.yaw = 0.0f;
+            scene.camera.pitch = -0.6f;
+        }
+        scene.camera.verticalFov = 0.9f;
+        pt::ReferenceSettings settings = Settings(tasks, spp, 3);
+        settings.width = 16;
+        settings.height = 16;
+        const double withNee = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+        settings.nextEventEstimation = false;
+        const double samplingOnly = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+        EXPECT(withNee > 0.0);
+        EXPECT(Near(withNee, samplingOnly, 0.04, (std::string(kViews[view]) + ", NEE vs sampling").c_str()));
     }
 }

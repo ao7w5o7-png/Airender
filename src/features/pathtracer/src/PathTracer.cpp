@@ -28,8 +28,8 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 {
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
-           a.cloudEvents == b.cloudEvents && a.restir == b.restir && a.nrc == b.nrc && a.furnace == b.furnace &&
-           a.debugView == b.debugView && a.debugScale == b.debugScale;
+           a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
+           a.nrc == b.nrc && a.furnace == b.furnace && a.debugView == b.debugView && a.debugScale == b.debugScale;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -86,7 +86,8 @@ PathTracer::~PathTracer()
     }
     mTraceNrc.Destroy(mDevice);
     mTraceNrcPortable.Destroy(mDevice);
-    for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mResolvePipeline})
+    for (rhi::PipelineHandle pipeline :
+         {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mTracePipelineVolume, mResolvePipeline})
     {
         if (pipeline.IsValid())
         {
@@ -129,6 +130,10 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGi.lib", "");
     trace.debugName = "PathTracer.TraceGi";
     mTracePipelineGi = mDevice.CreateRayTracingPipeline(trace);
+    // The kernel that tracks the scene's volume (AIR_PT_VOLUME), created the first time a scene has one.
+    mTraceVolumeDesc = trace;
+    mTraceVolumeDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerVolume.lib", "");
+    mTraceVolumeDesc.debugName = "PathTracer.TraceVolume";
     // The kernels whose paths end in the neural radiance cache, compute shaders with inline ray
     // queries: on the matrix units (Shader Model 6.10, built with the preview compiler) and in float32.
     if (mDevice.GetCapabilities().linearAlgebra)
@@ -221,9 +226,17 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     // surface, for the lit and direct / indirect views.
     const u32 view = mSettings.debugView;
     const bool lightView = view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect;
+    // A volume in the scene: the kernel that tracks it, and paths do all the work (ReSTIR's first
+    // surface and the cache's queries do not know about media).
+    const bool volume = scene.volume.enabled != 0;
+    if (volume && !mTracePipelineVolume.IsValid() && !mTraceVolumeDesc.library.bytecode.empty())
+    {
+        mTracePipelineVolume = mDevice.CreateRayTracingPipeline(mTraceVolumeDesc);
+        AIR_CHECK(mTracePipelineVolume.IsValid(), "PathTracer: the volume kernel did not compile");
+    }
     auto on = [&](u32 mode) { return mode == kReSTIRAlways || (mode == kReSTIRRealTime && !mSettings.accumulate); };
     const bool diWanted = on(mSettings.restir.di) && mSettings.nextEventEstimation && !mSettings.furnace &&
-                          scene.lightCount > 0 && lightView && mReSTIR->IsDiAvailable();
+                          scene.lightCount > 0 && lightView && !volume && mReSTIR->IsDiAvailable();
     // The neural radiance cache: its own kernel variant, which leaves the indirect light to the cache
     // (no ReSTIR GI). On the matrix units when asked for and available, else in float32.
     const bool nrcView = lightView || view == gpu::kDebugNrcCache;
@@ -232,13 +245,13 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     const bool nrcLinearAlgebra =
         mSettings.nrc.linearAlgebra && mTraceNrc.IsAvailable() && mRadianceCache->IsAvailable(true);
     // The trace kernel is created the first time the cache runs.
-    const rhi::PipelineHandle nrcPipeline = !nrcOn || !nrcView                   ? rhi::PipelineHandle{}
+    const rhi::PipelineHandle nrcPipeline = !nrcOn || !nrcView || volume         ? rhi::PipelineHandle{}
                                             : nrcLinearAlgebra                   ? mTraceNrc.Get(mDevice)
                                             : mRadianceCache->IsAvailable(false) ? mTraceNrcPortable.Get(mDevice)
                                                                                  : rhi::PipelineHandle{};
     const bool nrcWanted = nrcPipeline.IsValid();
-    const bool giWanted =
-        on(mSettings.restir.gi) && lightView && !nrcWanted && mReSTIR->IsGiAvailable() && mTracePipelineGi.IsValid();
+    const bool giWanted = on(mSettings.restir.gi) && lightView && !nrcWanted && !volume && mReSTIR->IsGiAvailable() &&
+                          mTracePipelineGi.IsValid();
     const bool restirDi = diWanted && spp > 0;
     const bool restirGi = giWanted && spp > 0;
     const bool nrc = nrcWanted && spp > 0;
@@ -292,6 +305,13 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         frame.clouds.majorants = mDevice.GetBindlessSRV(scene.cloudMajorants);
     }
     frame.cloudEvents = mSettings.cloudEvents;
+    frame.volumeEvents = mSettings.volumeEvents;
+    frame.volume = scene.volume;
+    if (volume)
+    {
+        frame.volume.density = mDevice.GetBindlessSRV(scene.volumeDensity);
+        frame.volume.majorants = mDevice.GetBindlessSRV(scene.volumeMajorants);
+    }
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;
@@ -385,7 +405,9 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const rhi::PipelineHandle pipeline =
             nrc        ? nrcPipeline
             : restirGi ? mTracePipelineGi
-                       : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
+            : volume && mTracePipelineVolume.IsValid()
+                ? mTracePipelineVolume
+                : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
         RadianceCache* cache = nrc ? mRadianceCache.get() : nullptr;
         graph.AddPass(
             "PathTracer.Trace", nrc ? rdg::PassFlags::Compute : rdg::PassFlags::RayTracing,

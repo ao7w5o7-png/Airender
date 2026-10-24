@@ -67,4 +67,11 @@ hlsl::float4 SampleTexture3DClamped(const u16* texels, u32 width, u32 height, u3
         });
 }
 
+float SampleTexture3DClampedR16(const u16* texels, u32 width, u32 height, u32 depth, float u, float v, float w)
+{
+    return Trilinear<float>(Axis(u, width, false), Axis(v, height, false), Axis(w, depth, false),
+                            [&](int x, int y, int z)
+                            { return HalfToFloat(texels[(size_t(z) * height + size_t(y)) * width + size_t(x)]); });
+}
+
 } // namespace air::renderer

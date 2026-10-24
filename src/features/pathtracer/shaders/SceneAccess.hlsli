@@ -88,6 +88,18 @@ float CloudMajorantLoad(CloudData c, uint cell)
     return majorants[cell];
 }
 
+float VolumeDensitySample(VolumeData v, float3 uvw)
+{
+    Texture3D<float> density = ResourceDescriptorHeap[v.density];
+    return density.SampleLevel(gLinearClamp, uvw, 0.0f);
+}
+
+float VolumeMajorantLoad(VolumeData v, uint cell)
+{
+    StructuredBuffer<float> majorants = ResourceDescriptorHeap[v.majorants];
+    return majorants[cell];
+}
+
 LightTreeNode LoadLightNode(uint node)
 {
     StructuredBuffer<LightTreeNode> tree = ResourceDescriptorHeap[g.lightTree];

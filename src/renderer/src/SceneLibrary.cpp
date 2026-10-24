@@ -324,6 +324,7 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"terrain", detail::MakeTerrain},
     {"sunset", detail::MakeSunset},
     {"cumulus", detail::MakeCumulus},
+    {"smoke", detail::MakeSmoke},
 };
 
 } // namespace
@@ -420,6 +421,14 @@ std::string Validate(const SceneDesc& desc)
     if (desc.instances.empty())
     {
         return "scene has no instances";
+    }
+    const Volume& volume = desc.volume;
+    if (volume.enabled && (!(volume.extinction >= 0.0f) || !(volume.albedo >= 0.0f && volume.albedo <= 1.0f) ||
+                           !(volume.anisotropy > -1.0f && volume.anisotropy < 1.0f) || !(volume.size >= 0.0f) ||
+                           volume.maxResolution < 8 || volume.maxResolution > 2048))
+    {
+        return "volume: needs extinction >= 0, albedo in [0, 1], anisotropy in (-1, 1), size >= 0 and a "
+               "maxResolution of 8 to 2048 voxels (the 3D texture limit)";
     }
     const Clouds& clouds = desc.clouds;
     if (clouds.enabled)

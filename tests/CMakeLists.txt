@@ -14,6 +14,8 @@ add_executable(air_tests
     SceneTests.cpp
     SkyTests.cpp
     CloudTests.cpp
+    VolumeTests.cpp
+    VdbTests.cpp
     MlpTests.cpp
     ${feature_tests}
 )

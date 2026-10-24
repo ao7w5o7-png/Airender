@@ -13,6 +13,7 @@
 
 #include "air/renderer/Clouds.h"
 #include "air/renderer/Sky.h"
+#include "air/renderer/Volume.h"
 #include "air/renderer/shader/SceneShared.h"
 #include "air/rhi/RHIDevice.h"
 
@@ -84,6 +85,7 @@ struct SceneDesc
     float3 environment = {0.0f, 0.0f, 0.0f}; // uniform environment radiance, nits (sky.physical: unused)
     Sky sky;                                 // physical sky and sun; replaces `environment`
     Clouds clouds;                           // above every instance
+    Volume volume;                           // smoke or a cloud among the instances
 };
 
 // Mesh builders. Quads are emitted so that cross(p1 - p0, p2 - p0) points along `normal`.
@@ -108,6 +110,8 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //   sunset         a plain under a low sun: the physical sky's colours, long shadows
 //   cumulus        a meadow under fair-weather cumulus: the clouds' light, shadows and silver
 //                  linings
+//   smoke          smoke rising from a brazier against a wall at sunset (a volume, Volume.h): light
+//                  scattered in a medium from embers, the sun and the sky
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 std::vector<std::string> BuiltinSceneNames();
@@ -159,6 +163,11 @@ struct GpuScene
     rhi::TextureHandle cloudBase;
     rhi::TextureHandle cloudDetail;
     rhi::BufferHandle cloudMajorants;
+    // The volume (enabled == 0: none, and no resources), likewise: the density (R16_FLOAT Texture3D)
+    // and the majorants (StructuredBuffer<float>) as VolumeShared.h lays them out.
+    gpu::VolumeData volume{};
+    rhi::TextureHandle volumeDensity;
+    rhi::BufferHandle volumeMajorants;
     u64 version = 0; // bumped whenever anything that changes the image changes
 };
 
@@ -179,6 +188,9 @@ public:
     void SetEnvironment(float3 radiance);
     void SetSky(const Sky& sky);          // rebuilds the sky table at the next Update() (about 0.1 s)
     void SetClouds(const Clouds& clouds); // rebakes them at the next Update() (about 0.2 s)
+    void SetVolume(const Volume& volume); // rebuilds it at the next Update() (reads its file again)
+    // Why the volume's file gave no volume at the last Update() (empty when it loaded, or without one).
+    const std::string& VolumeError() const { return mVolumeError; }
     // Call once per frame before rendering: uploads pending edits into the next ring slot.
     void Update();
 
@@ -217,8 +229,15 @@ private:
     // get new ones.
     void DestroyClouds();
     void DestroyAerial();
+    void DestroyVolume();
     Clouds mCloudsFor;
     bool mCloudsBuilt = false;
+    Volume mVolumeFor;
+    bool mVolumeBuilt = false;
+    std::string mVolumeError;
+    // The voxels mVolumeFor's file or plume gave, kept (up to 512 MiB) for edits of the optics or the
+    // placement, which then need no new read of the file.
+    std::optional<VolumeGrid> mVolumeGrid;
     u32 mRingSlot = 0;
     bool mDirty = true;
     u64 mGeometryBytes = 0;

@@ -35,6 +35,10 @@ public:
                         0, 64);
         mParameters.Add("cloudEvents", &mSettings.cloudEvents,
                         "Scattering events a path may take in the clouds before its light is given up", 0, 1u << 16);
+        mParameters.Add("volumeEvents", &mSettings.volumeEvents,
+                        "Scattering events a path may take in the scene's volume (besides its bounces) before its "
+                        "light is given up",
+                        0, 1u << 16);
         mParameters.Add("restirDi", &mSettings.restir.di,
                         "ReSTIR DI: resample the direct light at the first surface across pixels and frames "
                         "(0 off, 1 when not accumulating, 2 always)",

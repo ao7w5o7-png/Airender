@@ -435,8 +435,8 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `restir*` (§8.7), `nrc*` (§8.11), `furnace`,
-`debugView`, `ser` and `debugScale`.
+`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `volumeEvents` (§8.12), `restir*` (§8.7), `nrc*`
+(§8.11), `furnace`, `debugView`, `ser` and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -468,6 +468,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `terrain` | 2.1M triangle height field, lake, physical sky and sun | dense geometry, BLAS build and memory |
   | `sunset` | a plain, two spheres and five pillars under a sun 4 degrees high | the physical sky (§8.9), long shadows |
   | `cumulus` | a 4 km meadow, a farmstead and trees under fair-weather cumulus | volumetric clouds (§8.10): their light, shadows, cost |
+  | `smoke` | smoke rising from a brazier in a walled yard, the low sun behind it | volumes (§8.12): scattering, NEE in a medium, its shadow |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -504,7 +505,8 @@ differ.
   (`AIR_PT_RESTIR_GI`: records ReSTIR GI's candidates, §8.8; compiled apart because that state
   halves the plain kernel's speed). `PathTracerNrc.hlsl` and `PathTracerNrcPortable.hlsl` (§8.11)
   end paths in the neural radiance cache; they are compute shaders (`AIR_PT_COMPUTE`) that run the
-  same `TracePixel` with inline ray queries.
+  same `TracePixel` with inline ray queries. `PathTracerVolume.hlsl` (`AIR_PT_VOLUME`) tracks the
+  scene's volume (§8.12) and runs instead of the plain kernel while there is one.
 - **Guides** (albedos, normal/roughness, depth, motion) are written only when an active feature
   lists them in `RenderFeature::ConsumedSlots()` (dlss does): they cost about a tenth of the trace.
 
@@ -1042,6 +1044,89 @@ Validation:
 - Not done yet: ReSTIR GI's candidates ending in the cache (the reuse of the first bounce together
   with the cache's tail); averaging the weights over steps for inference (steadier predictions);
   scenes that move (the network restarts with the scene).
+
+### 8.12 Volumes: smoke and OpenVDB grids
+
+`SceneDesc::volume` (`renderer/Volume.h`) puts a box of voxels among the surfaces that absorbs and
+scatters light: a grid of an OpenVDB file, or a procedural plume of smoke. `smoke` uses the plume;
+`aircli render|reference --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]
+[--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]` adds one to any scene, `aircli vdb FILE [--read
+GRID]` lists a file's grids (and reads one as a volume would), and the editor's Scene panel edits it.
+
+- **OpenVDB without the library** (`renderer/Vdb.h`; the format is described at the top of
+  `src/renderer/src/Vdb.cpp`): files of format version 222 (OpenVDB 2.0) on, float, double and half
+  grids (and floats saved as halves) of 5-4-3 trees, their values raw or compressed with zlib or
+  Blosc (LZ4, byte shuffled), with or without active-mask compression, and transforms that scale
+  uniformly and translate. The decoders are `core/Compression.h` (inflate, LZ4 blocks, Blosc 1
+  frames). Level sets, vector grids, rotated or anisotropic transforms and frustum maps are refused
+  with the reason. A grid is read over the bounds of its active voxels (leaves and active tiles) and
+  averaged while it is read over blocks of factor^3 voxels so that its longest side fits
+  `maxResolution` (256, at most 2048): the full-resolution Disney cloud (1.5e9 active voxels) never
+  becomes a 6 GB dense grid. Voxel i's centre is at i x scale + translation (OpenVDB's convention).
+- **Placement**: `size` > 0 scales the box to that many metres along its longest side, its bottom
+  centred on `position`; 0 keeps the file's own size and place, moved by `position`. Grids are read
+  as stored: a file from a Z-up tool lies on its side. `renderer::Scene` keeps the voxels it read
+  (up to 512 MiB), so edits of the optics or the placement do not read the file again; another
+  file, grid, resolution or seed does.
+- **The plume** (`MakeSmokePlume`): 64 x 128 x 64 voxels of 2.5 cm, a swaying column of value noise
+  that widens with height and fades out in its top 30%.
+- **On the GPU** (`renderer::BuildVolume`, `renderer::Scene`): the densities as an R16_FLOAT 3D
+  texture with a zero voxel around them (hardware trilinear filtering through the static
+  linear-clamp sampler reads zero outside), and majorants for cells of 8^3 texels: the largest
+  texel trilinear filtering reaches from inside a cell, as rounded to half floats, times the
+  extinction. `shader/VolumeLookup.hlsli`, shared with the CPU reference (which emulates the filter,
+  `renderer::SampleTexture3DClampedR16`), marches a 3D DDA over the cells that skips empty ones:
+  delta tracking finds collisions, ratio tracking (Russian roulette below 0.1) transmittance; the
+  Henyey-Greenstein phase function is sampled exactly.
+- **Transport** (`Integrator.hlsli`): every ray, camera or bounce, is delta tracked through the
+  volume up to its surface. A collision is a path vertex: the throughput takes the albedo, NEE
+  samples a triangle light (the light tree without a receiver cosine, or by power) and the sun,
+  their transmittance through the volume (and the clouds, for the sun) by ratio tracking, weighed
+  by the power heuristic against phase sampling, which continues the path. NEE from surfaces is
+  dimmed by the volume's transmittance too, which casts its shadows. Scattering events are not
+  bounces: a path takes up to `pathtracer.volumeEvents` (256) of them on top of its `maxBounces`
+  surfaces, and Russian roulette ends a walk only once its throughput has fallen below 0.25 (as the
+  clouds' walks do), so walks through a bright medium are not cut short by chance. ReSTIR DI and GI
+  and the radiance cache stay off while the scene has a volume: they do not model media.
+- At a collision on the first segment the guides and debug views show the medium: its albedo, a
+  normal facing the camera, the collision's distance.
+
+Validation:
+
+- `tests/VolumeTests.cpp`: placement and padding; along 3000 random rays the density never exceeds
+  the majorant of the DDA's segment (its ends included); ratio and delta tracking match a 1 mm ray
+  march of exp(-optical depth) for rays of optical depth 0.1-3, also up to a surface halfway;
+  averaging down keeps the mass; the phase function integrates to 1 and its samples follow its CDF
+  for g from -0.5 to 0.9; a disabled volume is transparent, a missing file gives none and says why.
+- `tests/VdbTests.cpp`: zlib streams made by zlib (stored, fixed and dynamic Huffman blocks)
+  inflate; corrupt ones fail with a message; LZ4 blocks and Blosc frames (stored, split into byte
+  streams, 256-byte blocks with leftovers, 2- and 4-byte elements); a small writer's files in every
+  encoding (raw, active mask, zlib, Blosc in one or 256-byte blocks, floats or halves, tiles and
+  inactive values) read to the same voxels in the same place; reading at a lower resolution equals
+  averaging the full grid down; listing grids, and why one cannot be read.
+- Real files (not in the repository): openvdb.org's `smoke`, `smoke2`, `fire`, `explosion` and
+  `bunny_cloud` and the Walt Disney Animation Studios cloud (eighth and sixteenth resolution) decode
+  to the sums of densities (leaves and tiles) an independent reader finds, to 1e-11.
+- `Integrator_VolumeVanishesInAWhiteFurnace`: with albedo 1 in a uniform environment every pixel is
+  0.18 within 0.1%.
+- `Integrator_VolumeNeeAndPhaseSamplingAgree`: three views, the plume's shadow on the wall and the
+  plume lit from the side in a 12-degree sun, and the plume with its shadow on the ground under a
+  3 m lamp: NEE with MIS and sampling alone agree within 4% at 512-1024 spp (at 16 times that, to
+  0.15%, 0.26% and 0.04%); taking the transmittance out of any of the four NEE estimates fails it
+  (the side-lit plume doubles). Sampling alone carries the noise: under a 1.2 m lamp it was 2.5% at
+  1024 spp, too close to the tolerance.
+- GPU against the CPU reference: `smoke` (320 x 180, 16384 against 1024 spp) -0.03%, relative MSE
+  3e-4; the Disney cloud (eighth resolution, 700 m wide, extinction 0.05 /m, g 0.85) above
+  `cumulus` +0.06%.
+- Cost (RTX 5070, 1920 x 1080, 1 spp): `smoke` traces in 7.2 ms (1.6 ms without its plume, 7.7 ms
+  with openvdb.org's smoke in its place), the Disney cloud over `cumulus` in 2.3 ms (0.75 ms
+  without). A dense, bright medium is noisy: the cloud (albedo 1, g 0.85) still sparkles at 256 spp.
+- The volume has a kernel of its own (`PathTracerVolume.hlsl`, `AIR_PT_VOLUME`; its pipeline is
+  created the first time a scene has a volume): compiled into the plain kernel, the tracking code
+  cost every other scene 1-6% (cornell_box +4.9%, sphere_field +5.8%, door +1.3%, sunset +5.4%,
+  three alternating rounds each), with no volume to track.
+- Not modelled: emission (a fire's temperature grid), extinction varying with wavelength, more than
+  one volume, a sparse layout on the GPU (the grid is dense: 2 bytes a voxel), Z-up files.
 
 ---
 

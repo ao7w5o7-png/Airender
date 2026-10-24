@@ -117,6 +117,7 @@ bool EditorApp::LoadScene(const std::string& name)
     mSceneTop = renderer::HighestPoint(mScene->Desc());
     mSkyEdit.reset();
     mCloudsEdit.reset();
+    mVolumeEdit.reset();
     AIR_LOG(Info, "Editor", "scene '{}': {} triangles, {} instances, {} materials", name, mScene->GetTriangleCount(),
             mScene->Desc().instances.size(), mScene->Desc().materials.size());
     return true;
@@ -960,6 +961,80 @@ void EditorApp::BuildScenePanel()
     else if (cloudsEdited)
     {
         mCloudsEdit = clouds;
+    }
+
+    ImGui::SeparatorText("Volume");
+    renderer::Volume volume = mVolumeEdit.value_or(mScene->Desc().volume);
+    bool applyVolume = ImGui::Checkbox("Smoke or cloud volume", &volume.enabled);
+    ImGui::SetItemTooltip("A box of voxels among the surfaces that absorbs and scatters light, path traced "
+                          "through (docs/architecture.md, section 8.12):\na grid of an OpenVDB file, or a "
+                          "procedural plume of smoke.");
+    bool volumeEdited = applyVolume;
+    if (volume.enabled)
+    {
+        auto text = [&](const char* label, std::string& value)
+        {
+            char buffer[1024];
+            std::snprintf(buffer, sizeof(buffer), "%s", value.c_str());
+            if (ImGui::InputText(label, buffer, sizeof(buffer)))
+            {
+                value = buffer;
+                volumeEdited = true;
+            }
+            applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        text("OpenVDB file", volume.file);
+        ImGui::SetItemTooltip("A .vdb file (aircli vdb FILE lists its grids). Empty: the procedural plume.");
+        if (!volume.file.empty())
+        {
+            text("Grid", volume.grid);
+            ImGui::SetItemTooltip("The grid to render; \"density\" falls back to the file's first grid of densities.");
+        }
+        auto slider = [&](const char* label, float* value, float lo, float hi, const char* format, int flags = 0)
+        {
+            volumeEdited |= ImGui::SliderFloat(label, value, lo, hi, format, flags);
+            applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        slider("Extinction##volume", &volume.extinction, 0.001f, 1000.0f, "%.3f /m", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Per metre where the density is 1. Smoke: 5 to 50; a cloud of hundreds of metres: "
+                              "0.02 to 0.1.");
+        slider("Albedo##volume", &volume.albedo, 0.0f, 1.0f, "%.3f");
+        ImGui::SetItemTooltip("The share of the light a collision scatters rather than absorbs (smoke 0.5 to 0.95, "
+                              "clouds 1).");
+        slider("Anisotropy", &volume.anisotropy, -0.95f, 0.95f, "%.2f");
+        ImGui::SetItemTooltip("Henyey-Greenstein g: 0 scatters evenly, towards 1 forwards (clouds about 0.85).");
+        volumeEdited |= ImGui::DragFloat3("Position##volume", &volume.position.x, 0.05f);
+        applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        slider("Size##volume", &volume.size, 0.0f, 5000.0f, volume.size > 0.0f ? "%.2f m" : "as stored",
+               ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Its longest side, its bottom centred on the position.\n0: the file's own size and "
+                              "place, moved by the position.");
+        int resolution = int(volume.maxResolution);
+        volumeEdited |=
+            ImGui::SliderInt("Max resolution", &resolution, 8, 2048, "%d voxels", ImGuiSliderFlags_Logarithmic);
+        applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        volume.maxResolution = u32(std::clamp(resolution, 8, 2048));
+        ImGui::SetItemTooltip("Longest side on the GPU; larger grids are averaged down.");
+        if (volume.file.empty())
+        {
+            int seed = int(volume.seed);
+            volumeEdited |= ImGui::DragInt("Seed##volume", &seed, 0.2f, 0, 1 << 20);
+            applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+            volume.seed = u32(std::max(seed, 0));
+        }
+        if (!mVolumeEdit && !mScene->VolumeError().empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%s", mScene->VolumeError().c_str());
+        }
+    }
+    if (applyVolume)
+    {
+        mScene->SetVolume(volume);
+        mVolumeEdit.reset();
+    }
+    else if (volumeEdited)
+    {
+        mVolumeEdit = volume;
     }
 
     ImGui::SeparatorText("Materials");

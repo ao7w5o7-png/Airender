@@ -45,7 +45,9 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`
   for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory,
   `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9),
-  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10).
+  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10),
+  `smoke` for volumes (`--volume FILE.vdb|plume[,EXTINCTION,ALBEDO,G] --volume-at X,Y,Z,SIZE` puts
+  an OpenVDB grid in any scene; `aircli vdb FILE` lists a file's grids; §8.12).
   `--camera EX,EY,EZ,TX,TY,TZ[,FOV]` and `--ev EV100` move a scene's camera.
   Validate GPU against `aircli reference` on the same scene.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner

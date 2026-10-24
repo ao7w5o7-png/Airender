@@ -55,5 +55,6 @@ SceneDesc MakeDoor();
 SceneDesc MakeTerrain();
 SceneDesc MakeSunset();
 SceneDesc MakeCumulus();
+SceneDesc MakeSmoke();
 
 } // namespace air::renderer::detail

@@ -18,4 +18,7 @@ float SampleTexture3D(const u8* texels, u32 width, u32 height, u32 depth, float 
 // addressing.
 hlsl::float4 SampleTexture3DClamped(const u16* texels, u32 width, u32 height, u32 depth, float u, float v, float w);
 
+// A half-float single-channel (R16_FLOAT) 3D texture, x fastest, with clamping addressing.
+float SampleTexture3DClampedR16(const u16* texels, u32 width, u32 height, u32 depth, float u, float v, float w);
+
 } // namespace air::renderer

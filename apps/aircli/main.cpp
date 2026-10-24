@@ -10,11 +10,16 @@
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
 //                   [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
+//                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
+//                   [--volume-at X,Y,Z[,SIZE]]   (smoke or a cloud of voxels among the surfaces)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
 //                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
+//                    [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]
+//   aircli vdb FILE.vdb [--read GRID] [--max-resolution N]   the grids of an OpenVDB file (JSON); --read
+//                    reads one as a volume would and reports its voxels
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
 //   aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]   the GPU's neural network kernels
 //                    (float32 and linear algebra) against the CPU's (JSON; exit 1 when they disagree)
@@ -35,6 +40,7 @@
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
 #include "air/renderer/Transfer.h"
+#include "air/renderer/Vdb.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <algorithm>
@@ -69,12 +75,16 @@ int Usage()
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
+               "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
+               "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]   (smoke or a cloud of voxels)\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
+               "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
                "  aircli features | scenes\n"
+               "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
                "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n",
                stderr);
@@ -175,7 +185,12 @@ int CommandScenes()
 //   --clouds COVERAGE[,BOTTOM,TOP] (metres) adds a cloud layer (Clouds.h), 0 removes it; --clouds-exact
 //   keeps their phase function's diffraction peak;
 //   --camera EX,EY,EZ,TX,TY,TZ[,FOV] puts the camera at the eye looking at the target (vertical field
-//   of view in degrees), --ev EV100 sets its exposure.
+//   of view in degrees), --ev EV100 sets its exposure;
+//   --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] puts a volume (Volume.h) in it: a
+//   grid of an OpenVDB file (--volume-grid NAME, else "density" or its first float grid) or the
+//   procedural plume of smoke; none removes it. --volume-at X,Y,Z[,SIZE] places it: with SIZE its
+//   longest side is scaled to SIZE metres and its bottom centred on the point, else the point moves
+//   the file's own placement.
 struct SceneOptions
 {
     std::optional<std::pair<float, float>> sun;
@@ -184,6 +199,9 @@ struct SceneOptions
     bool cloudsExact = false;
     std::vector<std::string> camera;
     std::optional<float> ev100;
+    std::vector<std::string> volume;
+    std::optional<std::string> volumeGrid;
+    std::vector<std::string> volumeAt;
 
     // True when `arg` was one of these options.
     bool Parse(std::string_view arg, Args& args)
@@ -219,6 +237,21 @@ struct SceneOptions
         if (arg == "--ev")
         {
             ev100 = std::stof(std::string(args.Next()));
+            return true;
+        }
+        if (arg == "--volume")
+        {
+            volume = Split(args.Next(), ',');
+            return true;
+        }
+        if (arg == "--volume-grid")
+        {
+            volumeGrid = std::string(args.Next());
+            return true;
+        }
+        if (arg == "--volume-at")
+        {
+            volumeAt = Split(args.Next(), ',');
             return true;
         }
         return false;
@@ -265,6 +298,32 @@ struct SceneOptions
         if (ev100)
         {
             scene.camera.ev100 = *ev100;
+        }
+        if (!volume.empty())
+        {
+            scene.volume.enabled = volume[0] != "none";
+            scene.volume.file = volume[0] == "plume" || volume[0] == "none" ? std::string() : volume[0];
+            if (volume.size() >= 2)
+            {
+                scene.volume.extinction = std::stof(volume[1]);
+            }
+            if (volume.size() >= 3)
+            {
+                scene.volume.albedo = std::stof(volume[2]);
+            }
+            if (volume.size() >= 4)
+            {
+                scene.volume.anisotropy = std::stof(volume[3]);
+            }
+        }
+        if (volumeGrid)
+        {
+            scene.volume.grid = *volumeGrid;
+        }
+        if (volumeAt.size() >= 3)
+        {
+            scene.volume.position = {std::stof(volumeAt[0]), std::stof(volumeAt[1]), std::stof(volumeAt[2])};
+            scene.volume.size = volumeAt.size() >= 4 ? std::stof(volumeAt[3]) : 0.0f;
         }
     }
 };
@@ -319,6 +378,10 @@ int CommandReference(Args& args)
         else if (arg == "--cloud-events")
         {
             settings.cloudEvents = u32(std::stoul(std::string(args.Next()))); // as pathtracer.cloudEvents
+        }
+        else if (arg == "--volume-events")
+        {
+            settings.volumeEvents = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeEvents
         }
         else if (arg == "--light-tree-bounces")
         {
@@ -417,6 +480,124 @@ int CommandCompare(Args& args)
     out["summary"] = result.Summary();
     std::puts(out.Dump().c_str());
     return result.passed ? kExitOk : kExitCheckFailed;
+}
+
+// ---------------------------------------------------------------------------
+// vdb: what an OpenVDB file holds, and what a volume reads of a grid
+// ---------------------------------------------------------------------------
+int CommandVdb(Args& args)
+{
+    std::string path;
+    std::optional<std::string> read;
+    u32 maxResolution = renderer::Volume{}.maxResolution;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--read")
+        {
+            read = std::string(args.Next());
+        }
+        else if (arg == "--max-resolution")
+        {
+            maxResolution = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (path.empty() && !arg.starts_with("--"))
+        {
+            path = arg;
+        }
+        else
+        {
+            AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
+            return Usage();
+        }
+    }
+    if (args.error || path.empty())
+    {
+        return Usage();
+    }
+    std::string error;
+    const std::optional<renderer::VdbFileInfo> info = renderer::ReadVdbInfo(path, &error);
+    if (!info)
+    {
+        AIR_LOG(Error, "aircli", "{}", error);
+        return kExitCheckFailed;
+    }
+    auto vec3 = [](const auto* v)
+    {
+        json::Value out = json::Value::MakeArray();
+        for (int i = 0; i < 3; ++i)
+        {
+            out.Push(double(v[i]));
+        }
+        return out;
+    };
+    json::Value out = json::Value::MakeObject();
+    out["file"] = path;
+    out["version"] = info->version;
+    out["library"] = std::format("{}.{}", info->libraryMajor, info->libraryMinor);
+    json::Value grids = json::Value::MakeArray();
+    for (const renderer::VdbGridInfo& g : info->grids)
+    {
+        json::Value item = json::Value::MakeObject();
+        item["name"] = g.name;
+        item["valueType"] = g.valueType;
+        item["nodes"] = g.nodes;
+        item["halfFloat"] = g.halfFloat;
+        item["class"] = g.gridClass;
+        if (g.hasBounds)
+        {
+            item["boundsMin"] = vec3(g.boundsMin);
+            item["boundsMax"] = vec3(g.boundsMax);
+        }
+        item["activeVoxels"] = g.activeVoxels;
+        item["map"] = g.map;
+        item["voxelSize"] = vec3(g.voxelSize);
+        item["translation"] = vec3(g.translation);
+        item["readable"] = g.readable;
+        if (!g.readable)
+        {
+            item["why"] = g.why;
+        }
+        grids.Push(std::move(item));
+    }
+    out["grids"] = std::move(grids);
+    int exit = kExitOk;
+    if (read)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const std::optional<renderer::VolumeGrid> grid = renderer::ReadVdbGrid(path, *read, maxResolution, &error);
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        json::Value item = json::Value::MakeObject();
+        if (grid)
+        {
+            double sum = 0.0;
+            float largest = 0.0f;
+            u64 occupied = 0;
+            for (float d : grid->density)
+            {
+                sum += d;
+                largest = std::max(largest, d);
+                occupied += d > 0.0f ? 1u : 0u;
+            }
+            const u32 size[3] = {grid->sizeX, grid->sizeY, grid->sizeZ};
+            item["size"] = vec3(size);
+            item["voxelSize"] = grid->voxelSize;
+            const float origin[3] = {grid->origin.x, grid->origin.y, grid->origin.z};
+            item["origin"] = vec3(origin);
+            item["meanDensity"] = grid->density.empty() ? 0.0 : sum / double(grid->density.size());
+            item["maxDensity"] = largest;
+            item["occupiedFraction"] = grid->density.empty() ? 0.0 : double(occupied) / double(grid->density.size());
+            item["seconds"] = seconds;
+        }
+        else
+        {
+            item["error"] = error;
+            exit = kExitCheckFailed;
+        }
+        out["read"] = std::move(item);
+    }
+    std::puts(out.Dump().c_str());
+    return exit;
 }
 
 // ---------------------------------------------------------------------------
@@ -808,6 +989,10 @@ int main(int argc, char** argv)
     if (command == "mlp-check")
     {
         return CommandMlpCheck(args);
+    }
+    if (command == "vdb")
+    {
+        return CommandVdb(args);
     }
     return Usage();
 }
