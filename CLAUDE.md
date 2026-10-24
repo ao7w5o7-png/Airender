@@ -33,6 +33,13 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   must stay unbiased: force it on while accumulating (`--set pathtracer.restirDi=2 --set
   pathtracer.restirGi=2`, thousands of frames) and compare the mean against an NEE reference of the
   same scene; `--set pathtracer.debugView=8` / `9` isolates the direct / indirect light.
+- Neural radiance cache (`--set pathtracer.nrc=1`, real time; `2` also when accumulating;
+  docs/architecture.md §8.11): biased by design, so measure its bias and noise against a reference
+  rendered with the same jitter (`accumulate=0`, same `--frames`, plain paths at high `spp`), and
+  look at the cache itself with `--set pathtracer.debugView=10`. After changing the network code
+  run `aircli mlp-check --backend d3d12 --shaders build/shaders`: the GPU's float32 and matrix-unit
+  (Shader Model 6.10 linear algebra, docs/architecture.md §3.4) kernels against the CPU's.
+  `--set pathtracer.nrcLinearAlgebra=0` runs the float32 kernels for an A/B comparison.
 - Test scenes (`aircli scenes` lists them with sizes; docs/architecture.md §8.1): pick the one that
   stresses the change, e.g. `veach_mis` for MIS / light sampling, `many_lights` for light
   selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`

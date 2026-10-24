@@ -221,6 +221,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             {
                 options.focusWindow = Narrow(argv[++i]);
             }
+            else if (arg == "--set" && i + 1 < argc)
+            {
+                const std::string assignment = Narrow(argv[++i]);
+                const size_t equals = assignment.find('=');
+                if (equals != std::string::npos)
+                {
+                    options.parameters.emplace_back(assignment.substr(0, equals), assignment.substr(equals + 1));
+                }
+            }
         }
         LocalFree(argv);
     }

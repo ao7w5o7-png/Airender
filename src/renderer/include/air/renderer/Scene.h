@@ -116,6 +116,8 @@ std::optional<SceneDesc> MakeBuiltinScene(std::string_view name);
 std::string Validate(const SceneDesc& desc);
 // The highest y of any instance's vertices: the clouds' base must stay above it.
 float HighestPoint(const SceneDesc& desc);
+// The box around every instance's geometry (lo > hi without any).
+void SceneBounds(const SceneDesc& desc, float3& lo, float3& hi);
 
 // The tables a GpuScene is made of, also used by the CPU reference renderer.
 // The light list holds the triangles of emissive instances only (an instance is emissive when its
@@ -141,7 +143,9 @@ struct GpuScene
     // not emit. Written together with `materials` and `lights`, so the three always agree.
     rhi::BufferHandle instanceLights;
     u32 lightCount = 0;
-    float lightPower = 0.0f;    // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
+    float lightPower = 0.0f; // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
+    float3 boundsMin{};      // the box around the geometry (SceneBounds)
+    float3 boundsMax{};
     gpu::SkyData sky{};         // the sun and how to read skyTable (uniform radiance when width == 0)
     rhi::BufferHandle skyTable; // StructuredBuffer<float>: 3 per texel, at least 3
     // The aerial perspective tables (RGBA16F Texture3D, SkyShared.h; none without a physical sky).

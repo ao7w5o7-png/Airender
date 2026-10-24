@@ -89,6 +89,22 @@ TEST(Editor_RunsFramesHeadless)
     EXPECT(device->GetMemoryStats().liveTextures == 0);
 }
 
+TEST(Editor_StartsWithParameters)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorOptions options = SmallOptions();
+    options.parameters = {{"pathtracer.maxBounces", "5"}, {"pathtracer.nrc", "2"}};
+    editor::EditorApp app(*device, tasks, options);
+    EXPECT(app.GetParameter("pathtracer", "maxBounces") == "5");
+    EXPECT(app.GetParameter("pathtracer", "nrc") == "2");
+    ui.Frame(app);
+    EXPECT(app.GetLastResult().validationErrors.empty());
+    app.Resize(128, 72); // later runners keep the current values
+    EXPECT(app.GetParameter("pathtracer", "nrc") == "2");
+}
+
 TEST(Editor_ResizeKeepsParameters)
 {
     auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});

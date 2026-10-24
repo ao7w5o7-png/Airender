@@ -191,10 +191,20 @@ struct TimestampFrame
 };
 
 // A command allocator + command list pair. Recycled once the GPU has finished with it.
+// Built against the preview Agility SDK (AIR_D3D12_PREVIEW): Shader Model 6.10 linear algebra.
+#ifdef D3D12_PREVIEW_SDK_VERSION
+#define AIR_D3D12_LINEAR_ALGEBRA 1
+#else
+#define AIR_D3D12_LINEAR_ALGEBRA 0
+#endif
+
 struct CommandContext
 {
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList4> list;
+#if AIR_D3D12_LINEAR_ALGEBRA
+    ComPtr<ID3D12GraphicsCommandListPreview> preview; // ConvertLinearAlgebraMatrix, with linearAlgebra
+#endif
     u64 fence = 0; // fence value on its queue that releases it
 };
 
@@ -234,6 +244,7 @@ public:
 
     void BuildBlas(AccelStructHandle blas, BufferHandle scratch) override;
     void BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) override;
+    void ConvertMatrices(std::span<const MatrixConversion> conversions) override;
 
     void BeginRenderPass(TextureHandle target, const float* clearColor) override;
     void EndRenderPass() override;
@@ -322,6 +333,7 @@ public:
     AccelStructHandle CreateTlas(const TlasDesc& desc) override;
     void DestroyAccelStruct(AccelStructHandle as) override;
     u64 GetAccelStructScratchSize(AccelStructHandle as) override;
+    u64 GetMatrixSize(u32 rows, u32 columns, MatrixType type, MatrixLayout layout, u32 stride) override;
 
     PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) override;
     PipelineHandle CreateRayTracingPipeline(const RayTracingPipelineDesc& desc) override;
@@ -422,6 +434,9 @@ private:
     ComPtr<IDXGIFactory6> mFactory;
     ComPtr<IDXGIAdapter1> mAdapter;
     ComPtr<ID3D12Device5> mDevice;
+#if AIR_D3D12_LINEAR_ALGEBRA
+    ComPtr<ID3D12DevicePreview> mDevicePreview; // with mCaps.linearAlgebra
+#endif
     ComPtr<ID3D12InfoQueue1> mInfoQueue;
     DWORD mInfoQueueCookie = 0;
     bool mGpuUploadHeap = false;
@@ -470,6 +485,25 @@ private:
 
 std::unique_ptr<Swapchain> CreateD3D12Swapchain(D3D12Device& device, const SwapchainDesc& desc);
 D3D12_RESOURCE_STATES ToStates(Access access);
+
+#if AIR_D3D12_LINEAR_ALGEBRA
+inline D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT ToD3D12(MatrixLayout layout)
+{
+    switch (layout)
+    {
+    case MatrixLayout::RowMajor: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_ROW_MAJOR;
+    case MatrixLayout::ColumnMajor: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_COLUMN_MAJOR;
+    case MatrixLayout::MulOptimal: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_MUL_OPTIMAL;
+    case MatrixLayout::OuterProductOptimal: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_OUTER_PRODUCT_OPTIMAL;
+    }
+    return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_ROW_MAJOR;
+}
+
+inline D3D12_LINEAR_ALGEBRA_DATATYPE ToD3D12(MatrixType type)
+{
+    return type == MatrixType::Float16 ? D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16 : D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT32;
+}
+#endif
 
 #define AIR_D3D12_CHECK(expr, ...)                                                                                     \
     do                                                                                                                 \

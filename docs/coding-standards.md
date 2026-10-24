@@ -113,9 +113,12 @@ See `docs/architecture.md` §2.2. Additional rules:
   compiled outputs are named `<Stem>.cs.dxil|spv` and `<Stem>.lib.dxil|spv`.
 - Code that must match on the GPU and the CPU (BSDFs, the integrator) goes in `.hlsli` files that
   compile as both HLSL and C++ through `air/renderer/shader/HlslCompat.h`: use only the types and
-  intrinsics it provides, `AIR_INOUT` / `AIR_OUT` for out parameters and `AIR_CONST` for constants.
+  intrinsics it provides, `AIR_INOUT` / `AIR_OUT` for out parameters, `AIR_CONST` for constants and
+  `AIR_UNROLL` (HLSL `[unroll]`) on loops over register arrays.
   Resource access goes through hook functions that the including file defines (HLSL: descriptor
   loads; C++: a test kernel or the reference renderer), and CPU tests cover the shared code.
+- Shader Model 6.10 shaders (`// air-shader-target: cs_6_10`, linear algebra) build only with the
+  preview toolchain (`AIR_D3D12_PREVIEW`) and need a fallback kernel for when they are absent.
 
 ## 9. Language
 

@@ -53,6 +53,9 @@ public:
     virtual void BuildBlas(AccelStructHandle blas, BufferHandle scratch) = 0;
     virtual void BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) = 0;
 
+    // Copies matrices into other layouts / types (DeviceCaps::linearAlgebra; see MatrixConversion).
+    virtual void ConvertMatrices(std::span<const MatrixConversion> conversions) = 0;
+
     // Raster: binds `target` (in Access::RenderTarget) as the only render target with a full-size
     // viewport and scissor. clearColor == nullptr keeps the contents.
     virtual void BeginRenderPass(TextureHandle target, const float* clearColor) = 0;
@@ -115,6 +118,9 @@ struct DeviceDesc
     Backend backend = Backend::Null;
     bool enableValidation = true;     // D3D12 debug layer / Vulkan validation layers
     bool enableGpuValidation = false; // D3D12 GPU-based validation (slow, catches bindless misuse)
+    // D3D12 with the preview Agility SDK: enable experimental shader models (Shader Model 6.10 linear
+    // algebra) where Windows allows it (Developer Mode). Falls back to none if the device fails.
+    bool experimentalShaderModels = true;
     bool preferHighPerformanceAdapter = true;
     u32 framesInFlight = 2;
 };
@@ -227,6 +233,11 @@ public:
     virtual AccelStructHandle CreateTlas(const TlasDesc& desc) = 0;
     virtual void DestroyAccelStruct(AccelStructHandle as) = 0;
     virtual u64 GetAccelStructScratchSize(AccelStructHandle as) = 0;
+
+    // Bytes a rows x columns matrix of `type` takes in `layout` (stride: bytes between the rows or
+    // columns of the row / column major layouts, 0 for the optimal ones). Without
+    // DeviceCaps::linearAlgebra every layout is reported as packed row major.
+    virtual u64 GetMatrixSize(u32 rows, u32 columns, MatrixType type, MatrixLayout layout, u32 stride = 0) = 0;
 
     // Pipelines
     virtual PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) = 0;

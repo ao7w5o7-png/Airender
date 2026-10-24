@@ -6,7 +6,9 @@
 #
 #   SDK                         Version         Override               Used by
 #   DirectX 12 Agility SDK      1.619.6         AIR_AGILITY_SDK_DIR    D3D12 backend (headers + D3D12Core.dll)
+#     preview (AIR_D3D12_PREVIEW) 1.721.3-preview                      the same, with SM 6.10 linear algebra
 #   DirectX Shader Compiler     1.9.2609.5      AIR_DXC_EXECUTABLE     HLSL -> DXIL / SPIR-V at build time
+#     preview (AIR_D3D12_PREVIEW) 1.10.2605.37-preview AIR_DXC_PREVIEW_EXECUTABLE  cs_6_10 shaders only
 #   Dear ImGui (docking)        1.93.0          AIR_IMGUI_DIR          editor
 #   NVIDIA DLSS SDK             310.9.1         AIR_DLSS_SDK_DIR       dlss feature (Ray Reconstruction)
 #   Microsoft WebView2 SDK      1.0.4314.35     AIR_WEBVIEW2_SDK_DIR   editor's HTML profiler panel (Windows)
@@ -26,6 +28,12 @@ set(AIR_AGILITY_SDK_VERSION 1.619.6)
 set(AIR_AGILITY_SDK_SHA256 08f0489281401aa430fc37322d6c3fc98a8025175aacd714c10d562f4963f1e9)
 set(AIR_DXC_VERSION 1.9.2609.5)
 set(AIR_DXC_SHA256 73cfa082245918c2cc1ec6740250eb7377e83a757b3b3a3e16e0d71535bfbfc3)
+# Shader Model 6.10 (dx/linalg.h) is preview only: the preview runtime, an experimental feature that
+# needs Windows Developer Mode, and the preview compiler for the shaders that use it.
+set(AIR_AGILITY_SDK_PREVIEW_VERSION 1.721.3-preview)
+set(AIR_AGILITY_SDK_PREVIEW_SHA256 0131bce1e4bace3fc08c03018c29a09ede2570b263721c6449b0ec75762ab22d)
+set(AIR_DXC_PREVIEW_VERSION 1.10.2605.37-preview)
+set(AIR_DXC_PREVIEW_SHA256 8cf5ec1a8abb832de43251bae1ffcec89b22240677c599c38d30a18dee2f4de6)
 set(AIR_IMGUI_TAG v1.93.0-docking)
 set(AIR_DLSS_TAG v310.9.1)
 set(AIR_WEBVIEW2_VERSION 1.0.4314.35)
@@ -92,13 +100,23 @@ endfunction()
 # ---------------------------------------------------------------------------
 if(AIR_RHI_D3D12)
     set(AIR_AGILITY_SDK_DIR "" CACHE PATH "Local Agility SDK (unpacked Microsoft.Direct3D.D3D12 package)")
-    if(NOT AIR_AGILITY_SDK_DIR)
-        air_fetch_nuget(Microsoft.Direct3D.D3D12 ${AIR_AGILITY_SDK_VERSION} ${AIR_AGILITY_SDK_SHA256} agilityDir)
+    # Only a directory outside the download cache overrides the download (earlier configures cached the
+    # downloaded one here, which must follow AIR_D3D12_PREVIEW).
+    set(agilityDir "${AIR_AGILITY_SDK_DIR}")
+    string(FIND "${agilityDir}" "${AIR_DEPS_DIR}/" inDeps)
+    if(NOT agilityDir OR inDeps EQUAL 0)
+        if(AIR_D3D12_PREVIEW)
+            air_fetch_nuget(Microsoft.Direct3D.D3D12 ${AIR_AGILITY_SDK_PREVIEW_VERSION}
+                            ${AIR_AGILITY_SDK_PREVIEW_SHA256} agilityDir)
+        else()
+            air_fetch_nuget(Microsoft.Direct3D.D3D12 ${AIR_AGILITY_SDK_VERSION} ${AIR_AGILITY_SDK_SHA256} agilityDir)
+        endif()
         if(NOT agilityDir)
             message(FATAL_ERROR "Airender: could not download the Agility SDK; set AIR_AGILITY_SDK_DIR")
         endif()
         set(AIR_AGILITY_SDK_DIR "${agilityDir}" CACHE PATH "" FORCE)
     endif()
+    message(STATUS "Airender: Agility SDK ${AIR_AGILITY_SDK_DIR}")
     add_library(air_agility_sdk INTERFACE)
     target_include_directories(air_agility_sdk BEFORE INTERFACE "${AIR_AGILITY_SDK_DIR}/build/native/include")
 
@@ -110,7 +128,11 @@ if(AIR_RHI_D3D12)
 #include <d3d12.h>
 extern "C"
 {
+#ifdef D3D12_PREVIEW_SDK_VERSION // a preview runtime announces its own version
+__declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_PREVIEW_SDK_VERSION;
+#else
 __declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION;
+#endif
 __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 }
 ]])
@@ -152,6 +174,24 @@ if(AIR_DXC_EXECUTABLE)
     message(STATUS "Airender: shaders compiled with ${AIR_DXC_EXECUTABLE}")
 else()
     message(STATUS "Airender: dxc not found, shaders are not compiled (the Null backend does not need them)")
+endif()
+
+# The preview compiler, for the shaders that target Shader Model 6.10 (`// air-shader-target: cs_6_10`);
+# without it they are not built and the features that use them fall back to their portable kernels.
+set(AIR_DXC_PREVIEW_EXECUTABLE "" CACHE FILEPATH "dxc for Shader Model 6.10 shaders (empty: download with AIR_D3D12_PREVIEW)")
+set(AIR_DXC_PREVIEW_INCLUDE "" CACHE PATH "Directory holding dx/linalg.h for the preview dxc")
+if(AIR_D3D12_PREVIEW AND NOT AIR_DXC_PREVIEW_EXECUTABLE AND CMAKE_HOST_WIN32)
+    air_fetch_nuget(Microsoft.Direct3D.DXC ${AIR_DXC_PREVIEW_VERSION} ${AIR_DXC_PREVIEW_SHA256} dxcPreviewDir)
+    if(dxcPreviewDir)
+        set(AIR_DXC_PREVIEW_EXECUTABLE "${dxcPreviewDir}/build/native/bin/x64/dxc.exe" CACHE FILEPATH "" FORCE)
+        set(AIR_DXC_PREVIEW_INCLUDE "${dxcPreviewDir}/build/native/include/hlsl" CACHE PATH "" FORCE)
+    endif()
+endif()
+if(NOT AIR_D3D12_PREVIEW OR NOT AIR_RHI_D3D12)
+    set(AIR_DXC_PREVIEW_EXECUTABLE "") # the shaders it compiles need the preview runtime
+endif()
+if(AIR_DXC_PREVIEW_EXECUTABLE)
+    message(STATUS "Airender: Shader Model 6.10 shaders compiled with ${AIR_DXC_PREVIEW_EXECUTABLE}")
 endif()
 
 # ---------------------------------------------------------------------------

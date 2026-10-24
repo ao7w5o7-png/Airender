@@ -367,6 +367,25 @@ float HighestPoint(const SceneDesc& desc)
     return highest;
 }
 
+void SceneBounds(const SceneDesc& desc, float3& lo, float3& hi)
+{
+    lo = float3(1e30f);
+    hi = float3(-1e30f);
+    for (const Instance& instance : desc.instances)
+    {
+        if (instance.mesh >= desc.meshes.size())
+        {
+            continue;
+        }
+        for (const gpu::Vertex& v : desc.meshes[instance.mesh].vertices)
+        {
+            const float3 p = TransformPoint(instance.transform, v.position);
+            lo = hlsl::min(lo, p);
+            hi = hlsl::max(hi, p);
+        }
+    }
+}
+
 std::string Validate(const SceneDesc& desc)
 {
     for (const Mesh& mesh : desc.meshes)

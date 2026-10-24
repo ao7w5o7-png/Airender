@@ -318,6 +318,57 @@ struct Barrier
     }
 };
 
+// Matrices of Shader Model 6.10 linear algebra (DeviceCaps::linearAlgebra). The optimal layouts are
+// the device's own, for matrix x vector products and for accumulating outer products;
+// CommandList::ConvertMatrices translates between them and the plain ones.
+enum class MatrixLayout : u8
+{
+    RowMajor,
+    ColumnMajor,
+    MulOptimal,
+    OuterProductOptimal,
+};
+
+enum class MatrixType : u8
+{
+    Float16,
+    Float32,
+};
+
+// One rows x columns matrix copied from `src` to `dst` in another layout and/or type. Strides (bytes
+// between rows, or columns) apply to the row and column major layouts and are 0 for the optimal
+// ones. The source must be in Access::SRVCompute, the destination in Access::UAVCompute; offsets are
+// 128-byte aligned.
+struct MatrixConversion
+{
+    u32 rows = 0;
+    u32 columns = 0;
+    BufferHandle src;
+    u64 srcOffset = 0;
+    MatrixLayout srcLayout = MatrixLayout::RowMajor;
+    MatrixType srcType = MatrixType::Float32;
+    u32 srcStride = 0;
+    BufferHandle dst;
+    u64 dstOffset = 0;
+    MatrixLayout dstLayout = MatrixLayout::MulOptimal;
+    MatrixType dstType = MatrixType::Float16;
+    u32 dstStride = 0;
+};
+
+const char* ToString(MatrixLayout layout);
+
+// Size of a matrix in a row / column major layout (stride 0: packed); the optimal layouts are
+// device-specific (Device::GetMatrixSize).
+inline u64 PackedMatrixSize(u32 rows, u32 columns, MatrixType type, MatrixLayout layout, u32 stride = 0)
+{
+    const u64 element = type == MatrixType::Float16 ? 2 : 4;
+    if (stride != 0 && (layout == MatrixLayout::RowMajor || layout == MatrixLayout::ColumnMajor))
+    {
+        return u64(stride) * (layout == MatrixLayout::RowMajor ? rows : columns);
+    }
+    return u64(rows) * columns * element;
+}
+
 struct DeviceCaps
 {
     bool rayTracing = false; // DXR 1.1 / VK_KHR_ray_tracing_pipeline + ray_query
@@ -329,6 +380,11 @@ struct DeviceCaps
     // DXR 1.2 shader execution reordering (SM 6.9 HitObject + MaybeReorderThread) is available and
     // the hardware actually reorders (elsewhere the calls are legal no-ops).
     bool shaderExecutionReordering = false;
+    // Shader Model 6.10 linear algebra at thread scope (dx/linalg.h, the successor of cooperative
+    // vectors): float16 matrix x vector products, transposed too, and float16 outer products
+    // accumulated into float32 matrices in memory, on the GPU's matrix units. Needs the preview
+    // Agility SDK (AIR_D3D12_PREVIEW), DeviceDesc::experimentalShaderModels and driver support.
+    bool linearAlgebra = false;
     u64 dedicatedVideoMemory = 0;
     std::string adapterName;
 };

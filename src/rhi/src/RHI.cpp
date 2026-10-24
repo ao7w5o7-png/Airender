@@ -136,6 +136,18 @@ const char* ToString(QueueType queue)
     return "?";
 }
 
+const char* ToString(MatrixLayout layout)
+{
+    switch (layout)
+    {
+    case MatrixLayout::RowMajor: return "RowMajor";
+    case MatrixLayout::ColumnMajor: return "ColumnMajor";
+    case MatrixLayout::MulOptimal: return "MulOptimal";
+    case MatrixLayout::OuterProductOptimal: return "OuterProductOptimal";
+    }
+    return "?";
+}
+
 double ComputeBusyMs(std::span<const GpuTimingScope> scopes)
 {
     std::vector<std::pair<double, double>> intervals;

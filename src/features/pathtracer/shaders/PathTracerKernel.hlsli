@@ -1,13 +1,21 @@
-// GPU path tracer kernel: ray generation + closest hit, bindless resources. Compiled three times:
+// GPU path tracer kernel: one pixel per thread, bindless resources. Compiled five times:
 // PathTracer.hlsl (DXR 1.1, SM 6.6, every RTX GPU), PathTracerSer.hlsl (AIR_PT_SER: DXR 1.2 shader
-// execution reordering, SM 6.9) and PathTracerGi.hlsl (AIR_PT_RESTIR_GI: records ReSTIR GI's
-// candidates); PathTracer.cpp picks one at runtime. The estimator itself is
+// execution reordering, SM 6.9), PathTracerGi.hlsl (AIR_PT_RESTIR_GI: records ReSTIR GI's
+// candidates), PathTracerNrc.hlsl and PathTracerNrcPortable.hlsl (AIR_PT_NRC: paths end in the
+// neural radiance cache, evaluated with Shader Model 6.10 linear algebra or in float32);
+// PathTracer.cpp picks one at runtime. The estimator itself is
 // Integrator.hlsli, shared with the CPU reference renderer. This file supplies TraceClosest (an inline
 // ray query; SceneAccess.hlsli has the other hooks) and writes the accumulation buffer, denoiser
-// guides, debug views and, for ReSTIR, the primary hits and GI reservoirs. The miss and closest-hit
-// shaders only serve the SER variant's hit objects; the pipeline keeps them in every variant.
+// guides, debug views and, for ReSTIR, the primary hits and GI reservoirs.
+// The ray tracing variants run TracePixel from a ray generation shader; their miss and closest-hit
+// shaders only serve the SER variant's hit objects (the pipeline keeps them in every variant). With
+// AIR_PT_COMPUTE (the cache's variants) a compute shader runs it instead: its rays are inline queries
+// anyway, and drivers that run linear algebra in compute shaders may not in ray tracing pipelines.
 #ifndef AIR_PT_SER
 #define AIR_PT_SER 0
+#endif
+#ifndef AIR_PT_COMPUTE
+#define AIR_PT_COMPUTE 0
 #endif
 
 #include "air/renderer/shader/SceneShared.h"
@@ -16,6 +24,7 @@
 
 [[vk::push_constant]] ConstantBuffer<TraceConstants> g : register(b0);
 
+#if !AIR_PT_COMPUTE
 // Payload access qualifiers tell the driver which stage reads and writes each field, so it keeps
 // them live only where needed (always on from SM 6.7; the build enables them for 6.6 too).
 struct [raypayload] Payload
@@ -25,6 +34,7 @@ struct [raypayload] Payload
     uint primitive : read(caller) : write(caller, closesthit);
     float2 barycentrics : read(caller) : write(caller, closesthit);
 };
+#endif
 
 // --- Integrator hooks ----------------------------------------------------------------------------
 
@@ -78,6 +88,66 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     return hit;
 }
 
+#if AIR_PT_NRC
+// --- Neural radiance cache hooks (NrcShared.h) ----------------------------------------------------
+
+static NrcData gNrc;   // this frame's, set by TracePixel
+static uint gNrcPath;  // the training path of the pixel's tile
+static uint gNrcPixel; // y * width + x
+
+float4 MlpLoadWeights4(uint index)
+{
+    ByteAddressBuffer parameters = ResourceDescriptorHeap[gNrc.network.parameters];
+    return asfloat(parameters.Load4(index * 4u));
+}
+
+float2 MlpLoadFeatures(uint index)
+{
+    ByteAddressBuffer parameters = ResourceDescriptorHeap[gNrc.network.parameters];
+    return asfloat(parameters.Load2(index * 4u));
+}
+
+#include "Nrc.hlsli"
+#if AIR_PT_NRC == 1
+#include "air/renderer/shader/MlpLinAlg.hlsli"
+#endif
+
+float3 NrcPredict(NrcQuery q)
+{
+    MlpVector x = NrcEncode(gNrc.grid, q);
+#if AIR_PT_NRC == 1
+    MlpLinAlgForward f = MlpLinAlgEvaluate(gNrc.network, MlpToHalf(x));
+    float3 output = float3(f.output[0], f.output[1], f.output[2]);
+#else
+    MlpForward f = MlpEvaluate(x);
+    float3 output = f.output.v[0].xyz;
+#endif
+    return NrcRadiance(q, output, gNrc.normalization);
+}
+
+NrcTrainingRecord NrcReadRecord(uint slot)
+{
+    RWStructuredBuffer<NrcTrainingRecord> records = ResourceDescriptorHeap[gNrc.trainingRecords];
+    return records[slot];
+}
+
+void NrcWriteRecord(uint slot, NrcTrainingRecord record)
+{
+    RWStructuredBuffer<NrcTrainingRecord> records = ResourceDescriptorHeap[gNrc.trainingRecords];
+    records[slot] = record;
+}
+
+void NrcDeferQuery(NrcQuery q, float3 throughput)
+{
+    RWStructuredBuffer<NrcPixelQuery> queries = ResourceDescriptorHeap[gNrc.pixelQueries];
+    NrcPixelQuery p;
+    p.query = q;
+    p.throughput = throughput;
+    p.pixel = gNrcPixel;
+    queries[gNrcPath] = p;
+}
+#endif
+
 #include "Integrator.hlsli"
 
 // --- Debug helpers -------------------------------------------------------------------------------
@@ -123,12 +193,14 @@ float3 DebugValue(uint view, PathSample s, float intersections, FrameData f)
 
 // --- Shaders -------------------------------------------------------------------------------------
 
-[shader("raygeneration")]
-void RayGen()
+void TracePixel(uint2 pixel)
 {
-    uint2 pixel = DispatchRaysIndex().xy;
     StructuredBuffer<FrameData> frames = ResourceDescriptorHeap[g.frameData];
     FrameData f = frames[g.frameSlot];
+    if (pixel.x >= f.width || pixel.y >= f.height)
+    {
+        return;
+    }
     float2 size = float2(f.width, f.height);
 
     IntegratorParams params;
@@ -139,6 +211,28 @@ void RayGen()
     params.flags = f.flags;
     params.lightTreeBounces = f.lightTreeBounces;
     params.cloudEvents = f.cloudEvents;
+    params.nrcSpread = f.nrc.spread;
+    params.nrcSlot = 0u;
+    params.nrcRecords = f.nrc.recordsPerPath;
+    uint nrcFlags = 0u; // of the first sample: its pixel's training path, if it traces one
+#if AIR_PT_NRC
+    gNrc = f.nrc;
+    if ((f.flags & kFlagNrc) != 0u)
+    {
+        uint2 tile = pixel / f.nrc.tile;
+        gNrcPath = tile.y * f.nrc.tilesX + tile.x;
+        gNrcPixel = pixel.y * f.width + pixel.x;
+        if (tile.x < f.nrc.tilesX && tile.y < f.nrc.tilesY && pixel.x % f.nrc.tile == f.nrc.offsetX &&
+            pixel.y % f.nrc.tile == f.nrc.offsetY)
+        {
+            params.nrcSlot = gNrcPath * f.nrc.recordsPerPath;
+            bool unbiased = Pcg(gNrcPath ^ Pcg(f.nrc.frame)) % f.nrc.unbiasedPeriod == 0u;
+            nrcFlags = kFlagNrcTrain | (unbiased ? kFlagNrcUnbiased : 0u);
+            RWStructuredBuffer<NrcPixelQuery> queries = ResourceDescriptorHeap[f.nrc.pixelQueries];
+            queries[gNrcPath].pixel = kNrcNoPixel; // until the path makes its render query
+        }
+    }
+#endif
 
     uint seed = Pcg(pixel.x + Pcg(pixel.y + Pcg(f.frameIndex)));
     float3 sum = 0.0f;
@@ -149,15 +243,44 @@ void RayGen()
         float2 jitter = (f.flags & kFlagGlobalJitter) != 0u ? f.jitter + 0.5f : Rand2(seed);
         float2 pixelPos = float2(pixel) + jitter;
         float3 direction = CameraRayDirection(f.camera, pixelPos, size);
-        params.flags = i == 0u ? f.flags | kFlagRecordGi : f.flags; // ReSTIR GI takes the first sample's
+        // ReSTIR GI and the cache's training take the first sample.
+        params.flags = i == 0u ? f.flags | kFlagRecordGi | nrcFlags : f.flags;
         PathSample s = TracePath(f.camera.position.xyz, direction, params, seed);
         AddAerialPerspective(params, direction, s);
+#if AIR_PT_NRC
+        if ((params.flags & kFlagNrcTrain) != 0u && s.hit && params.sky.aerialDistance > 0.0f)
+        {
+            // The deferred render query's light crosses the same air as the rest of the sample.
+            RWStructuredBuffer<NrcPixelQuery> queries = ResourceDescriptorHeap[f.nrc.pixelQueries];
+            if (queries[gNrcPath].pixel != kNrcNoPixel)
+            {
+                queries[gNrcPath].throughput *= AerialPerspective(params.sky, direction, s.hitDistance).transmittance;
+            }
+        }
+#endif
         float intersections = 0.0f;
         if (f.debugView == kDebugIntersections)
         {
             intersections = float(CountIntersections(f.camera.position.xyz, direction));
         }
-        sum += f.debugView == kDebugNone ? s.radiance : DebugValue(f.debugView, s, intersections, f);
+        float3 value = f.debugView == kDebugNone ? s.radiance : DebugValue(f.debugView, s, intersections, f);
+#if AIR_PT_NRC
+        if (f.debugView == kDebugNrcCache)
+        {
+            // What the cache predicts the first surface reflects towards the camera (every thread
+            // predicts, like TracePath's lookups).
+            NrcQuery q;
+            q.position = s.position;
+            q.normal = NrcPackDirection(s.hit ? s.normal : float3(0.0f, 0.0f, 1.0f));
+            q.direction = NrcPackDirection(-direction);
+            q.roughness = NrcPackUnorm16x2(s.material.roughness, 0.0f);
+            q.diffuse = NrcPackColor(s.diffuseAlbedo);
+            q.specular = NrcPackColor(s.specularAlbedo);
+            float3 prediction = NrcPredict(q);
+            value = s.hit ? prediction : float3(0.0f, 0.0f, 0.0f);
+        }
+#endif
+        sum += value;
         if (i == 0)
         {
             first = s;
@@ -221,6 +344,19 @@ void RayGen()
     }
 }
 
+#if AIR_PT_COMPUTE
+[numthreads(8, 8, 1)]
+void Main(uint3 id : SV_DispatchThreadID)
+{
+    TracePixel(id.xy);
+}
+#else
+[shader("raygeneration")]
+void RayGen()
+{
+    TracePixel(DispatchRaysIndex().xy);
+}
+
 [shader("miss")]
 void Miss(inout Payload payload)
 {
@@ -235,3 +371,4 @@ void ClosestHit(inout Payload payload, in BuiltInTriangleIntersectionAttributes 
     payload.primitive = PrimitiveIndex();
     payload.barycentrics = attributes.barycentrics;
 }
+#endif

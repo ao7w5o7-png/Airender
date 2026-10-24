@@ -176,6 +176,7 @@ public:
     }
     void BuildBlas(AccelStructHandle blas, BufferHandle scratch) override;
     void BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) override;
+    void ConvertMatrices(std::span<const MatrixConversion> conversions) override;
     void BeginRenderPass(TextureHandle target, const float* clearColor) override;
     void EndRenderPass() override
     {
@@ -256,7 +257,8 @@ class NullDevice final : public Device
 public:
     explicit NullDevice(const DeviceDesc& desc) : mDesc(desc), mAllocator(mHeapProvider)
     {
-        mCaps.rayTracing = true; // pretend, so ray tracing code paths can be exercised headless
+        mCaps.rayTracing = true;    // pretend, so ray tracing code paths can be exercised headless
+        mCaps.linearAlgebra = true; // likewise for the matrix conversions of neural network passes
         mCaps.bindless = true;
         mCaps.rebar = true;
         mCaps.dedicatedVideoMemory = 8ull << 30;
@@ -511,6 +513,10 @@ public:
                 }
                 mAccelStructs.Free(handle);
             });
+    }
+    u64 GetMatrixSize(u32 rows, u32 columns, MatrixType type, MatrixLayout layout, u32 stride) override
+    {
+        return PackedMatrixSize(rows, columns, type, layout, stride);
     }
     u64 GetAccelStructScratchSize(AccelStructHandle handle) override
     {
@@ -1033,6 +1039,18 @@ void NullCommandList::BuildTlas(AccelStructHandle tlas, std::span<const TlasInst
 {
     Record(std::format("BuildTlas {} instances {} scratch {}", mDevice.Describe(tlas), instances.size(),
                        mDevice.Describe(scratch)));
+}
+void NullCommandList::ConvertMatrices(std::span<const MatrixConversion> conversions)
+{
+    for (const MatrixConversion& c : conversions)
+    {
+        AIR_CHECK(mDevice.IsValid(c.src) && mDevice.IsValid(c.dst), "ConvertMatrices: invalid buffer");
+        AIR_CHECK(c.srcOffset % 128 == 0 && c.dstOffset % 128 == 0,
+                  "ConvertMatrices: offsets must be 128-byte aligned");
+        Record(std::format("ConvertMatrix {}x{} {}+{} {} <- {}+{} {}", c.rows, c.columns, mDevice.Describe(c.dst),
+                           c.dstOffset, ToString(c.dstLayout), mDevice.Describe(c.src), c.srcOffset,
+                           ToString(c.srcLayout)));
+    }
 }
 
 // --- NullSwapchain ---------------------------------------------------------------------------

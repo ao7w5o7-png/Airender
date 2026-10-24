@@ -126,8 +126,9 @@ void EditorApp::CreateRunner(u32 width, u32 height)
 {
     width = std::max(width, 8u);
     height = std::max(height, 8u);
-    // Keep parameter values and render graph settings across the rebuild.
-    std::vector<std::pair<std::string, std::string>> saved;
+    // Keep parameter values and render graph settings across the rebuild; the first runner takes
+    // the startup ones.
+    std::vector<std::pair<std::string, std::string>> saved = mRunner ? decltype(saved){} : mOptions.parameters;
     rdg::RenderGraph::Config graphConfig;
     if (mRunner)
     {
@@ -1093,8 +1094,9 @@ void EditorApp::BuildDebugPanel()
     if (pt)
     {
         ImGui::SeparatorText("Path tracer view");
-        static const char* const kViews[] = {"Lit",   "Normals",       "Base color", "Roughness",    "Metallic",
-                                             "Depth", "Intersections", "Bounces",    "Direct light", "Indirect light"};
+        static const char* const kViews[] = {"Lit",          "Normals",        "Base color",    "Roughness",
+                                             "Metallic",     "Depth",          "Intersections", "Bounces",
+                                             "Direct light", "Indirect light", "Radiance cache"};
         u32* view = nullptr;
         bool* furnace = nullptr;
         bool* nee = nullptr;

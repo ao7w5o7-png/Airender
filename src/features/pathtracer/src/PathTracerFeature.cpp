@@ -58,11 +58,31 @@ public:
                         "ReSTIR temporal history cap, in frames' worth of candidates", 1, 254);
         mParameters.Add("restirUnbiased", &mSettings.restir.unbiased,
                         "ReSTIR MIS weights trace the visibility they need (off: fewer rays, darker penumbrae)");
+        mParameters.Add("nrc", &mSettings.nrc.mode,
+                        "Neural radiance cache: paths end where their footprint has spread and take the reflected "
+                        "light from a network trained every frame; replaces ReSTIR GI (0 off, 1 when not "
+                        "accumulating, 2 always)",
+                        0, kNrcAlways);
+        mParameters.Add("nrcSpread", &mSettings.nrc.spread,
+                        "Radiance cache: a path ends where its spread exceeds this times the primary vertex's", 1e-5f,
+                        100.0f);
+        mParameters.Add("nrcTrainingPaths", &mSettings.nrc.trainingPaths,
+                        "Radiance cache: training paths per frame (one per tile of pixels)", 64, 1u << 20);
+        mParameters.Add("nrcSteps", &mSettings.nrc.steps, "Radiance cache: optimizer steps per frame", 1, 16);
+        mParameters.Add("nrcLearningRate", &mSettings.nrc.learningRate, "Radiance cache: Adam's learning rate", 1e-5f,
+                        1.0f);
+        mParameters.Add("nrcUnbiased", &mSettings.nrc.unbiasedPeriod,
+                        "Radiance cache: 1 in this many training paths is never ended by the cache", 1, 1024);
+        mParameters.Add("nrcTableLog2", &mSettings.nrc.tableLog2,
+                        "Radiance cache: hash grid entries per level, log2 (a change starts a new network)", 10, 22);
+        mParameters.Add("nrcLinearAlgebra", &mSettings.nrc.linearAlgebra,
+                        "Radiance cache on the GPU's matrix units (Shader Model 6.10 linear algebra) where available; "
+                        "off: float32 kernels");
         mParameters.Add("furnace", &mSettings.furnace,
                         "White furnace: white materials, lights off; energy conservation shows as a flat grey image");
         mParameters.Add("debugView", &mSettings.debugView,
                         "0 lit, 1 normals, 2 base color, 3 roughness, 4 metallic, 5 depth, 6 intersection heatmap, "
-                        "7 bounce heatmap, 8 direct light, 9 indirect light",
+                        "7 bounce heatmap, 8 direct light, 9 indirect light, 10 radiance cache at the first hit",
                         0, gpu::kDebugViewCount - 1);
         mParameters.Add(
             "ser", &mSettings.shaderExecutionReordering,
@@ -110,6 +130,9 @@ public:
         status["ser"] = mTracer && mTracer->UsesShaderExecutionReordering();
         status["restirDi"] = mTracer && mTracer->UsesReSTIRDI();
         status["restirGi"] = mTracer && mTracer->UsesReSTIRGI();
+        status["nrc"] = mTracer && mTracer->UsesRadianceCache();
+        status["nrcLinearAlgebra"] = mTracer && mTracer->RadianceCacheUsesLinearAlgebra();
+        status["nrcSteps"] = mTracer ? mTracer->GetRadianceCacheSteps() : 0u;
         return status;
     }
 

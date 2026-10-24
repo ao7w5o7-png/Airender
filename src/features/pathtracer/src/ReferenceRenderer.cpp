@@ -322,6 +322,9 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     params.maxBounces = settings.maxBounces;
     params.flags = (settings.furnace ? kFlagFurnace : 0u) | (settings.nextEventEstimation ? 0u : kFlagNoNee);
     params.lightTreeBounces = settings.lightTreeBounces;
+    params.nrcSpread = 0.0f; // the CPU reference has no radiance cache
+    params.nrcSlot = 0;
+    params.nrcRecords = 0;
     float exposure = settings.applyExposure ? renderer::ExposureScale(camera.ev100) : 1.0f;
     if (settings.furnace)
     {

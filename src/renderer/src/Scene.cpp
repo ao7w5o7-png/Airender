@@ -188,6 +188,7 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
 {
     const std::string problem = Validate(mDesc);
     AIR_CHECK(problem.empty(), "scene '{}': {}", mDesc.name, problem);
+    SceneBounds(mDesc, mGpu.boundsMin, mGpu.boundsMax);
     Upload();
     const u32 slots = mDevice.GetFramesInFlight() + 1;
     for (u32 i = 0; i < slots; ++i)

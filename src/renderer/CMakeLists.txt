@@ -4,6 +4,9 @@ add_library(air_renderer
     src/FeatureRegistry.cpp
     src/FrameRunner.cpp
     src/LightTree.cpp
+    src/Mlp.cpp
+    src/MlpCheck.cpp
+    src/NeuralNetwork.cpp
     src/Parameters.cpp
     src/ProfileReport.cpp
     src/Transfer.cpp
@@ -21,6 +24,9 @@ air_target_defaults(air_renderer)
 # The profile report page (ProfileReport.h), compiled in so reports need no files next to the binary.
 air_embed_text(TARGET air_renderer SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/report/ProfileReport.html
                NAME ProfileReportHtml)
-# FrameRunner's own shaders (the fallback upscale), loaded from <shader root>/renderer.
-air_compile_shaders(TARGET air_renderer NAME renderer SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/Upscale.hlsl
+# The renderer's own shaders (the fallback upscale, the neural networks' optimizer), loaded from
+# <shader root>/renderer.
+air_compile_shaders(TARGET air_renderer NAME renderer
+                    SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/Upscale.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/MlpOptimize.hlsl
+                            ${CMAKE_CURRENT_SOURCE_DIR}/shaders/MlpCheck.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/MlpCheckPortable.hlsl
                     INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/shaders)

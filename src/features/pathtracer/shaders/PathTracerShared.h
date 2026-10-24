@@ -2,6 +2,7 @@
 #ifndef AIR_PATH_TRACER_SHARED_H
 #define AIR_PATH_TRACER_SHARED_H
 
+#include "NrcShared.h"
 #include "air/renderer/shader/CloudShared.h"
 #include "air/renderer/shader/HlslCompat.h"
 #include "air/renderer/shader/SkyShared.h"
@@ -25,7 +26,8 @@ AIR_CONST uint kDebugIntersections = 6; // heatmap: triangles intersected by the
 AIR_CONST uint kDebugBounces = 7;       // heatmap: path length / maxBounces (Russian roulette shows here)
 AIR_CONST uint kDebugDirect = 8;        // radiance of paths with at most one bounce (emission + direct light)
 AIR_CONST uint kDebugIndirect = 9;      // radiance of the remaining paths
-AIR_CONST uint kDebugViewCount = 10;
+AIR_CONST uint kDebugNrcCache = 10;     // the neural radiance cache's prediction at the first hit (pathtracer.nrc)
+AIR_CONST uint kDebugViewCount = 11;
 
 AIR_CONST uint kFlagFurnace = 1u;      // every material white, emitters off: an energy-conserving image is uniform
 AIR_CONST uint kFlagReset = 2u;        // discard the accumulated samples
@@ -39,6 +41,10 @@ AIR_CONST uint kFlagReSTIR = 32u;
 // sample's candidate goes to TraceConstants::giReservoirs.
 AIR_CONST uint kFlagReSTIRGI = 64u;
 AIR_CONST uint kFlagRecordGi = 128u; // set by the kernel on the sample that records the GI candidate
+// Paths end in the neural radiance cache (NrcShared.h) where their footprint has spread enough.
+AIR_CONST uint kFlagNrc = 256u;
+AIR_CONST uint kFlagNrcTrain = 512u;     // set by the kernel on its pixel's training path
+AIR_CONST uint kFlagNrcUnbiased = 1024u; // that training path is never ended by the cache
 
 // Result of TraceClosest() in the integrator (not stored in buffers).
 struct HitInfo
@@ -81,6 +87,7 @@ struct FrameData
     uint cloudEvents;      // scattering events a walk through the clouds may take
     uint pad1;
     uint pad2;
+    NrcData nrc; // the neural radiance cache, with kFlagNrc
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -116,7 +123,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 352);
+static_assert(sizeof(FrameData) == 544);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

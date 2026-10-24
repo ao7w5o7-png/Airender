@@ -23,6 +23,7 @@
 #define AIR_OUT(T) T&
 #define AIR_CONST static constexpr
 #define AIR_INLINE inline // functions defined in shared headers, outside a class
+#define AIR_UNROLL        // HLSL [unroll]: loops over register arrays must not index them dynamically
 
 // HLSL spells its intrinsics in lower case; the C++ mirror keeps the same names.
 // NOLINTBEGIN(readability-identifier-naming)
@@ -274,6 +275,7 @@ inline bool any(float3 v)
 #define AIR_OUT(T) out T
 #define AIR_CONST static const
 #define AIR_INLINE
+#define AIR_UNROLL [unroll]
 
 #endif
 

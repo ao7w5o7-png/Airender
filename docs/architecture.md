@@ -111,7 +111,7 @@ Files: `src/rhi/include/air/rhi/`
 | Backend | Status | Notes |
 |---|---|---|
 | Null | ✅ working | No GPU; real memory bookkeeping, command capture and barrier validation. Used by unit tests, CI and GPU-less debugging |
-| D3D12 | ✅ working | Agility SDK 1.619, SM 6.6 bindless, DXR 1.1 pipelines (1.2 shader execution reordering when available), graphics + async compute queues, per-queue GPU timestamps, debug layer and DRED with `enableValidation` |
+| D3D12 | ✅ working | Agility SDK 1.721 preview (1.619 retail without `AIR_D3D12_PREVIEW`), SM 6.6 bindless, DXR 1.1 pipelines (1.2 shader execution reordering when available), Shader Model 6.10 linear algebra (§3.4), graphics + async compute queues, per-queue GPU timestamps, debug layer and DRED with `enableValidation` |
 | Vulkan | 🚧 stub | Plan: Vulkan 1.3 (dynamic rendering, sync2, timeline semaphores), KHR ray tracing pipeline + ray query |
 
 ### 3.3 Queues
@@ -136,6 +136,37 @@ Compute for passes flagged `PassFlags::AsyncCompute` (§5.4).
   some queue was inside a scope (`ComputeBusyMs`). They differ by waits: a queue waiting for
   another, or, at vsync, a submission that writes a swapchain buffer waiting on the GPU for it
   (the editor's last batch, once async compute splits the frame). The editor shows busy time.
+
+### 3.4 Linear algebra (Shader Model 6.10)
+
+Small neural networks (§8.11) multiply on the GPU's matrix units through Shader Model 6.10's
+thread-scope matrices (`dx/linalg.h`, the successor of cooperative vectors): each thread multiplies
+its own vector by a matrix in memory, and the hardware gathers a wave's.
+
+- **Toolchain** (`AIR_D3D12_PREVIEW`, on by default): the preview Agility SDK (its runtime goes to
+  `.\D3D12\`, and the executable exports `D3D12_PREVIEW_SDK_VERSION`) and the preview DXC, which
+  compiles only the shaders marked `// air-shader-target: cs_6_10` (with 16-bit types, DXIL only;
+  the manifest records each shader's compiler for hot reload and `air.py shaders`). Without it
+  those shaders are not built and their features fall back to float32 kernels.
+- **Device**: `DeviceDesc::experimentalShaderModels` enables D3D12's experimental shader models
+  before the device exists (Windows Developer Mode only; a device that fails with them is created
+  again without). `DeviceCaps::linearAlgebra` reports linear algebra tier 1 with what the networks
+  use: float16 matrix x vector products, transposed too, float16 outer products accumulated into
+  float32 matrices in a buffer. The Null device pretends, so the passes run headless.
+- **Layouts**: the optimal layouts (`MatrixLayout::MulOptimal`, `OuterProductOptimal`) are the
+  device's own; `Device::GetMatrixSize` gives their sizes and `CommandList::ConvertMatrices` copies
+  matrices between layouts and types (source in `SRVCompute`, destination in `UAVCompute`, offsets
+  128-byte aligned).
+- **What this driver does** (RTX 5070, driver 617.42, Agility SDK 1.721.3-preview), measured with
+  standalone probes and `aircli mlp-check`:
+  - a ray tracing pipeline whose ray generation shader multiplies crashed when created; the same code
+    in a compute shader runs (the cache's trace kernels are compute shaders with inline ray queries);
+  - multiplications made only by the threads that took a branch after a loop with breaks returned
+    NaN for about 1% of threads, although simple divergence (a branch, an early return, loops of
+    different lengths) was exact: the kernels call them with every thread of the wave;
+  - float16 x float16 products are summed in float16 blocks (about 7e-4 relative error per output,
+    against 1.4e-4 for a single rounding);
+  - the debug layer does not validate Shader Model 6.10 shaders (it says so once per pipeline).
 
 ---
 
@@ -377,6 +408,7 @@ right and, if not, what is wrong, without a GPU and without looking at a screen.
 | Command stream | `aircli render --dump-commands` | Every GPU command of a frame (barriers, dispatches, events) with resource names |
 | Snapshots | `tests/golden/*.txt` + `air.py golden-update` | Render graph and command stream of reference scenarios; any behaviour change is a reviewable text diff |
 | Image comparison | `aircli compare ref.pfm test.pfm --diff d.ppm` | rmse / psnr / max error / differing pixel fraction (JSON) and a diff heatmap |
+| Neural network kernels | `aircli mlp-check --backend d3d12` | The GPU's float32 and linear algebra network kernels against the CPU's: outputs, input and weight gradients (JSON, exit 1 when they disagree; §8.11) |
 | Scaffolding | `air.py new-feature <name>` | New feature skeleton |
 | Conventions | `air.py format` / `tidy` / `layers` | Formatting, static analysis (naming + bug patterns), module layering |
 
@@ -403,8 +435,8 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `restir*` (§8.7), `furnace`, `debugView`, `ser`
-and `debugScale`.
+`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `restir*` (§8.7), `nrc*` (§8.11), `furnace`,
+`debugView`, `ser` and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -470,7 +502,9 @@ differ.
   by hit instance, the hit is read from the object without a closest-hit call; `pathtracer.ser=1` on
   GPUs that reorder, `DeviceCaps::shaderExecutionReordering`) and `PathTracerGi.hlsl`
   (`AIR_PT_RESTIR_GI`: records ReSTIR GI's candidates, §8.8; compiled apart because that state
-  halves the plain kernel's speed).
+  halves the plain kernel's speed). `PathTracerNrc.hlsl` and `PathTracerNrcPortable.hlsl` (§8.11)
+  end paths in the neural radiance cache; they are compute shaders (`AIR_PT_COMPUTE`) that run the
+  same `TracePixel` with inline ray queries.
 - **Guides** (albedos, normal/roughness, depth, motion) are written only when an active feature
   lists them in `RenderFeature::ConsumedSlots()` (dlss does): they cost about a tenth of the trace.
 
@@ -521,7 +555,8 @@ differ.
 
 `pathtracer.debugView` selects what `Resolve` writes: 0 lit, 1 normals, 2 base color,
 3 roughness, 4 metallic, 5 first-hit distance, 6 intersection count heatmap (Turbo colormap),
-7 path length heatmap, 8 direct light only, 9 indirect light only. `debugScale` scales the distance and heatmap views. `furnace=1` turns every
+7 path length heatmap, 8 direct light only, 9 indirect light only, 10 what the neural radiance
+cache predicts the first surface reflects (§8.11). `debugScale` scales the distance and heatmap views. `furnace=1` turns every
 material white and every emitter off with a uniform environment, so any visible structure is an
 energy error.
 
@@ -916,6 +951,98 @@ Validation:
 - Not modelled: the planet's curvature (the layer is flat and ends 100 km along a ray), wind, the
   scene's own geometry lighting the clouds, the clouds' shadows in the air between them and the
   viewer.
+
+### 8.11 Neural radiance cache
+
+`pathtracer.nrc` (0 off, 1 when not accumulating, 2 always; off by default) ends paths in a neural
+radiance cache (Mueller et al. 2021, "Real-time Neural Radiance Caching for Path Tracing"): a small
+network, trained every frame on a few longer paths, predicts the light a path vertex reflects. A
+path ends at the first vertex where its footprint has spread past `nrcSpread` (0.01) times the
+primary vertex's (as if the camera emitted uniformly; usually the first diffuse bounce, while
+mirror-like chains go on), or at its last vertex, and adds the cache's prediction there instead of
+its continuation: far less noise from long paths and fewer rays, for some bias. While the cache
+runs it replaces ReSTIR GI (§8.8); ReSTIR DI keeps the first surface's direct light.
+
+- **Network** (`renderer/shader/MlpShared.h`, `renderer/NeuralNetwork.h`): 64 inputs, two hidden
+  layers of 64 ReLU neurons, 3 outputs (16 rows, the rest zero), no biases (an input held at 1).
+  The inputs are a multiresolution hash grid of the position (Mueller et al. 2022: 16 levels of 2
+  features from 16 to 512 cells across the scene's box, 2^`nrcTableLog2` (16) entries per level),
+  spherical harmonics up to degree 3 of the direction the light leaves in, the shading normal, the
+  roughness and both albedos. The outputs are reflected radiance times the camera's exposure (O(1)
+  values, safe in float16; when the exposure changes the output layer is rescaled) divided by the
+  albedo sum (the network learns the light, not the materials).
+- **Training paths** (`shaders/NrcShared.h`): one pixel per tile of pixels (`nrcTrainingPaths`,
+  32768 per frame; tiles of 2 x 2 at 480 x 270, 8 x 8 at 1080p) traces a training path, at a pixel
+  that moves every frame. Its own render query is deferred to `NRC.Resolve`, so that every thread of
+  the trace makes exactly one cache lookup; the path goes on for a suffix that ends in the cache in
+  turn (self-training: the cache learns infinite bounces from its own predictions), except 1 in
+  `nrcUnbiased` (16) paths, which go on until Russian roulette or their last vertex. Every vertex of
+  a training path (at most 6; not the first with ReSTIR DI, whose direct light is not in the path)
+  becomes a record: its inputs and the light the rest of the path found it reflect per unit of
+  throughput up to it, the tail's prediction included.
+- **Optimizer**: `nrcSteps` (4) steps per frame, each on a scattered quarter of the training paths
+  (a multiplicative permutation of the path indices); the relative L2 loss of the luminance
+  (prediction error over the prediction's squared luminance plus 0.01, which trains dark and bright
+  regions alike); Adam at `nrcLearningRate` (0.01, beta 0.9 / 0.99), L2 regularization 1e-6 of the
+  MLP's weights, sparse updates of the hash grid (entries no sample touched keep their moments).
+  Loss gradients are clamped only far out (65536 per output): a cache learns the mean of its noisy
+  targets, which their rare bright samples carry, and clamping them at 64 made `door` 28% dark.
+- **Kernels**: on the matrix units (`nrcLinearAlgebra`, §3.4) the weights are float16 MulOptimal
+  matrices: forward passes multiply, backpropagation multiplies by the same matrices loaded as
+  MulOptimalTranspose, and every weight gradient is an outer product accumulated atomically into
+  float32 OuterProductOptimal matrices, converted to row major for the optimizer, which writes new
+  float16 weights that are converted back. Backpropagated gradients are scaled by 1/64 for float16
+  range (the optimizer divides it out). Without linear algebra the float32 kernels run
+  `renderer/shader/Mlp.hlsli`, the code the CPU twin (`renderer/Mlp.h`) runs, summing weight
+  gradients over each wave before 64-bit fixed point atomics. Hash grid gradients are 64-bit fixed
+  point atomics in both (exact and order independent). The float32 master parameters, Adam's
+  moments and the gradients live in `renderer::NeuralNetwork`, whose passes any feature can use.
+- **Passes**: `PathTracer.Trace` (the cache's kernel variant, a compute shader: every thread
+  predicts at the end of its path, those without a query on a dummy one), `NRC.Resolve` (the
+  training paths' render queries into the accumulation), then per step `NRC.Train[i]`,
+  `NRC.Mlp.ConvertGradients`, `NRC.Mlp.Optimize`, `NRC.Mlp.ConvertWeights`. A new scene starts a
+  new network. The cache's pipelines are created the first time it runs
+  (`renderer::LazyComputePipeline`): the driver takes 0.7 s to compile them.
+- `debugView=10` shows what the cache predicts the first surface reflects.
+
+Validation:
+
+- `tests/MlpTests.cpp`: backpropagation agrees with finite differences for 400 weights, all 64
+  inputs and the hash grid's entries at all 16 levels; the spherical harmonics are orthonormal
+  (4e-5); Adam fits a function of position and direction from 0.87 to 0.033 mean relative error
+  in 400 steps; the GPU network's passes on the Null device. `PathTracer_RadianceCacheTrainsEveryFrame`
+  checks the cache's passes, the float32 kernels and the views.
+- `aircli mlp-check --backend d3d12` runs the GPU's network kernels on 1024 random inputs and loss
+  gradients against the CPU: the float32 kernels agree to 2e-7 (relative RMS); the linear algebra
+  ones to 7e-4 for the outputs, 1.4% for the weight gradients and 2.7% for the input gradients
+  (float16 sums, and the ReLUs float16 rounding switches near zero); one transposed load made
+  untransposed shows as 143%.
+- White furnace (`furnace=1`): the `furnace` scene's spheres vanish (accumulated, -0.01%). Inside
+  the Cornell box, where albedo 1 keeps nearly all light and a self-trained cache feeds on its own
+  predictions, it reads +1.4% (1 in 1 paths unbiased) to +2.6% (1 in 16) over the true 0.18, which
+  the box's 8 bounces of plain path tracing miss by 14%.
+- Against a same-jitter reference (2048 spp), 480 x 270, 4 spp per frame after 62 frames, relative
+  MSE (bias of the mean):
+
+  | Scene | Plain paths | ReSTIR DI + GI | ReSTIR DI + cache |
+  |---|---|---|---|
+  | cornell_box | 0.052 | 0.0092 | 0.0127 (-1.4%) |
+  | door | 11.4 | 0.84 | 0.98 (+2.7%) |
+  | terrain | 0.0076 | 0.0082 | 0.0075 (-0.02%) |
+  | sunset | 0.135 | 0.190 | 0.057 (-0.16%) |
+  | sphere_field | 0.231 | 0.432 | 0.062 (+0.10%) |
+
+  The cache's mean moves by about 0.5% from frame to frame as it trains. In closed rooms whose
+  light arrives through few paths (the box's ceiling, the door) the first bounce's sampling
+  dominates the noise, and ReSTIR GI's reuse across pixels wins there.
+- Cost (RTX 5070, cornell_box, 960 x 540, 1 spp, ReSTIR DI off): trace 0.99 ms (0.49 ms without the
+  cache), `NRC.Resolve` 0.04 ms, 4 steps of training 4 x 0.28 ms and optimizer 4 x 0.05 ms: about
+  2.4 ms. The float32 kernels take 15 ms (trace 4.1 ms, training 9.7 ms): the matrix units are 4.2
+  times faster at inference and 8.4 at training.
+- Not done yet: ReSTIR GI's candidates ending in the cache (the reuse of the first bounce together
+  with the cache's tail); averaging the weights over steps for inference (steadier predictions);
+  scenes that move (the network restarts with the scene).
+
 ---
 
 ## 9. Editor
@@ -1027,6 +1154,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build build && 
 | `AIR_RHI_VULKAN` | OFF | Vulkan backend (requires the Vulkan SDK) |
 | `AIR_BUILD_EDITOR` | ON | Editor UI library and tests everywhere, `aireditor.exe` with D3D12 |
 | `AIR_WITH_DLSS` | ON with D3D12 | `dlss` feature; the SDK is downloaded or taken from `AIR_DLSS_SDK_DIR` |
+| `AIR_D3D12_PREVIEW` | ON with D3D12 | Preview Agility SDK and DXC for Shader Model 6.10 linear algebra (§3.4); off: the retail SDK and float32 network kernels |
 | `AIR_BUILD_TESTS` | ON | Unit tests |
 | `AIR_ENABLE_ASAN` / `AIR_ENABLE_TSAN` | OFF | Address / thread sanitizers |
 

@@ -328,7 +328,8 @@ def compile_shaders(preset: str, name_filter: str | None) -> bool:
             continue
         compiled += 1
         output = scratch / name.replace("/", "_")
-        command = [manifest["compiler"], *shader["args"], shader["source"], "-Fo", str(output)]
+        compiler = shader.get("compiler") or manifest["compiler"]  # Shader Model 6.10: the preview dxc
+        command = [compiler, *shader["args"], shader["source"], "-Fo", str(output)]
         if not run_step(f"shader {name}", command, tail=40):
             failed += 1
     return record("shaders", compiled > 0 and failed == 0, f"{compiled} compiled, {failed} failed")

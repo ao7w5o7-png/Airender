@@ -18,6 +18,10 @@
 //                                                     the aerial perspective tables (SkyLookup.hlsli)
 //   float         CloudBaseSample(CloudData c, float3 uvw), CloudDetailSample(...),
 //   float         CloudMajorantLoad(CloudData c, uint cell)   the clouds (CloudLookup.hlsli)
+// and, compiled with AIR_PT_NRC (the neural radiance cache's kernels, NrcShared.h):
+//   float3        NrcPredict(NrcQuery q)              the radiance the cache predicts a vertex reflects
+//   NrcTrainingRecord NrcReadRecord(uint slot), void NrcWriteRecord(uint slot, NrcTrainingRecord r)
+//   void          NrcDeferQuery(NrcQuery q, float3 throughput)   a training path's render query
 // HitInfo, CameraData and the kFlag* constants come from PathTracerShared.h.
 //
 // Estimator: emitted radiance is gathered at path vertices 1 .. maxBounces + 1 (vertex 1 is the
@@ -39,6 +43,12 @@
 // long, are taken as clear.
 // With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
 // entirely: ReSTIR DI (ReSTIRDI.hlsli) estimates it.
+// With kFlagNrc (AIR_PT_NRC kernels) a path ends at the first vertex where its footprint has spread
+// past nrcSpread times the primary vertex's (Mueller et al. 2021), or at its last vertex: the light that
+// vertex reflects comes from the neural radiance cache, predicted once the path is done (every thread
+// of a wave then queries together). A training path (kFlagNrcTrain) defers its render query, goes on
+// for a suffix that ends the same way (self-training; never with kFlagNrcUnbiased), and records every
+// vertex as a training sample of what it reflected.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
 #define AIR_PT_INTEGRATOR_HLSLI
 
@@ -52,6 +62,11 @@
 #ifndef AIR_PT_RESTIR_GI
 #define AIR_PT_RESTIR_GI 0
 #endif
+// The neural radiance cache: 1 with linear algebra (PathTracerNrc.hlsl), 2 in float32
+// (PathTracerNrcPortable.hlsl), 0 compiled out.
+#ifndef AIR_PT_NRC
+#define AIR_PT_NRC 0
+#endif
 
 struct IntegratorParams
 {
@@ -62,6 +77,9 @@ struct IntegratorParams
     uint flags;            // kFlagFurnace, kFlagNoNee
     uint lightTreeBounces; // vertices 0 .. lightTreeBounces - 1 choose lights with the light tree
     uint cloudEvents;      // scattering events a walk through the clouds may take
+    float nrcSpread;       // kFlagNrc: NrcData::spread
+    uint nrcSlot;          // kFlagNrcTrain: the path's first training record
+    uint nrcRecords;       // training records per path
 };
 
 struct Surface
@@ -502,6 +520,24 @@ void AddAerialPerspective(IntegratorParams params, float3 direction, AIR_INOUT(P
     }
 }
 
+// --- Neural radiance cache -----------------------------------------------------------------------
+
+#if AIR_PT_NRC
+// The cache's view of a vertex the light leaves towards wo.
+NrcQuery NrcMakeQuery(Surface s, float3 wo)
+{
+    float3 n = dot(s.shadingNormal, wo) > 0.0f ? s.shadingNormal : s.geometricNormal;
+    NrcQuery q;
+    q.position = s.position;
+    q.normal = NrcPackDirection(n);
+    q.direction = NrcPackDirection(wo);
+    q.roughness = NrcPackUnorm16x2(s.material.roughness, 0.0f);
+    q.diffuse = NrcPackColor(DiffuseAlbedo(s.material));
+    q.specular = NrcPackColor(SpecularAlbedo(s.material, saturate(dot(n, wo))));
+    return q;
+}
+#endif
+
 // --- Path ----------------------------------------------------------------------------------------
 
 PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, AIR_INOUT(uint) seed)
@@ -562,6 +598,28 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     float continuationLightPdf = 0.0f;
     float3 continuationRest = float3(0.0f, 0.0f, 0.0f);
     float3 restThroughput = float3(1.0f, 1.0f, 1.0f); // from x3 on, relative to the radiance reaching x2
+
+#if AIR_PT_NRC
+    bool nrc = (params.flags & kFlagNrc) != 0u;
+    bool nrcTrain = nrc && (params.flags & kFlagNrcTrain) != 0u;
+    bool nrcUnbiased = (params.flags & kFlagNrcUnbiased) != 0u;
+    float nrcBudget = 0.0f;       // nrcSpread times the primary vertex's spread
+    float nrcSpreadRoot = 0.0f;   // sum of the square roots of the segments' spreads since then
+    float nrcSuffixRoot = 0.0f;   // the same since a training path's render query
+    bool nrcRenderDone = false;   // the pixel's radiance is complete (a training path goes on)
+    float3 nrcRenderRadiance = float3(0.0f, 0.0f, 0.0f);
+    float3 nrcRenderDirect = float3(0.0f, 0.0f, 0.0f);
+    bool nrcHasQuery = false; // the path ends in the cache: at nrcQuery, times nrcQueryThroughput
+    NrcQuery nrcQuery;
+    nrcQuery.position = float3(0.0f, 0.0f, 0.0f);
+    nrcQuery.normal = 0u;
+    nrcQuery.direction = 0u;
+    nrcQuery.roughness = 0u;
+    nrcQuery.diffuse = 0u;
+    nrcQuery.specular = 0u;
+    float3 nrcQueryThroughput = float3(0.0f, 0.0f, 0.0f);
+    uint nrcRecordCount = 0u;
+#endif
 
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     float previousBsdfPdf = 0.0f; // solid angle pdf of the BSDF sample that produced `direction`
@@ -673,6 +731,69 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 }
             }
         }
+#if AIR_PT_NRC
+        if (nrc)
+        {
+            // The footprint's spread (Mueller et al. 2021, section 3.4): at the primary vertex as if the
+            // camera emitted uniformly in all directions, beyond it the square of the sum of every
+            // segment's square root.
+            float cosHit = max(abs(dot(direction, s.geometricNormal)), 1e-4f);
+            if (bounce == 0u)
+            {
+                nrcBudget = params.nrcSpread * hit.t * hit.t / (4.0f * kPi * cosHit);
+            }
+            else
+            {
+                float root = sqrt(hit.t * hit.t / (max(previousBsdfPdf, 1e-12f) * cosHit));
+                nrcSpreadRoot += root;
+                nrcSuffixRoot += root;
+            }
+            bool last = bounce == params.maxBounces;
+            float3 wo = -direction;
+            bool tail = false;
+            if (!nrcRenderDone && (last || (bounce > 0u && nrcSpreadRoot * nrcSpreadRoot > nrcBudget)))
+            {
+                nrcRenderDone = true;
+                if (!nrcTrain)
+                {
+                    nrcQuery = NrcMakeQuery(s, wo);
+                    nrcQueryThroughput = throughput;
+                    nrcHasQuery = true;
+                    break;
+                }
+                NrcDeferQuery(NrcMakeQuery(s, wo), throughput);
+                nrcRenderRadiance = result.radiance;
+                nrcRenderDirect = result.directRadiance;
+                nrcSuffixRoot = 0.0f;
+                tail = last;
+            }
+            else if (nrcRenderDone && (last || (!nrcUnbiased && nrcSuffixRoot * nrcSuffixRoot > nrcBudget)))
+            {
+                tail = true;
+            }
+            if (tail)
+            {
+                // The training suffix ends in the cache too (self-training).
+                nrcQuery = NrcMakeQuery(s, wo);
+                nrcQueryThroughput = throughput;
+                nrcHasQuery = true;
+                break;
+            }
+            // What this vertex reflects is a training sample (at the first vertex only when its
+            // direct light is part of the path, not ReSTIR DI's).
+            if (nrcTrain && nrcRecordCount < params.nrcRecords && (bounce > 0u || !restir))
+            {
+                NrcTrainingRecord record;
+                record.query = NrcMakeQuery(s, wo);
+                record.value = result.radiance;
+                record.valid = 0u;
+                record.throughput = throughput;
+                record.pad = 0u;
+                NrcWriteRecord(params.nrcSlot + nrcRecordCount, record);
+                ++nrcRecordCount;
+            }
+        }
+#endif
         if (bounce == params.maxBounces || (gi && !recordGi && bounce == 1u))
         {
             break;
@@ -886,6 +1007,39 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             }
         }
     }
+#if AIR_PT_NRC
+    // Every thread predicts, those without a query on a dummy one: the matrix units then see whole
+    // waves, and the linear algebra driver tested here returned NaN for some threads of a call made
+    // only by the threads with a query (after this loop's breaks).
+    float3 nrcPrediction = NrcPredict(nrcQuery);
+    if (nrcHasQuery)
+    {
+        result.radiance += nrcQueryThroughput * nrcPrediction;
+    }
+    if (nrcTrain)
+    {
+        // Every record's target: what the rest of the path found (the cache's prediction at its end
+        // included) per unit of throughput up to the vertex. Records the path did not reach are
+        // marked invalid (the slots hold an earlier frame's).
+        for (uint i = 0u; i < params.nrcRecords; ++i)
+        {
+            NrcTrainingRecord record = NrcReadRecord(params.nrcSlot + i);
+            float3 t = record.throughput;
+            bool valid = i < nrcRecordCount && min(t.x, min(t.y, t.z)) > 1e-12f;
+            float3 reflected = result.radiance - record.value;
+            record.value = valid ? float3(max(reflected.x, 0.0f) / t.x, max(reflected.y, 0.0f) / t.y,
+                                          max(reflected.z, 0.0f) / t.z)
+                                 : float3(0.0f, 0.0f, 0.0f);
+            record.valid = valid ? 1u : 0u;
+            NrcWriteRecord(params.nrcSlot + i, record);
+        }
+        if (nrcRenderDone)
+        {
+            result.radiance = nrcRenderRadiance;
+            result.directRadiance = nrcRenderDirect;
+        }
+    }
+#endif
     return result;
 }
 

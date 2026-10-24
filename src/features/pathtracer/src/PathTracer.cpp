@@ -7,6 +7,7 @@
 #include "air/renderer/Transfer.h"
 
 #include "PathTracerShared.h"
+#include "RadianceCache.h"
 #include "ReSTIR.h"
 #include "ReSTIRShared.h"
 
@@ -27,7 +28,7 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 {
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
-           a.cloudEvents == b.cloudEvents && a.restir == b.restir && a.furnace == b.furnace &&
+           a.cloudEvents == b.cloudEvents && a.restir == b.restir && a.nrc == b.nrc && a.furnace == b.furnace &&
            a.debugView == b.debugView && a.debugScale == b.debugScale;
 }
 
@@ -56,7 +57,8 @@ float Halton(u32 index, u32 base)
 
 bool IsDisplayDebugView(u32 view)
 {
-    return view != gpu::kDebugNone && view != gpu::kDebugDirect && view != gpu::kDebugIndirect;
+    return view != gpu::kDebugNone && view != gpu::kDebugDirect && view != gpu::kDebugIndirect &&
+           view != gpu::kDebugNrcCache;
 }
 
 } // namespace
@@ -82,6 +84,8 @@ PathTracer::~PathTracer()
             mDevice.DestroyBuffer(buffer);
         }
     }
+    mTraceNrc.Destroy(mDevice);
+    mTraceNrcPortable.Destroy(mDevice);
     for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mResolvePipeline})
     {
         if (pipeline.IsValid())
@@ -125,6 +129,14 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGi.lib", "");
     trace.debugName = "PathTracer.TraceGi";
     mTracePipelineGi = mDevice.CreateRayTracingPipeline(trace);
+    // The kernels whose paths end in the neural radiance cache, compute shaders with inline ray
+    // queries: on the matrix units (Shader Model 6.10, built with the preview compiler) and in float32.
+    if (mDevice.GetCapabilities().linearAlgebra)
+    {
+        mTraceNrc.Load(mDevice, shaderDir, "PathTracerNrc.cs", "PathTracer.TraceNrc", sizeof(gpu::TraceConstants));
+    }
+    mTraceNrcPortable.Load(mDevice, shaderDir, "PathTracerNrcPortable.cs", "PathTracer.TraceNrcPortable",
+                           sizeof(gpu::TraceConstants));
 
     rhi::ComputePipelineDesc resolve;
     resolve.shader = renderer::LoadShader(mDevice, shaderDir, "Resolve.cs", "Main");
@@ -149,6 +161,8 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     // Optional: without their shaders the path tracer estimates all the light itself.
     mReSTIR = std::make_unique<ReSTIR>(mDevice);
     mReSTIR->Initialize(shaderDir);
+    mRadianceCache = std::make_unique<RadianceCache>(mDevice);
+    mRadianceCache->Initialize(shaderDir);
 
     mFrameRingSize = mDevice.GetFramesInFlight() + 1;
     mFrameRing = mDevice.CreateBuffer({.size = mFrameRingSize * sizeof(gpu::FrameData),
@@ -159,6 +173,16 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
 
     return mTracePipeline.IsValid() && mResolvePipeline.IsValid() && mAccumulation.IsValid() && mBsdfLut.IsValid() &&
            mFrameRing.IsValid();
+}
+
+bool PathTracer::RadianceCacheUsesLinearAlgebra() const
+{
+    return mUsedNrc && mRadianceCache->UsesLinearAlgebra();
+}
+
+u32 PathTracer::GetRadianceCacheSteps() const
+{
+    return mRadianceCache ? mRadianceCache->GetStep() : 0;
 }
 
 void PathTracer::ResetAccumulation()
@@ -200,10 +224,24 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     auto on = [&](u32 mode) { return mode == kReSTIRAlways || (mode == kReSTIRRealTime && !mSettings.accumulate); };
     const bool diWanted = on(mSettings.restir.di) && mSettings.nextEventEstimation && !mSettings.furnace &&
                           scene.lightCount > 0 && lightView && mReSTIR->IsDiAvailable();
+    // The neural radiance cache: its own kernel variant, which leaves the indirect light to the cache
+    // (no ReSTIR GI). On the matrix units when asked for and available, else in float32.
+    const bool nrcView = lightView || view == gpu::kDebugNrcCache;
+    const bool nrcOn =
+        mSettings.nrc.mode == kNrcAlways || (mSettings.nrc.mode == kNrcRealTime && !mSettings.accumulate);
+    const bool nrcLinearAlgebra =
+        mSettings.nrc.linearAlgebra && mTraceNrc.IsAvailable() && mRadianceCache->IsAvailable(true);
+    // The trace kernel is created the first time the cache runs.
+    const rhi::PipelineHandle nrcPipeline = !nrcOn || !nrcView                   ? rhi::PipelineHandle{}
+                                            : nrcLinearAlgebra                   ? mTraceNrc.Get(mDevice)
+                                            : mRadianceCache->IsAvailable(false) ? mTraceNrcPortable.Get(mDevice)
+                                                                                 : rhi::PipelineHandle{};
+    const bool nrcWanted = nrcPipeline.IsValid();
     const bool giWanted =
-        on(mSettings.restir.gi) && lightView && mReSTIR->IsGiAvailable() && mTracePipelineGi.IsValid();
+        on(mSettings.restir.gi) && lightView && !nrcWanted && mReSTIR->IsGiAvailable() && mTracePipelineGi.IsValid();
     const bool restirDi = diWanted && spp > 0;
     const bool restirGi = giWanted && spp > 0;
+    const bool nrc = nrcWanted && spp > 0;
     AIR_CHECK(!restirDi || scene.lightCount <= gpu::kReSTIRMaxLight,
               "ReSTIR DI: {} lights exceed the reservoirs' 24 bits", scene.lightCount);
     if (!diWanted && !giWanted)
@@ -214,6 +252,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     {
         mUsedReSTIRDI = restirDi;
         mUsedReSTIRGI = restirGi;
+        mUsedNrc = nrc;
     }
 
     const float aspect = float(mSettings.width) / float(mSettings.height);
@@ -264,7 +303,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
                   (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restirDi ? gpu::kFlagReSTIR : 0u) |
-                  (restirGi ? gpu::kFlagReSTIRGI : 0u);
+                  (restirGi ? gpu::kFlagReSTIRGI : 0u) | (nrc ? gpu::kFlagNrc : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -273,6 +312,11 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.lightCount = scene.lightCount;
     frame.debugView = mSettings.debugView;
     frame.debugScale = std::max(mSettings.debugScale, 1e-6f);
+    if (nrc)
+    {
+        mRadianceCache->BeginFrame(graph, scene, mSettings.nrc, nrcLinearAlgebra, mSettings.width, mSettings.height,
+                                   exposure, frame.frameIndex, frame.nrc);
+    }
 
     const u32 slot = frame.frameIndex % mFrameRingSize;
     auto* ring = static_cast<gpu::FrameData*>(mDevice.GetMappedPointer(mFrameRing));
@@ -339,9 +383,12 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const rdg::BufferRef giReservoirs = restirOutputs.giReservoirs;
 
         const rhi::PipelineHandle pipeline =
-            restirGi ? mTracePipelineGi : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
+            nrc        ? nrcPipeline
+            : restirGi ? mTracePipelineGi
+                       : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
+        RadianceCache* cache = nrc ? mRadianceCache.get() : nullptr;
         graph.AddPass(
-            "PathTracer.Trace", rdg::PassFlags::RayTracing,
+            "PathTracer.Trace", nrc ? rdg::PassFlags::Compute : rdg::PassFlags::RayTracing,
             [&](rdg::PassBuilder& b)
             {
                 b.Write(accumulation, Access::UAVCompute);
@@ -359,6 +406,10 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     {
                         b.Write(t, Access::UAVCompute);
                     }
+                }
+                if (cache)
+                {
+                    cache->DeclareTrace(b);
                 }
             },
             [=](rdg::PassContext& ctx) mutable
@@ -382,7 +433,14 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                 }
                 ctx.cmd.SetPipeline(pipeline);
                 ctx.cmd.PushConstants(&constants, sizeof(constants));
-                ctx.cmd.DispatchRays(width, height, 1);
+                if (cache)
+                {
+                    ctx.cmd.Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                }
+                else
+                {
+                    ctx.cmd.DispatchRays(width, height, 1);
+                }
             });
 
         if (restirDi || restirGi)
@@ -400,6 +458,12 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.skyTable = constants.skyTable;
             mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, view != gpu::kDebugIndirect,
                                view != gpu::kDebugDirect);
+        }
+        if (nrc)
+        {
+            // The training paths' pixels get their cache lookups in the views that show indirect light.
+            mRadianceCache->AddPasses(graph, constants.frameData, constants.frameSlot, accumulation,
+                                      view == gpu::kDebugNone || view == gpu::kDebugIndirect);
         }
     }
 

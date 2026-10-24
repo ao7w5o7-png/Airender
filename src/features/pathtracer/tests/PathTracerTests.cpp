@@ -106,12 +106,12 @@ TEST(PathTracer_WritesGuidesForDenoisers)
 TEST(PathTracer_DebugViewsAndFurnaceRun)
 {
     Headless h({"pathtracer", "tonemap"});
-    for (int view = 0; view < 10; ++view)
+    for (int view = 0; view < 11; ++view)
     {
         EXPECT(h.runner->SetParameter("pathtracer.debugView", std::to_string(view)));
         EXPECT(h.Frame().validationErrors.empty());
     }
-    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "10"));
+    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "11"));
     EXPECT(h.runner->SetParameter("pathtracer.furnace", "true"));
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "false"));
     EXPECT(h.Frame().validationErrors.empty());
@@ -201,4 +201,56 @@ TEST(PathTracer_ReSTIRGIResamplesTheIndirectLight)
     EXPECT(CountLines(furnace.commands, "BeginEvent 'PathTracer.ReSTIRDI.") == 0);
     const auto status = h.runner->DescribeFeatures().Dump(0);
     EXPECT(status.find("\"restirGi\":true") != std::string::npos);
+}
+
+// The neural radiance cache: its trace kernel, the training paths' render queries and the frame's
+// optimizer steps (on the matrix units where the device has them: the Null device pretends), in
+// place of ReSTIR GI; off again, the plain kernel runs.
+TEST(PathTracer_RadianceCacheTrainsEveryFrame)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    EXPECT(h.runner->SetParameter("pathtracer.nrc", "1"));
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        const auto result = h.Frame();
+        EXPECT(result.validationErrors.empty());
+        EXPECT(CountLines(result.commands, "BeginEvent 'NRC.Resolve'") == 1);
+        EXPECT(CountLines(result.commands, "BeginEvent 'NRC.Train[") == 4);
+        EXPECT(CountLines(result.commands, "BeginEvent 'NRC.Mlp.Optimize'") == 4);
+        EXPECT(CountLines(result.commands, "BeginEvent 'NRC.Mlp.ConvertGradients'") == 4);
+        // The uploaded weights' conversion comes first, on the first frame only.
+        EXPECT(CountLines(result.commands, "BeginEvent 'NRC.Mlp.ConvertWeights'") == (frame == 0 ? 5u : 4u));
+        EXPECT(CountLines(result.commands, "ConvertMatrix ") == (frame == 0 ? 27u : 24u));
+        EXPECT(CountLines(result.commands, "BeginEvent 'PathTracer.ReSTIRGI.") == 0);
+        EXPECT(CountLines(result.commands, "BeginEvent 'PathTracer.ReSTIRDI.") == 3);
+    }
+    std::string status = h.runner->DescribeFeatures().Dump(0);
+    EXPECT(status.find("\"nrc\":true") != std::string::npos);
+    EXPECT(status.find("\"nrcLinearAlgebra\":true") != std::string::npos);
+    EXPECT(status.find("\"nrcSteps\":12") != std::string::npos);
+
+    // float32 kernels: no matrices to convert.
+    EXPECT(h.runner->SetParameter("pathtracer.nrcLinearAlgebra", "0"));
+    const auto portable = h.Frame();
+    EXPECT(portable.validationErrors.empty());
+    EXPECT(CountLines(portable.commands, "BeginEvent 'NRC.Train[") == 4);
+    EXPECT(CountLines(portable.commands, "ConvertMatrix ") == 0);
+    status = h.runner->DescribeFeatures().Dump(0);
+    EXPECT(status.find("\"nrcLinearAlgebra\":false") != std::string::npos);
+
+    // The cache's view, and the direct light (no cache lookups to resolve there).
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "10"));
+    EXPECT(CountLines(h.Frame().commands, "BeginEvent 'NRC.Resolve'") == 0);
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "8"));
+    EXPECT(CountLines(h.Frame().commands, "BeginEvent 'NRC.Train[") == 4);
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "1")); // normals: no light, no cache
+    EXPECT(CountLines(h.Frame().commands, "BeginEvent 'NRC.") == 0);
+
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "0"));
+    EXPECT(h.runner->SetParameter("pathtracer.nrc", "0"));
+    const auto off = h.Frame();
+    EXPECT(off.validationErrors.empty());
+    EXPECT(CountLines(off.commands, "BeginEvent 'NRC.") == 0);
+    EXPECT(CountLines(off.commands, "BeginEvent 'PathTracer.ReSTIRGI.") == 2);
 }

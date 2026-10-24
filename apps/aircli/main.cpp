@@ -16,6 +16,8 @@
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
 //                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
+//   aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]   the GPU's neural network kernels
+//                    (float32 and linear algebra) against the CPU's (JSON; exit 1 when they disagree)
 //
 // `render` fails (exit 1) if any frame produced a validation error.
 
@@ -28,6 +30,7 @@
 #include "air/features/pathtracer/ReferenceRenderer.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
+#include "air/renderer/NeuralNetwork.h"
 #include "air/renderer/ProfileReport.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
@@ -72,7 +75,8 @@ int Usage()
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
                "  aircli features | scenes\n"
-               "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
+               "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
+               "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n",
                stderr);
     return kExitUsage;
 }
@@ -416,6 +420,52 @@ int CommandCompare(Args& args)
 }
 
 // ---------------------------------------------------------------------------
+// mlp-check
+// ---------------------------------------------------------------------------
+int CommandMlpCheck(Args& args)
+{
+    rhi::Backend backend = rhi::Backend::D3D12;
+    std::filesystem::path shaderRoot = renderer::FrameRunnerDesc{}.shaderRoot;
+    u32 samples = 1024;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--backend")
+        {
+            const std::string_view b = args.Next();
+            backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
+        }
+        else if (arg == "--shaders")
+        {
+            shaderRoot = std::string(args.Next());
+        }
+        else if (arg == "--samples")
+        {
+            samples = u32(std::stoul(std::string(args.Next())));
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    if (args.error)
+    {
+        return Usage();
+    }
+    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = true});
+    if (!device)
+    {
+        AIR_LOG(Error, "aircli", "could not create a {} device", rhi::ToString(backend));
+        return kExitUsage;
+    }
+    json::Value report = renderer::CheckNeuralNetwork(*device, shaderRoot / "renderer", samples, 1);
+    report["adapter"] = device->GetCapabilities().adapterName;
+    const bool passed = report["passed"].AsBool();
+    std::puts(report.Dump().c_str());
+    return passed ? kExitOk : kExitCheckFailed;
+}
+
+// ---------------------------------------------------------------------------
 // render
 // ---------------------------------------------------------------------------
 int CommandRender(Args& args)
@@ -754,6 +804,10 @@ int main(int argc, char** argv)
     if (command == "compare")
     {
         return CommandCompare(args);
+    }
+    if (command == "mlp-check")
+    {
+        return CommandMlpCheck(args);
     }
     return Usage();
 }

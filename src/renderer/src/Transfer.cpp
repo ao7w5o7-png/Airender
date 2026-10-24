@@ -1,5 +1,6 @@
 #include "air/renderer/Transfer.h"
 
+#include "air/core/Assert.h"
 #include "air/core/Log.h"
 
 #include <algorithm>
@@ -80,6 +81,32 @@ u16 FloatToHalf(float value)
     const u32 rest = mantissa & 0x1FFFu;
     half += (rest > 0x1000u || (rest == 0x1000u && (half & 1u) != 0)) ? 1u : 0u; // a carry rounds up the exponent
     return u16(sign | half);
+}
+
+std::vector<u8> ReadbackBuffer(rhi::Device& device, rhi::BufferHandle buffer, Access current)
+{
+    const rhi::BufferDesc* desc = device.GetBufferDesc(buffer);
+    AIR_CHECK(desc, "ReadbackBuffer: invalid buffer");
+    const u64 size = desc->size;
+    const rhi::BufferHandle readback = device.CreateBuffer({.size = size,
+                                                            .usage = rhi::BufferUsage::CopyDst,
+                                                            .memory = rhi::MemoryLocation::Readback,
+                                                            .debugName = "Readback"});
+    auto cmd = device.CreateCommandList(rhi::QueueType::Graphics);
+    cmd->Begin();
+    cmd->Barriers(std::array{Barrier::Buf(buffer, current, Access::CopySrc)});
+    cmd->CopyBuffer(readback, 0, buffer, 0, size);
+    cmd->Barriers(std::array{Barrier::Buf(buffer, Access::CopySrc, current)});
+    cmd->End();
+    rhi::CommandList* lists[] = {cmd.get()};
+    device.WaitForFence(rhi::QueueType::Graphics, device.Submit(rhi::QueueType::Graphics, lists));
+    std::vector<u8> bytes;
+    if (const auto* mapped = static_cast<const u8*>(device.GetMappedPointer(readback)))
+    {
+        bytes.assign(mapped, mapped + size);
+    }
+    device.DestroyBuffer(readback);
+    return bytes;
 }
 
 rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc, const void* data, u64 size)

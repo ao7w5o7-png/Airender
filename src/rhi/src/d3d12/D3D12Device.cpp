@@ -321,10 +321,12 @@ bool D3D12Device::Initialize()
         mTimestampFrames.push_back(std::move(frame));
     }
 
-    AIR_LOG(Info, "D3D12", "device '{}' ({} MiB VRAM, SM {}.{}, ray tracing tier {}.{}, SER {}, GPU upload heap {})",
-            mCaps.adapterName, mCaps.dedicatedVideoMemory >> 20, mCaps.shaderModel >> 4, mCaps.shaderModel & 0xF,
-            mCaps.rayTracingTier / 10, mCaps.rayTracingTier % 10, mCaps.shaderExecutionReordering ? "yes" : "no",
-            mGpuUploadHeap ? "yes" : "no");
+    AIR_LOG(
+        Info, "D3D12",
+        "device '{}' ({} MiB VRAM, SM {}.{}, ray tracing tier {}.{}, SER {}, linear algebra {}, GPU upload heap {})",
+        mCaps.adapterName, mCaps.dedicatedVideoMemory >> 20, mCaps.shaderModel >> 4, mCaps.shaderModel & 0xF,
+        mCaps.rayTracingTier / 10, mCaps.rayTracingTier % 10, mCaps.shaderExecutionReordering ? "yes" : "no",
+        mCaps.linearAlgebra ? "yes" : "no", mGpuUploadHeap ? "yes" : "no");
     return true;
 }
 
@@ -365,27 +367,55 @@ bool D3D12Device::CreateDeviceAndQueues()
 
     const DXGI_GPU_PREFERENCE preference =
         mDesc.preferHighPerformanceAdapter ? DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE : DXGI_GPU_PREFERENCE_UNSPECIFIED;
-    for (UINT i = 0;; ++i)
+    auto createDevice = [&]
     {
-        ComPtr<IDXGIAdapter1> adapter;
-        if (mFactory->EnumAdapterByGpuPreference(i, preference, IID_PPV_ARGS(&adapter)) == DXGI_ERROR_NOT_FOUND)
+        for (UINT i = 0;; ++i)
         {
-            break;
+            ComPtr<IDXGIAdapter1> adapter;
+            if (mFactory->EnumAdapterByGpuPreference(i, preference, IID_PPV_ARGS(&adapter)) == DXGI_ERROR_NOT_FOUND)
+            {
+                break;
+            }
+            DXGI_ADAPTER_DESC1 desc = {};
+            adapter->GetDesc1(&desc);
+            if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+            {
+                continue;
+            }
+            if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&mDevice))))
+            {
+                mAdapter = adapter;
+                mCaps.adapterName = ToUtf8(desc.Description);
+                mCaps.dedicatedVideoMemory = desc.DedicatedVideoMemory;
+                break;
+            }
         }
-        DXGI_ADAPTER_DESC1 desc = {};
-        adapter->GetDesc1(&desc);
-        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+    };
+#if AIR_D3D12_LINEAR_ALGEBRA
+    // Shader Model 6.10 (linear algebra) is an experimental shader model: it must be enabled before the
+    // device is created, which Windows allows only in Developer Mode.
+    bool experimental = false;
+    if (mDesc.experimentalShaderModels)
+    {
+        UUID features[] = {D3D12ExperimentalShaderModels};
+        experimental = SUCCEEDED(D3D12EnableExperimentalFeatures(1, features, nullptr, nullptr));
+        if (!experimental)
         {
-            continue;
-        }
-        if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&mDevice))))
-        {
-            mAdapter = adapter;
-            mCaps.adapterName = ToUtf8(desc.Description);
-            mCaps.dedicatedVideoMemory = desc.DedicatedVideoMemory;
-            break;
+            AIR_LOG(Info, "D3D12",
+                    "experimental shader models unavailable (Windows Developer Mode is off): no "
+                    "Shader Model 6.10 linear algebra");
         }
     }
+    createDevice();
+    if (!mDevice && experimental)
+    {
+        AIR_LOG(Warning, "D3D12", "no device with experimental shader models; retrying without them");
+        D3D12EnableExperimentalFeatures(0, nullptr, nullptr, nullptr);
+        createDevice();
+    }
+#else
+    createDevice();
+#endif
     if (!mDevice)
     {
         AIR_LOG(Error, "D3D12", "no hardware adapter supports Direct3D 12 feature level 12_0 with ID3D12Device5");
@@ -521,7 +551,7 @@ void D3D12Device::QueryCapabilities()
         mCaps.rayTracing = options5.RaytracingTier >= D3D12_RAYTRACING_TIER_1_1;
         mCaps.rayTracingTier = u32(options5.RaytracingTier);
     }
-    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = {D3D_SHADER_MODEL_6_9}; // returns the highest supported
+    D3D12_FEATURE_DATA_SHADER_MODEL shaderModel = {D3D_HIGHEST_SHADER_MODEL}; // returns the highest supported
     if (SUCCEEDED(mDevice->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shaderModel, sizeof(shaderModel))))
     {
         mCaps.shaderModel = u32(shaderModel.HighestShaderModel);
@@ -532,6 +562,46 @@ void D3D12Device::QueryCapabilities()
         options22.ShaderExecutionReorderingActuallyReorders;
     mCaps.shaderExecutionReordering = mCaps.shaderModel >= u32(D3D_SHADER_MODEL_6_9) &&
                                       mCaps.rayTracingTier >= u32(D3D12_RAYTRACING_TIER_1_2) && serReorders;
+#if AIR_D3D12_LINEAR_ALGEBRA
+    // Thread-scope linear algebra as the neural network passes use it: float16 matrix x vector (also
+    // transposed), float16 outer products accumulated into float32 matrices in a buffer.
+    D3D12_FEATURE_DATA_LINEAR_ALGEBRA_SUPPORT linearAlgebra = {};
+    if (mCaps.shaderModel >= u32(D3D_SHADER_MODEL_6_10) &&
+        SUCCEEDED(mDevice->CheckFeatureSupport(D3D12_FEATURE_LINEAR_ALGEBRA_SUPPORT, &linearAlgebra,
+                                               sizeof(linearAlgebra))) &&
+        linearAlgebra.LinearAlgebraTier >= D3D12_LINEAR_ALGEBRA_TIER_1_0 && SUCCEEDED(mDevice.As(&mDevicePreview)))
+    {
+        auto query = [&](D3D12_FEATURE_DATA_LINEAR_ALGEBRA_MATRIX_OPERATION_SUPPORT& op)
+        {
+            return SUCCEEDED(mDevice->CheckFeatureSupport(
+                D3D12_FEATURE_LINEAR_ALGEBRA_LINEAR_ALGEBRA_MATRIX_OPERATION_SUPPORT, &op, sizeof(op)));
+        };
+        D3D12_FEATURE_DATA_LINEAR_ALGEBRA_MATRIX_OPERATION_SUPPORT multiply = {};
+        multiply.OperationType = D3D12_LINEAR_ALGEBRA_OPERATION_TYPE_THREAD_VECTOR_MATRIX_MULTIPLY;
+        multiply.ThreadVectorMatrixMultiply.VectorInputType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16;
+        multiply.ThreadVectorMatrixMultiply.MatrixInputType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16;
+        multiply.ThreadVectorMatrixMultiply.BiasInputType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16;
+        multiply.ThreadVectorMatrixMultiply.VectorResultType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16;
+        const D3D12_LINEAR_ALGEBRA_MULTIPLICATION_SUPPORT_FLAGS needed =
+            D3D12_LINEAR_ALGEBRA_MULTIPLICATION_SUPPORT_FLAG_SUPPORTED |
+            D3D12_LINEAR_ALGEBRA_MULTIPLICATION_SUPPORT_FLAG_TRANSPOSE;
+        D3D12_FEATURE_DATA_LINEAR_ALGEBRA_MATRIX_OPERATION_SUPPORT outer = {};
+        outer.OperationType = D3D12_LINEAR_ALGEBRA_OPERATION_TYPE_THREAD_OUTER_PRODUCT;
+        outer.ThreadOuterProductSupport.InputComponentType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16;
+        outer.ThreadOuterProductSupport.ResultComponentType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT32;
+        D3D12_FEATURE_DATA_LINEAR_ALGEBRA_MATRIX_OPERATION_SUPPORT accumulate = {};
+        accumulate.OperationType = D3D12_LINEAR_ALGEBRA_OPERATION_TYPE_ATOMIC_ACCUMULATE_STORE;
+        accumulate.AccumulateStore.ComponentType = D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT32;
+        mCaps.linearAlgebra = query(multiply) &&
+                              (multiply.ThreadVectorMatrixMultiply.SupportFlags & needed) == needed && query(outer) &&
+                              outer.ThreadOuterProductSupport.Supported && query(accumulate) &&
+                              accumulate.AccumulateStore.RWByteAddressBufferSupported;
+    }
+    if (!mCaps.linearAlgebra)
+    {
+        mDevicePreview.Reset();
+    }
+#endif
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = {};
     if (SUCCEEDED(mDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7))))
     {
@@ -1151,7 +1221,31 @@ std::unique_ptr<CommandContext> D3D12Device::AcquireContext(QueueType type)
     AIR_D3D12_CHECK(mDevice->CreateCommandAllocator(kTypes[size_t(type)], IID_PPV_ARGS(&context->allocator)));
     AIR_D3D12_CHECK(mDevice->CreateCommandList1(0, kTypes[size_t(type)], D3D12_COMMAND_LIST_FLAG_NONE,
                                                 IID_PPV_ARGS(&context->list)));
+#if AIR_D3D12_LINEAR_ALGEBRA
+    if (mCaps.linearAlgebra && type != QueueType::Copy)
+    {
+        context->list.As(&context->preview);
+    }
+#endif
     return context;
+}
+
+u64 D3D12Device::GetMatrixSize(u32 rows, u32 columns, MatrixType type, MatrixLayout layout, u32 stride)
+{
+#if AIR_D3D12_LINEAR_ALGEBRA
+    if (mDevicePreview)
+    {
+        D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_DEST_INFO info = {};
+        info.DestLayout = ToD3D12(layout);
+        info.DestStride = stride;
+        info.NumRows = rows;
+        info.NumColumns = columns;
+        info.DestDataType = ToD3D12(type);
+        mDevicePreview->GetLinearAlgebraMatrixConversionDestinationInfo(&info);
+        return info.DestSize;
+    }
+#endif
+    return PackedMatrixSize(rows, columns, type, layout, stride);
 }
 
 void D3D12Device::ReleaseContext(QueueType type, std::unique_ptr<CommandContext> context)

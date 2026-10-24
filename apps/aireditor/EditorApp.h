@@ -59,6 +59,8 @@ struct EditorOptions
     std::function<std::unique_ptr<HtmlView>()> createHtmlView;
     float htmlProfilerInterval = 1.0f; // seconds between the panel's live captures
     std::string focusWindow;           // a window brought to front at startup (selects its dock tab)
+    // Feature parameters set at startup ("feature.parameter", value), as aircli's --set.
+    std::vector<std::pair<std::string, std::string>> parameters;
 };
 
 inline constexpr const char* kHtmlProfilerWindow = "Profiler (HTML)";

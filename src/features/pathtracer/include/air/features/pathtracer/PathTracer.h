@@ -7,6 +7,7 @@
 //                       buffer, plus first-hit guide textures for denoisers
 //   PathTracer.ReSTIR*  Compute, with restir.di / restir.gi: the direct / indirect light at the
 //                       first surface by ReSTIR DI / GI (src/ReSTIR.h), added to the accumulation
+//   NRC.*               Compute, with nrc: the neural radiance cache's training (src/RadianceCache.h)
 //   PathTracer.Resolve  Compute: average * exposure (or a debug view) into the frame output
 // The estimator (shaders/Integrator.hlsli: NEE + MIS over emissive triangles, energy-conserving
 // GGX) is shared with the CPU ReferenceRenderer. The output is scene-linear and exposed
@@ -15,6 +16,7 @@
 #include "air/rdg/RenderGraph.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
+#include "air/renderer/ShaderLoader.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <filesystem>
@@ -49,6 +51,31 @@ struct ReSTIRSettings
     bool operator==(const ReSTIRSettings&) const = default;
 };
 
+// Neural radiance cache (docs/architecture.md §8.11; Mueller et al. 2021): paths end where their
+// footprint has spread enough, usually at the first diffuse bounce, and take the light reflected
+// there from a small network trained every frame on a few longer paths. Far less noise and fewer
+// rays per pixel than following the path, at some bias; it replaces ReSTIR GI while on.
+inline constexpr u32 kNrcOff = 0;
+inline constexpr u32 kNrcRealTime = 1; // only with accumulate=false
+inline constexpr u32 kNrcAlways = 2;   // also when accumulating (e.g. to measure its bias)
+
+struct RadianceCacheSettings
+{
+    u32 mode = kNrcOff;
+    // A path ends where its footprint's spread exceeds this times the primary vertex's (paper: 0.01).
+    float spread = 0.01f;
+    u32 trainingPaths = 1u << 15; // per frame, one per tile of pixels
+    u32 steps = 4;                // optimizer steps per frame, over the training paths
+    float learningRate = 1e-2f;
+    u32 unbiasedPeriod = 16; // 1 in this many training paths is never ended by the cache
+    u32 tableLog2 = 16;      // hash grid entries per level, log2 (a change starts a new network)
+    // On the GPU's matrix units (Shader Model 6.10 linear algebra) where the device has them; off:
+    // the float32 kernels everywhere.
+    bool linearAlgebra = true;
+
+    bool operator==(const RadianceCacheSettings&) const = default;
+};
+
 struct PathTracerSettings
 {
     u32 width = 1920;
@@ -71,6 +98,7 @@ struct PathTracerSettings
     // lost). Thick clouds scatter light hundreds of times before it leaves them.
     u32 cloudEvents = 256;
     ReSTIRSettings restir;
+    RadianceCacheSettings nrc;
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap
@@ -82,6 +110,7 @@ struct PathTracerSettings
 };
 
 class ReSTIR;
+class RadianceCache;
 
 class PathTracer
 {
@@ -114,6 +143,11 @@ public:
     // Whether the last traced frame's direct / indirect light came from ReSTIR DI / GI.
     bool UsesReSTIRDI() const { return mUsedReSTIRDI; }
     bool UsesReSTIRGI() const { return mUsedReSTIRGI; }
+    // Whether the last traced frame's paths ended in the neural radiance cache, and whether it ran
+    // on the matrix units (Shader Model 6.10 linear algebra).
+    bool UsesRadianceCache() const { return mUsedNrc; }
+    bool RadianceCacheUsesLinearAlgebra() const;
+    u32 GetRadianceCacheSteps() const;
     const PathTracerSettings& GetSettings() const { return mSettings; }
     // Settings other than width/height may change between frames.
     PathTracerSettings& MutableSettings() { return mSettings; }
@@ -128,6 +162,10 @@ private:
     rhi::PipelineHandle mTracePipeline;
     rhi::PipelineHandle mTracePipelineSer; // PathTracerSer.lib (SM 6.9), when the device reorders
     rhi::PipelineHandle mTracePipelineGi;  // PathTracerGi.lib: records ReSTIR GI's candidates
+    // PathTracerNrc.cs (paths end in the cache, linear algebra) and PathTracerNrcPortable.cs (float32),
+    // created the first time the cache runs.
+    renderer::LazyComputePipeline mTraceNrc;
+    renderer::LazyComputePipeline mTraceNrcPortable;
     rhi::PipelineHandle mResolvePipeline;
     rhi::TextureHandle mAccumulation;
     rhi::Access mAccumulationAccess = rhi::Access::None;
@@ -135,8 +173,10 @@ private:
     rhi::BufferHandle mFrameRing; // StructuredBuffer<FrameData>, framesInFlight + 1 elements
     u32 mFrameRingSize = 0;
     std::unique_ptr<ReSTIR> mReSTIR;
+    std::unique_ptr<RadianceCache> mRadianceCache;
     bool mUsedReSTIRDI = false;
     bool mUsedReSTIRGI = false;
+    bool mUsedNrc = false;
 
     u32 mAccumulatedSamples = 0;
     u32 mFrameIndex = 0;
