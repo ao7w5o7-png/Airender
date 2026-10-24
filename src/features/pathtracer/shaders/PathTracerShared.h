@@ -2,12 +2,16 @@
 #ifndef AIR_PATH_TRACER_SHARED_H
 #define AIR_PATH_TRACER_SHARED_H
 
+#include "air/renderer/shader/CloudShared.h"
 #include "air/renderer/shader/HlslCompat.h"
+#include "air/renderer/shader/SkyShared.h"
 
 #ifdef __cplusplus
 namespace air::pt::gpu
 {
 using namespace air::hlsl;
+using air::gpu::CloudData;
+using air::gpu::SkyData;
 #endif
 
 // Debug views (pathtracer.debugView). Everything but kDebugNone replaces the radiance.
@@ -28,6 +32,13 @@ AIR_CONST uint kFlagReset = 2u;        // discard the accumulated samples
 AIR_CONST uint kFlagGlobalJitter = 4u; // every sample uses FrameData.jitter (for temporal denoisers)
 AIR_CONST uint kFlagGuides = 8u;       // write the denoiser guide textures
 AIR_CONST uint kFlagNoNee = 16u;       // BSDF sampling only (reference for the MIS tests)
+// The direct light at the first surface comes from ReSTIR DI (ReSTIRDI.hlsli): no NEE there, no
+// emission found by its BSDF sample; the first sample's hit goes to TraceConstants::primaryHits.
+AIR_CONST uint kFlagReSTIR = 32u;
+// The light of paths with two or more bounces comes from ReSTIR GI (ReSTIRGI.hlsli); the first
+// sample's candidate goes to TraceConstants::giReservoirs.
+AIR_CONST uint kFlagReSTIRGI = 64u;
+AIR_CONST uint kFlagRecordGi = 128u; // set by the kernel on the sample that records the GI candidate
 
 // Result of TraceClosest() in the integrator (not stored in buffers).
 struct HitInfo
@@ -53,7 +64,8 @@ struct FrameData
 {
     CameraData camera;
     CameraData previousCamera; // for motion vectors
-    float4 environment;        // rgb radiance (nits), w = exposure scale applied by Resolve
+    SkyData sky;               // sky radiance (a table or uniform) and the sun; uniform in the furnace
+    CloudData clouds;          // the cloud layer and its resources; enabled == 0: none
     float2 jitter;             // sub-pixel offset in [-0.5, 0.5) for kFlagGlobalJitter
     uint frameIndex;
     uint flags;
@@ -63,8 +75,12 @@ struct FrameData
     uint maxBounces;
     uint lightCount;
     uint debugView;
-    float debugScale; // normalizes depth / intersection debug views
-    uint pad0;
+    float debugScale;      // normalizes depth / intersection debug views
+    uint lightTreeBounces; // NEE uses the light tree at path vertices below this, power beyond
+    float exposure;        // radiance -> scene-linear, applied by Resolve
+    uint cloudEvents;      // scattering events a walk through the clouds may take
+    uint pad1;
+    uint pad2;
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -84,8 +100,10 @@ struct TraceConstants
     uint viewDepth;       // RWTexture2D<float>
     uint motionVectors;   // RWTexture2D<float2>
     uint instanceLights;  // StructuredBuffer<uint>: first light-list entry per instance
-    uint pad1;
-    uint pad2;
+    uint lightTree;       // StructuredBuffer<LightTreeNode>
+    uint primaryHits;     // RWStructuredBuffer<PrimaryHit>, written with kFlagReSTIR or kFlagReSTIRGI
+    uint giReservoirs;    // RWStructuredBuffer<GiReservoir>, written with kFlagReSTIRGI
+    uint skyTable;        // StructuredBuffer<float>: the sky radiance table (SkyShared.h)
 };
 
 struct ResolveConstants
@@ -98,7 +116,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 192);
+static_assert(sizeof(FrameData) == 352);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

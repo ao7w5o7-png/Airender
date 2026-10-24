@@ -1,15 +1,18 @@
-// GPU path tracer kernel: ray generation + closest hit, bindless resources. Compiled twice:
-// PathTracer.hlsl (DXR 1.1, SM 6.6, every RTX GPU) and PathTracerSer.hlsl (AIR_PT_SER: DXR 1.2 shader
-// execution reordering, SM 6.9); PathTracer.cpp picks one at runtime. The estimator itself is
-// Integrator.hlsli, shared with the CPU reference renderer. This file supplies the platform hooks
-// (TraceRay for closest hits, inline RayQuery for shadow rays) and writes the accumulation buffer,
-// denoiser guides and debug views.
+// GPU path tracer kernel: ray generation + closest hit, bindless resources. Compiled three times:
+// PathTracer.hlsl (DXR 1.1, SM 6.6, every RTX GPU), PathTracerSer.hlsl (AIR_PT_SER: DXR 1.2 shader
+// execution reordering, SM 6.9) and PathTracerGi.hlsl (AIR_PT_RESTIR_GI: records ReSTIR GI's
+// candidates); PathTracer.cpp picks one at runtime. The estimator itself is
+// Integrator.hlsli, shared with the CPU reference renderer. This file supplies TraceClosest (an inline
+// ray query; SceneAccess.hlsli has the other hooks) and writes the accumulation buffer, denoiser
+// guides, debug views and, for ReSTIR, the primary hits and GI reservoirs. The miss and closest-hit
+// shaders only serve the SER variant's hit objects; the pipeline keeps them in every variant.
 #ifndef AIR_PT_SER
 #define AIR_PT_SER 0
 #endif
 
 #include "air/renderer/shader/SceneShared.h"
 #include "PathTracerShared.h"
+#include "ReSTIRShared.h"
 
 [[vk::push_constant]] ConstantBuffer<TraceConstants> g : register(b0);
 
@@ -25,48 +28,11 @@ struct [raypayload] Payload
 
 // --- Integrator hooks ----------------------------------------------------------------------------
 
-float BsdfLutLoad(uint index)
-{
-    StructuredBuffer<float> lut = ResourceDescriptorHeap[g.bsdfLut];
-    return lut[index];
-}
+#include "SceneAccess.hlsli"
 
-InstanceData LoadInstance(uint instance)
-{
-    StructuredBuffer<InstanceData> instances = ResourceDescriptorHeap[g.instances];
-    return instances[instance];
-}
-
-uint LoadInstanceLight(uint instance)
-{
-    StructuredBuffer<uint> instanceLights = ResourceDescriptorHeap[g.instanceLights];
-    return instanceLights[instance];
-}
-
-uint LoadIndex(InstanceData instance, uint index)
-{
-    StructuredBuffer<uint> indices = ResourceDescriptorHeap[NonUniformResourceIndex(instance.indexBuffer)];
-    return indices[index];
-}
-
-Vertex LoadVertex(InstanceData instance, uint index)
-{
-    StructuredBuffer<Vertex> vertices = ResourceDescriptorHeap[NonUniformResourceIndex(instance.vertexBuffer)];
-    return vertices[index];
-}
-
-MaterialData LoadMaterial(uint material)
-{
-    StructuredBuffer<MaterialData> materials = ResourceDescriptorHeap[g.materials];
-    return materials[material];
-}
-
-LightTriangle LoadLight(uint light)
-{
-    StructuredBuffer<LightTriangle> lights = ResourceDescriptorHeap[g.lights];
-    return lights[light];
-}
-
+// Closest hits come from an inline ray query: TraceRay into the closest-hit shader measured 19-29%
+// slower on every test scene (it saves the megakernel's live state around each call), and twice as
+// slow in the ReSTIR GI variant, whose state is larger. Only the SER variant traces into hit objects.
 HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
 {
     RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
@@ -75,13 +41,13 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     ray.Direction = direction;
     ray.TMin = 0.0f;
     ray.TMax = 1e30f;
+    HitInfo hit;
+#if AIR_PT_SER
     Payload payload;
     payload.t = -1.0f;
     payload.instance = 0;
     payload.primitive = 0;
     payload.barycentrics = float2(0.0f, 0.0f);
-    HitInfo hit;
-#if AIR_PT_SER
     // Trace into a hit object, regroup the threads by the instance they hit (misses together), then
     // read the hit straight from the object: no closest-hit invocation. Bounce rays scatter in all
     // directions, so neighbouring threads shade unrelated materials; after reordering a warp mostly
@@ -100,28 +66,16 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     hitObject.GetAttributes(attributes);
     hit.barycentrics = attributes.barycentrics;
 #else
-    TraceRay(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 1, 0, ray, payload);
-    hit.hit = payload.t >= 0.0f;
-    hit.t = payload.t;
-    hit.instance = payload.instance;
-    hit.primitive = payload.primitive;
-    hit.barycentrics = payload.barycentrics;
-#endif
-    return hit;
-}
-
-bool TraceVisible(float3 origin, float3 direction, float tMax)
-{
-    RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
-    RayDesc ray;
-    ray.Origin = origin;
-    ray.Direction = direction;
-    ray.TMin = 0.0f;
-    ray.TMax = tMax;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
     query.Proceed();
-    return query.CommittedStatus() == COMMITTED_NOTHING;
+    hit.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    hit.t = hit.hit ? query.CommittedRayT() : -1.0f;
+    hit.instance = hit.hit ? query.CommittedInstanceID() : 0u;
+    hit.primitive = hit.hit ? query.CommittedPrimitiveIndex() : 0u;
+    hit.barycentrics = hit.hit ? query.CommittedTriangleBarycentrics() : float2(0.0f, 0.0f);
+#endif
+    return hit;
 }
 
 #include "Integrator.hlsli"
@@ -178,10 +132,13 @@ void RayGen()
     float2 size = float2(f.width, f.height);
 
     IntegratorParams params;
-    params.environment = f.environment.rgb;
+    params.sky = f.sky;
+    params.clouds = f.clouds;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
+    params.lightTreeBounces = f.lightTreeBounces;
+    params.cloudEvents = f.cloudEvents;
 
     uint seed = Pcg(pixel.x + Pcg(pixel.y + Pcg(f.frameIndex)));
     float3 sum = 0.0f;
@@ -189,10 +146,12 @@ void RayGen()
     float2 firstPixel = float2(pixel) + 0.5f;
     for (uint i = 0; i < f.samplesPerPixel; ++i)
     {
-        float2 jitter = (f.flags & kFlagGlobalJitter) != 0u ? f.jitter + 0.5f : float2(Rand(seed), Rand(seed));
+        float2 jitter = (f.flags & kFlagGlobalJitter) != 0u ? f.jitter + 0.5f : Rand2(seed);
         float2 pixelPos = float2(pixel) + jitter;
         float3 direction = CameraRayDirection(f.camera, pixelPos, size);
+        params.flags = i == 0u ? f.flags | kFlagRecordGi : f.flags; // ReSTIR GI takes the first sample's
         PathSample s = TracePath(f.camera.position.xyz, direction, params, seed);
+        AddAerialPerspective(params, direction, s);
         float intersections = 0.0f;
         if (f.debugView == kDebugIntersections)
         {
@@ -209,6 +168,39 @@ void RayGen()
     RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
     float4 previous = (f.flags & kFlagReset) != 0u ? float4(0.0f, 0.0f, 0.0f, 0.0f) : accumulation[pixel];
     accumulation[pixel] = previous + float4(sum, float(f.samplesPerPixel));
+
+    if ((f.flags & (kFlagReSTIR | kFlagReSTIRGI)) != 0u)
+    {
+        // Every sample left the direct light at its first surface out of `sum`; the ReSTIR passes
+        // add the first sample's, times the sample count, so the average stays unbiased.
+        RWStructuredBuffer<PrimaryHit> primaryHits = ResourceDescriptorHeap[g.primaryHits];
+        PrimaryHit h;
+        h.instance = first.instance;
+        h.primitive = first.primitive;
+        h.barycentrics = first.barycentrics;
+        h.normalAndRoughness =
+            EncodeNormalRoughness(first.hit ? first.normal : float3(0.0f, 0.0f, 1.0f), first.material.roughness);
+        h.distance = first.hitDistance;
+        primaryHits[pixel.y * f.width + pixel.x] = h;
+    }
+#if AIR_PT_RESTIR_GI
+    if ((f.flags & kFlagReSTIRGI) != 0u)
+    {
+        // The first sample's indirect light as ReSTIR GI's initial reservoir (confidence 1).
+        RWStructuredBuffer<GiReservoir> giReservoirs = ResourceDescriptorHeap[g.giReservoirs];
+        GiReservoir r;
+        r.instance = first.gi.valid ? first.gi.instance : kInvalidIndex;
+        r.primitive = first.gi.primitive;
+        r.barycentrics = first.gi.barycentrics;
+        r.direction = first.gi.direction;
+        r.lightPdf = first.gi.lightPdf;
+        r.radianceMis = first.gi.radianceMis;
+        r.weight = first.gi.valid ? first.gi.weight : 0.0f;
+        r.radianceFixed = first.gi.radianceFixed;
+        r.strategyAndConfidence = first.gi.strategy | (1u << 8);
+        giReservoirs[pixel.y * f.width + pixel.x] = r;
+    }
+#endif
 
     if ((f.flags & kFlagGuides) != 0u)
     {

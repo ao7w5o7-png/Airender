@@ -38,7 +38,7 @@ float ExposureScale(float ev100)
 
 gpu::MaterialData Material::ToGpu() const
 {
-    gpu::MaterialData out;
+    gpu::MaterialData out{};
     out.baseColor = baseColor;
     out.roughness = roughness;
     out.metallic = metallic;
@@ -322,6 +322,8 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"many_lights", detail::MakeManyLights},
     {"door", detail::MakeDoor},
     {"terrain", detail::MakeTerrain},
+    {"sunset", detail::MakeSunset},
+    {"cumulus", detail::MakeCumulus},
 };
 
 } // namespace
@@ -346,6 +348,23 @@ std::optional<SceneDesc> MakeBuiltinScene(std::string_view name)
         }
     }
     return std::nullopt;
+}
+
+float HighestPoint(const SceneDesc& desc)
+{
+    float highest = -1e30f;
+    for (const Instance& instance : desc.instances)
+    {
+        if (instance.mesh >= desc.meshes.size())
+        {
+            continue;
+        }
+        for (const gpu::Vertex& v : desc.meshes[instance.mesh].vertices)
+        {
+            highest = std::max(highest, TransformPoint(instance.transform, v.position).y);
+        }
+    }
+    return highest;
 }
 
 std::string Validate(const SceneDesc& desc)
@@ -382,6 +401,24 @@ std::string Validate(const SceneDesc& desc)
     if (desc.instances.empty())
     {
         return "scene has no instances";
+    }
+    const Clouds& clouds = desc.clouds;
+    if (clouds.enabled)
+    {
+        if (!(clouds.top >= clouds.bottom + 100.0f * clouds.scale) || !(clouds.scale > 0.0f) ||
+            !(clouds.coverage >= 0.0f && clouds.coverage <= 1.0f) || !(clouds.extinction > 0.0f) ||
+            !(clouds.albedo >= 0.0f && clouds.albedo <= 1.0f) || !(clouds.dropletDiameter > 0.0f))
+        {
+            return "clouds: need top >= bottom + 100 m * scale, coverage and albedo in [0, 1], extinction, "
+                   "droplet size and scale > 0";
+        }
+        // Only camera rays look for clouds in front of a surface (Integrator.hlsli).
+        const float highest = HighestPoint(desc);
+        if (highest >= clouds.bottom)
+        {
+            return std::format("clouds: their base ({} m) must be above every instance (up to {} m)", clouds.bottom,
+                               highest);
+        }
     }
     return {};
 }

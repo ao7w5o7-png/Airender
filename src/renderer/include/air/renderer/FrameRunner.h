@@ -7,6 +7,7 @@
 #include "air/core/Json.h"
 #include "air/core/Profiler.h"
 #include "air/rdg/RenderGraph.h"
+#include "air/rdg/TransientResourcePool.h"
 #include "air/renderer/RenderFeature.h"
 
 #include <functional>
@@ -27,6 +28,9 @@ struct FrameRunnerDesc
     rhi::Format outputFormat = rhi::Format::RGBA16_FLOAT;
     std::filesystem::path shaderRoot = "shaders"; // features load from shaderRoot/<feature name>
     rdg::RenderGraph::Config graphConfig;
+    // Keep the transient heap and placed resources from frame to frame (rdg::TransientResourcePool);
+    // off: every frame creates and releases them, as a render graph without a pool does.
+    bool poolTransients = true;
     bool captureCommands = false; // keep each frame's command stream in FrameResult
     bool captureGraph = false;    // keep each frame's graph dump in FrameResult
     // GPU timestamps per pass, CPU recording time per pass and a memory snapshot in every
@@ -55,6 +59,7 @@ struct FrameResult
 {
     u64 frameIndex = 0;
     rdg::RenderGraph::Stats graphStats;
+    rdg::TransientResourcePool::Stats transientPool; // after this frame; zero without a pool
     double cpuMilliseconds = 0.0;
     std::string graphText;             // when captureGraph
     std::string graphviz;              // when captureGraph
@@ -115,6 +120,7 @@ private:
     TaskSystem& mTasks;
     FrameRunnerDesc mDesc;
     std::vector<Entry> mFeatures;
+    std::unique_ptr<rdg::TransientResourcePool> mTransientPool; // when FrameRunnerDesc::poolTransients
     rhi::TextureHandle mOutput;
     rhi::Access mOutputAccess = rhi::Access::None;
     u64 mFrameIndex = 0;

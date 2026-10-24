@@ -114,6 +114,9 @@ bool EditorApp::LoadScene(const std::string& name)
     mScene = std::make_unique<renderer::Scene>(mDevice, std::move(*desc));
     mSceneName = name;
     mCamera = mScene->Desc().camera;
+    mSceneTop = renderer::HighestPoint(mScene->Desc());
+    mSkyEdit.reset();
+    mCloudsEdit.reset();
     AIR_LOG(Info, "Editor", "scene '{}': {} triangles, {} instances, {} materials", name, mScene->GetTriangleCount(),
             mScene->Desc().instances.size(), mScene->Desc().materials.size());
     return true;
@@ -869,16 +872,93 @@ void EditorApp::BuildScenePanel()
         mCamera = mScene->Desc().camera;
     }
 
-    ImGui::SeparatorText("Environment");
-    renderer::float3 env = mScene->Desc().environment;
-    float envNits = std::max({env.x, env.y, env.z});
-    renderer::float3 envColor = envNits > 0.0f ? env / envNits : renderer::float3(1.0f);
-    bool envChanged = ImGui::ColorEdit3("Color##env", &envColor.x, ImGuiColorEditFlags_Float);
-    envChanged |=
-        ImGui::DragFloat("Radiance (nits)##env", &envNits, 1.0f, 0.0f, 1e6f, "%.1f", ImGuiSliderFlags_Logarithmic);
-    if (envChanged)
+    ImGui::SeparatorText("Sky");
+    renderer::Sky sky = mSkyEdit.value_or(mScene->Desc().sky);
+    bool apply = ImGui::Checkbox("Physical sky and sun", &sky.physical);
+    ImGui::SetItemTooltip("An Earth-like atmosphere lit by the sun, computed spectrally (docs/architecture.md, "
+                          "section 8.9).\nOff: a uniform environment and no sun.");
+    bool edited = apply;
+    if (sky.physical)
     {
-        mScene->SetEnvironment(envColor * envNits);
+        auto slider = [&](const char* label, float* value, float lo, float hi, const char* format, int flags = 0)
+        {
+            edited |= ImGui::SliderFloat(label, value, lo, hi, format, flags);
+            apply |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        slider("Sun elevation", &sky.sunElevation, -10.0f, 90.0f, "%.1f deg");
+        slider("Sun azimuth", &sky.sunAzimuth, -180.0f, 180.0f, "%.1f deg");
+        slider("Aerosol depth", &sky.aerosolDepth, 0.001f, 2.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Haze optical depth at 550 nm: 0.005 pristine, 0.05 clear, 0.3 and up hazy.");
+        slider("Sun radius", &sky.sunAngularRadius, 0.05f, 5.0f, "%.3f deg", ImGuiSliderFlags_Logarithmic);
+        slider("Ground albedo", &sky.groundAlbedo, 0.0f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Of the planet seen below the horizon, beyond the scene.");
+    }
+    else
+    {
+        renderer::float3 env = mScene->Desc().environment;
+        float envNits = std::max({env.x, env.y, env.z});
+        renderer::float3 envColor = envNits > 0.0f ? env / envNits : renderer::float3(1.0f);
+        bool envChanged = ImGui::ColorEdit3("Color##env", &envColor.x, ImGuiColorEditFlags_Float);
+        envChanged |=
+            ImGui::DragFloat("Radiance (nits)##env", &envNits, 1.0f, 0.0f, 1e6f, "%.1f", ImGuiSliderFlags_Logarithmic);
+        if (envChanged)
+        {
+            mScene->SetEnvironment(envColor * envNits);
+        }
+    }
+    if (apply)
+    {
+        mScene->SetSky(sky);
+        mSkyEdit.reset();
+    }
+    else if (edited)
+    {
+        mSkyEdit = sky;
+    }
+
+    ImGui::SeparatorText("Clouds");
+    renderer::Clouds clouds = mCloudsEdit.value_or(mScene->Desc().clouds);
+    bool applyClouds = ImGui::Checkbox("Volumetric clouds", &clouds.enabled);
+    ImGui::SetItemTooltip("A layer of cumulus above the scene, path traced through (docs/architecture.md, "
+                          "section 8.10).\nThe physical sky's sun lights them.");
+    bool cloudsEdited = applyClouds;
+    if (clouds.enabled)
+    {
+        auto slider = [&](const char* label, float* value, float lo, float hi, const char* format, int flags = 0)
+        {
+            cloudsEdited |= ImGui::SliderFloat(label, value, lo, hi, format, flags);
+            applyClouds |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        slider("Coverage", &clouds.coverage, 0.0f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Fraction of the sky under the clouds' outlines.");
+        slider("Cloud base", &clouds.bottom, std::max(mSceneTop + 1.0f, 50.0f), 6000.0f, "%.0f m");
+        slider("Cloud tops", &clouds.top, clouds.bottom + 100.0f, 12000.0f, "%.0f m");
+        slider("Extinction", &clouds.extinction, 0.005f, 0.3f, "%.3f /m", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Per metre where the density is 1. Cumulus: 0.02 to 0.1 (a mean free path of 10 to "
+                              "50 m).\nDenser clouds are whiter, darker below, and slower to render.");
+        slider("Droplet size", &clouds.dropletDiameter, 5.0f, 50.0f, "%.1f um");
+        ImGui::SetItemTooltip("Effective droplet diameter: shapes the phase function (Jendersie and d'Eon 2023).");
+        slider("Shape scale", &clouds.scale, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        int seed = int(clouds.seed);
+        cloudsEdited |= ImGui::DragInt("Seed##clouds", &seed, 0.2f, 0, 1 << 20);
+        applyClouds |= ImGui::IsItemDeactivatedAfterEdit();
+        clouds.seed = u32(std::max(seed, 0));
+        applyClouds |= ImGui::Checkbox("Exact phase function", &clouds.exactPhase);
+        ImGui::SetItemTooltip("Keep the diffraction peak as scattering (the reference, much noisier in sunlit "
+                              "clouds).\nOff: it counts as unscattered light (delta-M scaling), which only changes "
+                              "the image within a degree or so of the sun.");
+    }
+    // A valid layer: above the scene, at least 100 m (times the shape scale) thick.
+    clouds.bottom = std::max(clouds.bottom, mSceneTop + 1.0f);
+    clouds.top = std::max(clouds.top, clouds.bottom + 100.0f * clouds.scale);
+    if (applyClouds)
+    {
+        mScene->SetClouds(clouds);
+        mCloudsEdit.reset();
+    }
+    else if (cloudsEdited)
+    {
+        mCloudsEdit = clouds;
     }
 
     ImGui::SeparatorText("Materials");
@@ -1091,6 +1171,15 @@ void EditorApp::BuildDebugPanel()
         ImGui::SameLine();
         ImGui::TextDisabled("%u async passes, %u submissions, %u queue waits", stats.asyncComputePassCount,
                             stats.submissionCount, stats.queueWaitCount);
+        const auto& pool = mLastResult.transientPool;
+        ImGui::Text("Transients: %u in %s (%s unaliased); pool %u heaps, %s, %u resources",
+                    stats.transientResourceCount, renderer::FormatBytes(stats.transientHeapSize).c_str(),
+                    renderer::FormatBytes(stats.transientBytesUnaliased).c_str(), pool.heaps,
+                    renderer::FormatBytes(pool.heapBytes).c_str(), pool.resources);
+        ImGui::SetItemTooltip("Transient memory comes from a pool kept across frames: this frame created %u heaps and "
+                              "%u resources and reused %u resources of earlier frames.",
+                              stats.transientHeapsCreated, stats.transientResourcesCreated,
+                              stats.transientResourcesReused);
     }
     ImGui::Text("Validation errors this frame: %zu", mLastResult.validationErrors.size());
     ImGui::End();

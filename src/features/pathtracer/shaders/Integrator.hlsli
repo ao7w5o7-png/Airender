@@ -11,25 +11,57 @@
 //   Vertex        LoadVertex(InstanceData instance, uint index)
 //   MaterialData  LoadMaterial(uint material)
 //   LightTriangle LoadLight(uint light)
+//   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
+//   float3        SkyTableLoad(uint texel)            the sky radiance table (SkyLookup.hlsli)
+//   float4        AerialInscatterSample(SkyData sky, float3 uvw), AerialTransmittanceSample(...)
+//                                                     the aerial perspective tables (SkyLookup.hlsli)
+//   float         CloudBaseSample(CloudData c, float3 uvw), CloudDetailSample(...),
+//   float         CloudMajorantLoad(CloudData c, uint cell)   the clouds (CloudLookup.hlsli)
 // HitInfo, CameraData and the kFlag* constants come from PathTracerShared.h.
 //
 // Estimator: emitted radiance is gathered at path vertices 1 .. maxBounces + 1 (vertex 1 is the
-// first hit). Every vertex below the limit samples one emissive triangle (power-proportional)
-// and the BSDF; both strategies are weighted with the power heuristic. The environment is only
-// reached by BSDF sampling. Russian roulette starts after the third bounce and is unbiased.
+// first hit). Every vertex below the limit samples one emissive triangle and the BSDF; both
+// strategies are weighted with the power heuristic. The first lightTreeBounces vertices choose the
+// triangle with the light tree (power, distance and orientation as seen from the vertex: far fewer
+// wasted samples among many lights, but a walk of ~log2(lights) dependent loads); deeper vertices,
+// whose light reaches the image after a bounce, choose by power alone in O(1). The sky (a table, or
+// uniform) is only reached by BSDF sampling; the sun's disc is a light of its own, sampled at every
+// vertex and weighed against BSDF samples that reach it, like the triangles. Russian roulette
+// starts after the third bounce and is unbiased.
+// Rays that leave the geometry cross the clouds (CloudLookup.hlsli) on their way to the sky: a random
+// walk through them gathers the light they scatter (EscapeRadiance), and the sun's light reaching a
+// surface is dimmed by their transmittance. The clouds lie above all geometry, so the only other
+// segment that can meet them is a camera ray from above their base.
+// The air (aerial perspective, SkyLookup.hlsli) dims and adds to what a camera ray sees on its
+// surface (AddAerialPerspective, applied by the caller) and what any ray sees on the clouds; the sky
+// table includes it already. Segments between surfaces of the scene, metres to hundreds of metres
+// long, are taken as clear.
+// With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
+// entirely: ReSTIR DI (ReSTIRDI.hlsli) estimates it.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
 #define AIR_PT_INTEGRATOR_HLSLI
 
 #include "Bsdf.hlsli"
 #include "Sampling.hlsli"
+#include "air/renderer/shader/CloudLookup.hlsli"
+#include "air/renderer/shader/SkyLookup.hlsli"
+
+// ReSTIR GI's candidate recording (kFlagReSTIRGI) is compiled only where it is used (PathTracerGi.hlsl):
+// its state halves the speed of the plain kernel through register pressure.
+#ifndef AIR_PT_RESTIR_GI
+#define AIR_PT_RESTIR_GI 0
+#endif
 
 struct IntegratorParams
 {
-    float3 environment; // radiance, nits
+    SkyData sky;      // the sky's radiance (a table or uniform) and the sun's disc
+    CloudData clouds; // enabled == 0: none
     uint lightCount;
     uint maxBounces;
-    uint flags; // kFlagFurnace, kFlagNoNee
+    uint flags;            // kFlagFurnace, kFlagNoNee
+    uint lightTreeBounces; // vertices 0 .. lightTreeBounces - 1 choose lights with the light tree
+    uint cloudEvents;      // scattering events a walk through the clouds may take
 };
 
 struct Surface
@@ -40,6 +72,28 @@ struct Surface
     float3 emission;        // radiance towards the incoming ray (0 when hit from the back)
     uint lightIndex;        // this triangle in the light list; kInvalidIndex when it does not emit
     BsdfMaterial material;
+};
+
+// The indirect light of a path, as ReSTIR GI (ReSTIRGI.hlsli) resamples it: the part of the path
+// beyond its second vertex x2 (the hit of the first surface's BSDF ray). From x2 it goes on in
+// `direction`, either to the light NEE chose there (strategy 0) or along x2's BSDF sample
+// (strategy 1). The radiance arriving at x2 along it is radianceMis (emission at the end of that
+// segment, weighted against the other technique by the power heuristic, whose pdfs depend on the
+// direction x2 is seen from) plus radianceFixed (everything further). One of the two candidates is
+// chosen by RIS; `weight` is its unbiased contribution weight W in area measure at x2 times solid
+// angle at x2.
+struct GiPath
+{
+    bool valid;
+    uint instance; // x2
+    uint primitive;
+    float2 barycentrics;
+    float3 direction;
+    uint strategy;
+    float3 radianceMis;
+    float3 radianceFixed;
+    float lightPdf; // solid angle pdf of NEE at x2 choosing the light at the end of `direction`; 0: none
+    float weight;
 };
 
 struct PathSample
@@ -55,6 +109,11 @@ struct PathSample
     float3 diffuseAlbedo;
     float3 specularAlbedo;
     uint bounces; // surfaces the path scattered at
+    // The first hit as TraceClosest reported it (instance kInvalidIndex: none), for ReSTIR.
+    uint instance;
+    uint primitive;
+    float2 barycentrics;
+    GiPath gi; // with kFlagRecordGi
 };
 
 float3 Xyz(float4 v)
@@ -115,10 +174,180 @@ LightTriangle SampleLight(float uSelect, float uAlias, uint count)
     return light;
 }
 
-// Solid angle pdf of NEE choosing the point at distance `dist` on `light`, seen under cosLight.
-float LightPdf(LightTriangle light, float dist, float cosLight)
+// The light-list index SampleLight(uSelect, uAlias, count) chooses.
+uint SampleLightIndex(float uSelect, float uAlias, uint count)
 {
-    return cosLight > 0.0f ? light.probability * dist * dist / (light.area * cosLight) : 0.0f;
+    uint i = min(uint(uSelect * float(count)), count - 1u);
+    LightTriangle light = LoadLight(i);
+    return uAlias >= light.aliasThreshold ? light.alias : i;
+}
+
+// Solid angle pdf of NEE choosing, with probability `pmf`, a light of `area` and the point on it at
+// distance `dist`, seen under cosLight.
+float LightPdf(float pmf, float area, float dist, float cosLight)
+{
+    return cosLight > 0.0f ? pmf * dist * dist / (area * cosLight) : 0.0f;
+}
+
+// --- Light tree ----------------------------------------------------------------------------------
+
+float SafeSqrt(float v)
+{
+    return sqrt(max(v, 0.0f));
+}
+
+// cos(a - b) with the angle difference clamped at 0, from the sines and cosines of a and b.
+float CosSubClamped(float sinA, float cosA, float sinB, float cosB)
+{
+    return cosA > cosB ? 1.0f : cosA * cosB + sinA * sinB;
+}
+
+float SinSubClamped(float sinA, float cosA, float sinB, float cosB)
+{
+    return cosA > cosB ? 0.0f : sinA * cosB - cosA * sinB;
+}
+
+// Importance of the emitters below `node` for point p with normal n (n = 0: no receiver cosine):
+// power x a bound of the emitter cosine towards p x a bound of the receiver cosine / distance^2.
+// The angles widen by the cone under which p sees the node's box; the distance is clamped so the
+// importance stays finite inside the box. Zero only when no emitter below can light p: none faces
+// it, or (the BSDFs only reflect) all are below its horizon.
+float LightNodeImportance(LightTreeNode node, float3 p, float3 n)
+{
+    float3 center = (node.boundsMin + node.boundsMax) * 0.5f;
+    float3 diagonal = node.boundsMax - node.boundsMin;
+    float3 toPoint = p - center;
+    // Emitters sharing one normal (a row of ceiling panels): exact test of p against the side of the
+    // box they emit from, which the bounding sphere below would blur for a long, flat group.
+    if (node.cosThetaO >= 0.9999f && dot(node.axis, toPoint) + dot(abs(node.axis), diagonal * 0.5f) <= 0.0f)
+    {
+        return 0.0f;
+    }
+    float distance2 = dot(toPoint, toPoint);
+    float3 wi = toPoint * rsqrt(max(distance2, 1e-30f));
+    float cosThetaW = dot(node.axis, wi);
+    float sinThetaW = SafeSqrt(1.0f - cosThetaW * cosThetaW);
+    // Directions from p into the box's bounding sphere: all of them from inside it.
+    float radius2 = dot(diagonal, diagonal) * 0.25f;
+    float cosThetaB = distance2 <= radius2 ? -1.0f : SafeSqrt(1.0f - radius2 / distance2);
+    float sinThetaB = SafeSqrt(1.0f - cosThetaB * cosThetaB);
+    float sinThetaO = SafeSqrt(1.0f - node.cosThetaO * node.cosThetaO);
+    float cosThetaX = CosSubClamped(sinThetaW, cosThetaW, sinThetaO, node.cosThetaO);
+    float sinThetaX = SinSubClamped(sinThetaW, cosThetaW, sinThetaO, node.cosThetaO);
+    float cosThetaP = CosSubClamped(sinThetaX, cosThetaX, sinThetaB, cosThetaB);
+    if (cosThetaP <= node.cosThetaE)
+    {
+        return 0.0f;
+    }
+    float importance = node.power * cosThetaP / max(distance2, length(diagonal) * 0.5f);
+    if (any(n))
+    {
+        // Exact horizon test on the box (its support along n): a long, flat group of lights below
+        // the tangent plane has a bounding sphere reaching far above it, which would keep it.
+        if (dot(n, center - p) + dot(abs(n), diagonal * 0.5f) <= 0.0f)
+        {
+            return 0.0f;
+        }
+        float cosThetaI = dot(-wi, n); // towards the node
+        float sinThetaI = SafeSqrt(1.0f - cosThetaI * cosThetaI);
+        importance *= max(CosSubClamped(sinThetaI, cosThetaI, sinThetaB, cosThetaB), 0.0f);
+    }
+    return max(importance, 0.0f);
+}
+
+struct LightChoice
+{
+    uint light; // kInvalidIndex: no light can reach the point
+    float pmf;
+};
+
+// Walks the light tree from the root, choosing each child by its importance at p (one uniform,
+// rescaled at every level).
+LightChoice SampleLightTree(float3 p, float3 n, float u)
+{
+    LightChoice choice;
+    choice.light = kInvalidIndex;
+    choice.pmf = 0.0f;
+    uint index = 0u;
+    LightTreeNode node = LoadLightNode(0u);
+    float pmf = 1.0f;
+    for (uint depth = 0u; depth <= 64u; ++depth)
+    {
+        if (node.isLeaf != 0u)
+        {
+            if (index > 0u || LightNodeImportance(node, p, n) > 0.0f)
+            {
+                choice.light = node.child;
+                choice.pmf = pmf;
+            }
+            return choice;
+        }
+        LightTreeNode first = LoadLightNode(index + 1u);
+        LightTreeNode second = LoadLightNode(node.child);
+        float i0 = LightNodeImportance(first, p, n);
+        float i1 = LightNodeImportance(second, p, n);
+        if (i0 + i1 <= 0.0f)
+        {
+            return choice;
+        }
+        float p0 = i0 / (i0 + i1);
+        if (u < p0)
+        {
+            u = min(u / p0, 0.99999994f);
+            pmf *= p0;
+            index = index + 1u;
+            node = first;
+        }
+        else
+        {
+            u = min((u - p0) / (1.0f - p0), 0.99999994f);
+            pmf *= 1.0f - p0;
+            index = node.child;
+            node = second;
+        }
+    }
+    return choice;
+}
+
+// The probability SampleLightTree(p, n, u) chooses `light`: follows its trail from the root.
+float LightTreePmf(uint light, float3 p, float3 n)
+{
+    LightTriangle l = LoadLight(light);
+    if (l.treeDepth == kInvalidIndex)
+    {
+        return 0.0f;
+    }
+    uint index = 0u;
+    LightTreeNode node = LoadLightNode(0u);
+    float pmf = 1.0f;
+    for (uint depth = 0u; depth < l.treeDepth; ++depth)
+    {
+        LightTreeNode first = LoadLightNode(index + 1u);
+        LightTreeNode second = LoadLightNode(node.child);
+        float i0 = LightNodeImportance(first, p, n);
+        float i1 = LightNodeImportance(second, p, n);
+        if (i0 + i1 <= 0.0f)
+        {
+            return 0.0f;
+        }
+        uint bit = depth < 32u ? (l.treeTrailLow >> depth) & 1u : (l.treeTrailHigh >> (depth - 32u)) & 1u;
+        pmf *= (bit != 0u ? i1 : i0) / (i0 + i1);
+        if (bit != 0u) // (HLSL has no conditional operator on structs)
+        {
+            index = node.child;
+            node = second;
+        }
+        else
+        {
+            index = index + 1u;
+            node = first;
+        }
+    }
+    if (l.treeDepth == 0u && LightNodeImportance(node, p, n) <= 0.0f)
+    {
+        return 0.0f; // the only light, facing away (sampling finds nothing either)
+    }
+    return pmf;
 }
 
 // --- Surfaces ------------------------------------------------------------------------------------
@@ -164,6 +393,115 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
     return s;
 }
 
+// --- Clouds --------------------------------------------------------------------------------------
+
+// Radiance arriving at `origin` along `direction` from the clouds and the sky beyond them, for a ray
+// that meets no surface before tMax (1e30: none at all). A random walk by delta tracking: at every
+// scattering event, next event estimation of the sun (its transmittance by ratio tracking) weighed
+// by the power heuristic against phase sampling, which continues the walk. A walk that leaves the
+// layer downwards sees the ground of the sky table: light the scene's own geometry would reflect
+// back up into the clouds is not traced. `sun` is the disc seen straight through (the caller weighs
+// it against its sun NEE); `rest` is everything else, the air in front of the clouds included.
+// `surface`: the ray reached its surface at tMax without meeting the clouds, and nothing else was
+// gathered.
+struct Escape
+{
+    float3 sun;
+    float3 rest;
+    bool surface;
+};
+
+Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, float tMax, AIR_INOUT(uint) seed)
+{
+    Escape escape;
+    escape.sun = float3(0.0f, 0.0f, 0.0f);
+    escape.rest = float3(0.0f, 0.0f, 0.0f);
+    escape.surface = false;
+    CloudData c = params.clouds;
+    float albedo = (params.flags & kFlagFurnace) != 0u ? 1.0f : c.albedo;
+    bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
+    float sunPdf = sunNee ? 1.0f / SunSolidAngle(params.sky) : 0.0f;
+    float throughput = 1.0f;
+    float phasePdf = 0.0f; // of the phase sample that produced `d`
+    float3 p = origin;
+    float3 d = direction;
+    Aerial air; // between the origin and the first collision
+    air.inscatter = float3(0.0f, 0.0f, 0.0f);
+    air.transmittance = float3(1.0f, 1.0f, 1.0f);
+    for (uint event = 0u; event <= params.cloudEvents; ++event)
+    {
+        float t = 0.0f;
+        if (!CloudCollision(c, p, d, event == 0u ? tMax : 1e30f, seed, t))
+        {
+            if (event == 0u && tMax < 1e30f)
+            {
+                escape.surface = true;
+                break;
+            }
+            float3 sun = float3(0.0f, 0.0f, 0.0f);
+            if (HasSun(params.sky) && dot(d, params.sky.sunDirection) >= params.sky.sunCosRadius)
+            {
+                sun = params.sky.sunRadiance;
+            }
+            float3 sky = SkyRadiance(params.sky, d);
+            if (event == 0u)
+            {
+                escape.sun = sun;
+                escape.rest = sky;
+            }
+            else
+            {
+                escape.rest += (sky + sun * (sunNee ? PowerHeuristic(phasePdf, sunPdf) : 1.0f)) * throughput;
+            }
+            break;
+        }
+        if (event == params.cloudEvents)
+        {
+            break; // the walk is too long: its light is lost (rare, see docs/architecture.md §8.10)
+        }
+        if (event == 0u)
+        {
+            air = AerialPerspective(params.sky, direction, t);
+        }
+        p = p + d * t;
+        throughput *= albedo;
+        if (sunNee)
+        {
+            float3 wi = SampleSunDirection(params.sky, Rand2(seed));
+            float phase = CloudPhase(c, dot(d, wi));
+            float transmittance = CloudTransmittance(c, p, wi, 1e30f, seed);
+            float weight = PowerHeuristic(sunPdf, phase);
+            escape.rest += params.sky.sunRadiance * (throughput * transmittance * phase * weight / sunPdf);
+        }
+        float3 u = Rand3(seed);
+        float3 next = SampleCloudPhase(c, d, u);
+        phasePdf = CloudPhase(c, dot(d, next));
+        d = next;
+        if (throughput < 0.25f)
+        {
+            if (Rand(seed) >= throughput * 4.0f)
+            {
+                break;
+            }
+            throughput = 0.25f;
+        }
+    }
+    escape.rest = air.inscatter + air.transmittance * escape.rest;
+    return escape;
+}
+
+// The air between the camera and the surface its ray hit: what it adds and what it lets through of
+// the path's light. ReSTIR's light at that surface goes through the same air (ReSTIRCommon.hlsli).
+void AddAerialPerspective(IntegratorParams params, float3 direction, AIR_INOUT(PathSample) s)
+{
+    if (s.hit)
+    {
+        Aerial air = AerialPerspective(params.sky, direction, s.hitDistance);
+        s.radiance = air.inscatter + air.transmittance * s.radiance;
+        s.directRadiance = air.inscatter + air.transmittance * s.directRadiance;
+    }
+}
+
 // --- Path ----------------------------------------------------------------------------------------
 
 PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, AIR_INOUT(uint) seed)
@@ -181,22 +519,101 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.diffuseAlbedo = float3(0.0f, 0.0f, 0.0f);
     result.specularAlbedo = float3(0.0f, 0.0f, 0.0f);
     result.bounces = 0u;
+    result.instance = kInvalidIndex;
+    result.primitive = 0u;
+    result.barycentrics = float2(0.0f, 0.0f);
+    result.gi.valid = false;
+    result.gi.instance = kInvalidIndex;
+    result.gi.primitive = 0u;
+    result.gi.barycentrics = float2(0.0f, 0.0f);
+    result.gi.direction = float3(0.0f, 0.0f, 1.0f);
+    result.gi.strategy = 0u;
+    result.gi.radianceMis = float3(0.0f, 0.0f, 0.0f);
+    result.gi.radianceFixed = float3(0.0f, 0.0f, 0.0f);
+    result.gi.lightPdf = 0.0f;
+    result.gi.weight = 0.0f;
 
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
+    bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
+    float sunPdf = sunNee ? 1.0f / SunSolidAngle(params.sky) : 0.0f; // of sun NEE, per solid angle
+    // ReSTIR DI estimates the whole direct light at the first surface (from emissive triangles): the
+    // path neither samples a light there nor counts the emission its BSDF sample reaches.
+    bool restir = useNee && (params.flags & kFlagReSTIR) != 0u;
+    // ReSTIR GI estimates the light of every path with two or more bounces, so none of it goes into
+    // `radiance`. The sample that records it (kFlagRecordGi) gathers it as candidates at x2: NEE
+    // there (a triangle and the sun, streamed into one by weighted reservoir sampling), and the BSDF
+    // continuation, whose incoming radiance splits into the emission it reaches (triangle or sun) and
+    // the rest. Other samples stop at x2.
+    bool gi = AIR_PT_RESTIR_GI != 0 && (params.flags & kFlagReSTIRGI) != 0u;
+    bool recordGi = gi && (params.flags & kFlagRecordGi) != 0u;
+    float firstBsdfPdf = 0.0f; // solid angle pdf of the ray from the first surface to x2
+    float x2AreaPdf = 0.0f;
+    float3 x2Throughput = float3(0.0f, 0.0f, 0.0f);
+    float neeWeightSum = 0.0f; // candidate 0, NEE at x2: luminances of the contributions streamed
+    float neeWeight = 0.0f;    // of the one kept
+    float3 neeDirection = float3(0.0f, 0.0f, 1.0f);
+    float3 neeRadiance = float3(0.0f, 0.0f, 0.0f);
+    float neeLightPdf = 0.0f;
+    bool continued = false; // candidate 1: the BSDF continuation from x2
+    float3 continuationDirection = float3(0.0f, 0.0f, 1.0f);
+    float continuationPdf = 0.0f;
+    float3 continuationWeight = float3(0.0f, 0.0f, 0.0f);
+    float3 continuationEmission = float3(0.0f, 0.0f, 0.0f);
+    float continuationLightPdf = 0.0f;
+    float3 continuationRest = float3(0.0f, 0.0f, 0.0f);
+    float3 restThroughput = float3(1.0f, 1.0f, 1.0f); // from x3 on, relative to the radiance reaching x2
+
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     float previousBsdfPdf = 0.0f; // solid angle pdf of the BSDF sample that produced `direction`
+    // The vertex that produced `direction` and how NEE chose lights there (for MIS).
+    float3 previousPosition = origin;
+    float3 previousNormal = float3(0.0f, 0.0f, 0.0f);
+    bool previousTree = false;
 
     for (uint bounce = 0u; bounce <= params.maxBounces; ++bounce)
     {
         HitInfo hit = TraceClosest(origin, direction, bounce);
         bool direct = bounce <= 1u;
-        if (!hit.hit)
+        bool beyondX2 = gi && bounce >= 2u; // light found here is the continuation candidate's
+        // Misses go on through the clouds; a ray from above their base (only the camera's) may meet
+        // them before its surface.
+        Escape escape;
+        escape.sun = float3(0.0f, 0.0f, 0.0f);
+        escape.rest = float3(0.0f, 0.0f, 0.0f);
+        escape.surface = true;
+        if (!hit.hit || (params.clouds.enabled != 0u && origin.y > params.clouds.bottom))
         {
-            float3 environment = throughput * params.environment;
-            result.radiance += environment;
-            if (direct)
+            escape = EscapeRadiance(params, origin, direction, hit.hit ? hit.t : 1e30f, seed);
+        }
+        if (!hit.hit || !escape.surface)
+        {
+            // The sky and the clouds, and the sun when the ray reaches it within its disc, weighed
+            // against sun NEE at the vertex the ray left.
+            float3 sky = escape.rest;
+            float3 sun = escape.sun;
+            if (beyondX2 && bounce == 2u)
             {
-                result.directRadiance += environment;
+                // Reached from x2: ReSTIR GI weighs the sun itself (see the emission below).
+                continuationEmission = sun;
+                continuationLightPdf = sunPdf;
+                continuationRest += sky;
+            }
+            else
+            {
+                float sunWeight = bounce > 0u ? PowerHeuristic(previousBsdfPdf, sunPdf) : 1.0f;
+                float3 environment = sky + sun * sunWeight;
+                if (beyondX2)
+                {
+                    continuationRest += restThroughput * environment;
+                }
+                else
+                {
+                    result.radiance += throughput * environment;
+                    if (direct)
+                    {
+                        result.directRadiance += throughput * environment;
+                    }
+                }
             }
             break;
         }
@@ -210,26 +627,53 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             result.material = s.material;
             result.diffuseAlbedo = DiffuseAlbedo(s.material);
             result.specularAlbedo = SpecularAlbedo(s.material, saturate(dot(s.shadingNormal, -direction)));
+            result.instance = hit.instance;
+            result.primitive = hit.primitive;
+            result.barycentrics = hit.barycentrics;
+        }
+        if (bounce == 1u && recordGi)
+        {
+            result.gi.instance = hit.instance;
+            result.gi.primitive = hit.primitive;
+            result.gi.barycentrics = hit.barycentrics;
+            x2AreaPdf = firstBsdfPdf * abs(dot(s.geometricNormal, direction)) / (hit.t * hit.t);
+            x2Throughput = throughput;
         }
 
         // Emission found by the BSDF sample, weighted against NEE having found it.
-        if (any(s.emission))
+        if (any(s.emission) && !(restir && bounce == 1u))
         {
             float weight = 1.0f;
+            float lightPdf = 0.0f;
             if (bounce > 0u && useNee)
             {
                 LightTriangle light = LoadLight(s.lightIndex);
-                float lightPdf = LightPdf(light, hit.t, dot(-direction, s.geometricNormal));
+                float pmf = previousTree ? LightTreePmf(s.lightIndex, previousPosition, previousNormal) : light.probability;
+                lightPdf = LightPdf(pmf, light.area, hit.t, dot(-direction, s.geometricNormal));
                 weight = PowerHeuristic(previousBsdfPdf, lightPdf);
             }
-            float3 emitted = throughput * s.emission * weight;
-            result.radiance += emitted;
-            if (direct)
+            if (beyondX2 && bounce == 2u)
             {
-                result.directRadiance += emitted;
+                // Reached from x2: the MIS weight depends on the direction x2 is seen from, which
+                // ReSTIR GI changes, so it keeps the unweighted emission and the light pdf.
+                continuationEmission = s.emission;
+                continuationLightPdf = lightPdf;
+            }
+            else if (beyondX2)
+            {
+                continuationRest += restThroughput * s.emission * weight;
+            }
+            else
+            {
+                float3 emitted = throughput * s.emission * weight;
+                result.radiance += emitted;
+                if (direct)
+                {
+                    result.directRadiance += emitted;
+                }
             }
         }
-        if (bounce == params.maxBounces)
+        if (bounce == params.maxBounces || (gi && !recordGi && bounce == 1u))
         {
             break;
         }
@@ -243,16 +687,34 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             ns = ng; // the interpolated normal faces away from the viewer: fall back to the facet
         }
         Frame frame = MakeFrame(ns);
+        // The BSDF is prepared per call below: keeping a BsdfContext alive across the shadow ray
+        // costs registers, which measured slower than repeating its cached LUT lookups.
         float3 woLocal = ToLocal(frame, wo);
         float3 rayOrigin = OffsetRayOrigin(s.position, ng);
+        bool lightTree = bounce < params.lightTreeBounces;
 
         // Next event estimation: one point on one emissive triangle.
-        if (useNee)
+        if (useNee && !(restir && bounce == 0u))
         {
             float uLight = Rand(seed);
-            float uAlias = Rand(seed);
-            float2 uPoint = float2(Rand(seed), Rand(seed));
-            LightTriangle light = SampleLight(uLight, uAlias, params.lightCount);
+            float uAlias = Rand(seed); // drawn in both modes: the random sequence stays the same
+            float2 uPoint = Rand2(seed);
+            LightTriangle light = LoadLight(0u); // the list has an entry even without lights
+            float pmf = 0.0f;
+            if (lightTree)
+            {
+                LightChoice choice = SampleLightTree(s.position, ns, uLight);
+                if (choice.light != kInvalidIndex)
+                {
+                    light = LoadLight(choice.light);
+                    pmf = choice.pmf;
+                }
+            }
+            else
+            {
+                light = SampleLight(uLight, uAlias, params.lightCount);
+                pmf = light.probability;
+            }
             float2 b = SampleTriangle(uPoint);
             float3 lightPoint = light.p0 + light.e1 * b.x + light.e2 * b.y;
             float3 toLight = lightPoint - rayOrigin;
@@ -260,18 +722,80 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             float3 wi = toLight / dist;
             float3 lightNormal = normalize(cross(light.e1, light.e2));
             float cosLight = dot(-wi, lightNormal);
-            if (cosLight > 0.0f && dot(wi, ng) > 0.0f)
+            if (pmf > 0.0f && cosLight > 0.0f && dot(wi, ng) > 0.0f)
             {
                 BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
-                float lightPdf = LightPdf(light, dist, cosLight);
+                float lightPdf = LightPdf(pmf, light.area, dist, cosLight);
                 if (any(e.fCos) && lightPdf > 0.0f && TraceVisible(rayOrigin, wi, dist * (1.0f - 1e-4f)))
                 {
                     float weight = PowerHeuristic(lightPdf, e.pdf);
                     float3 contribution = throughput * e.fCos * light.radiance * (weight / lightPdf);
-                    result.radiance += contribution;
-                    if (bounce == 0u)
+                    if (gi && bounce == 1u)
                     {
-                        result.directRadiance += contribution;
+                        float w = Luminance(contribution);
+                        neeWeightSum += w;
+                        if (Rand(seed) * neeWeightSum < w)
+                        {
+                            neeWeight = w;
+                            neeDirection = wi;
+                            neeRadiance = light.radiance;
+                            neeLightPdf = lightPdf;
+                        }
+                    }
+                    else if (beyondX2)
+                    {
+                        continuationRest += restThroughput * e.fCos * light.radiance * (weight / lightPdf);
+                    }
+                    else
+                    {
+                        result.radiance += contribution;
+                        if (bounce == 0u)
+                        {
+                            result.directRadiance += contribution;
+                        }
+                    }
+                }
+            }
+        }
+
+        // The sun: one direction within its disc, through the clouds. (ReSTIR DI only takes over
+        // the triangles.)
+        if (sunNee)
+        {
+            float2 uSun = Rand2(seed);
+            float3 wi = SampleSunDirection(params.sky, uSun);
+            if (dot(wi, ng) > 0.0f)
+            {
+                BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
+                if (any(e.fCos) && TraceVisible(rayOrigin, wi, 1e30f))
+                {
+                    float3 sunRadiance =
+                        params.sky.sunRadiance * CloudTransmittance(params.clouds, rayOrigin, wi, 1e30f, seed);
+                    float weight = PowerHeuristic(sunPdf, e.pdf);
+                    float3 contribution = throughput * e.fCos * sunRadiance * (weight / sunPdf);
+                    if (gi && bounce == 1u)
+                    {
+                        float w = Luminance(contribution);
+                        neeWeightSum += w;
+                        if (Rand(seed) * neeWeightSum < w)
+                        {
+                            neeWeight = w;
+                            neeDirection = wi;
+                            neeRadiance = sunRadiance;
+                            neeLightPdf = sunPdf;
+                        }
+                    }
+                    else if (beyondX2)
+                    {
+                        continuationRest += restThroughput * e.fCos * sunRadiance * (weight / sunPdf);
+                    }
+                    else
+                    {
+                        result.radiance += contribution;
+                        if (bounce == 0u)
+                        {
+                            result.directRadiance += contribution;
+                        }
                     }
                 }
             }
@@ -279,7 +803,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
 
         // Continue the path by sampling the BSDF.
         float uLobe = Rand(seed);
-        float2 u = float2(Rand(seed), Rand(seed));
+        float2 u = Rand2(seed);
         BsdfSample bs = SampleBsdf(s.material, woLocal, uLobe, u);
         if (!bs.valid)
         {
@@ -291,7 +815,25 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             break; // shading normal sent the ray into the surface
         }
         throughput *= bs.weight;
+        if (gi && bounce == 0u)
+        {
+            firstBsdfPdf = bs.pdf;
+        }
+        else if (gi && bounce == 1u)
+        {
+            continued = true;
+            continuationDirection = wiWorld;
+            continuationPdf = bs.pdf;
+            continuationWeight = bs.weight;
+        }
+        else if (beyondX2)
+        {
+            restThroughput *= bs.weight;
+        }
         previousBsdfPdf = bs.pdf;
+        previousPosition = s.position;
+        previousNormal = ns;
+        previousTree = lightTree;
         origin = rayOrigin;
         direction = wiWorld;
 
@@ -303,6 +845,45 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 break;
             }
             throughput /= survive;
+            restThroughput /= survive;
+        }
+    }
+
+    // ReSTIR GI: RIS between the candidates at x2 by the luminance of what each contributes (the NEE
+    // ones were already streamed into one, with their weight sum).
+    if (recordGi && x2AreaPdf > 0.0f)
+    {
+        float continuationMis = continuationLightPdf > 0.0f ? PowerHeuristic(continuationPdf, continuationLightPdf) : 1.0f;
+        float3 continuationContribution = float3(0.0f, 0.0f, 0.0f);
+        if (continued)
+        {
+            continuationContribution =
+                x2Throughput * continuationWeight * (continuationEmission * continuationMis + continuationRest);
+        }
+        float wContinuation = Luminance(continuationContribution);
+        float total = neeWeightSum + wContinuation;
+        if (total > 0.0f)
+        {
+            // W = sum(w) / p̂(Y), p̂(Y) being the luminance of the integrand: contribution * pdf(Y).
+            bool nee = Rand(seed) * total < neeWeightSum;
+            result.gi.valid = true;
+            if (nee)
+            {
+                result.gi.strategy = 0u;
+                result.gi.direction = neeDirection;
+                result.gi.radianceMis = neeRadiance;
+                result.gi.lightPdf = neeLightPdf;
+                result.gi.weight = total / (neeWeight * x2AreaPdf * neeLightPdf);
+            }
+            else
+            {
+                result.gi.strategy = 1u;
+                result.gi.direction = continuationDirection;
+                result.gi.radianceMis = continuationEmission;
+                result.gi.radianceFixed = continuationRest;
+                result.gi.lightPdf = continuationLightPdf;
+                result.gi.weight = total / (wContinuation * x2AreaPdf * continuationPdf);
+            }
         }
     }
     return result;

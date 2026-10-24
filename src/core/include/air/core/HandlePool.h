@@ -76,7 +76,7 @@ public:
     {
         std::lock_guard lock(mMutex);
         Slot* slot = Lookup(handle);
-        if (!slot)
+        if (!slot || !slot->value.has_value())
         {
             return false;
         }

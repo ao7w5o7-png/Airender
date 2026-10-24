@@ -44,7 +44,7 @@ void Main(uint3 id : SV_DispatchThreadID)
     {
     case kDebugNone:
     case kDebugDirect:
-    case kDebugIndirect: value *= f.environment.w; break; // exposure: radiance -> scene-linear
+    case kDebugIndirect: value *= f.exposure; break; // radiance -> scene-linear
     case kDebugBaseColor: break;                           // already linear reflectance
     case kDebugIntersections:
     case kDebugBounces: value = SrgbToLinear(Turbo(value.r)); break;

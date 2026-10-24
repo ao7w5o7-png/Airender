@@ -23,29 +23,16 @@ using hlsl::normalize;
 
 constexpr float kPi = std::numbers::pi_v<float>;
 
-// Daylight: the sun as an emissive disc 10 km away with the real angular radius (0.2665 degrees)
-// and luminance (1.6e9 nits), facing the origin, plus a uniform sky.
-void AddSunAndSky(SceneDesc& scene, float elevationDegrees, float azimuthDegrees, float skyNits)
+// Daylight: the physically based sky (Sky.h), the sun at the given position.
+void AddSky(SceneDesc& scene, float elevationDegrees, float azimuthDegrees, float altitude = 0.0f)
 {
-    const float elevation = elevationDegrees * kPi / 180.0f;
-    const float azimuth = azimuthDegrees * kPi / 180.0f;
-    const float3 toSun(std::cos(elevation) * std::sin(azimuth), std::sin(elevation),
-                       std::cos(elevation) * std::cos(azimuth));
-    constexpr float kDistance = 10000.0f;
-    const float radius = kDistance * std::tan(0.2665f * kPi / 180.0f);
-    const u32 sun = AddMaterial(scene, {.name = "Sun",
-                                        .baseColor = {0.0f, 0.0f, 0.0f},
-                                        .roughness = 1.0f,
-                                        .emissionColor = {1.0f, 0.95f, 0.88f},
-                                        .emissionNits = 1.6e9f});
-    AddInstance(scene, "Sun", AddMesh(scene, MakeDisc("Sun", toSun * kDistance, -toSun, radius, 32)), sun);
-    // Blue sky of the given luminance.
-    const float3 sky(0.55f, 0.70f, 1.0f);
-    scene.environment = sky * (skyNits / dot(sky, float3(0.2126f, 0.7152f, 0.0722f)));
+    scene.sky = {
+        .physical = true, .sunElevation = elevationDegrees, .sunAzimuth = azimuthDegrees, .altitude = altitude};
 }
 
 // Axis-aligned box centred at `center`.
-Instance& AddBox(SceneDesc& scene, std::string name, float3 center, float3 halfExtent, u32 material, float yaw = 0.0f)
+Instance& AddBox(SceneDesc& scene, const std::string& name, float3 center, float3 halfExtent, u32 material,
+                 float yaw = 0.0f)
 {
     Instance& instance = AddInstance(scene, name, AddMesh(scene, MakeBox(name, halfExtent)), material);
     SetTransform(instance, center, yaw);
@@ -237,7 +224,12 @@ SceneDesc MakeSphereField()
     for (u32 i = 0; i < 28; ++i)
     {
         const float kind = rng.Next();
-        const float3 tint(rng.Range(0.2f, 1.0f), rng.Range(0.2f, 1.0f), rng.Range(0.2f, 1.0f));
+        // One draw per statement: arguments are unsequenced, and compilers evaluate them in different
+        // orders (these are in the order MSVC and GCC drew them).
+        const float blue = rng.Range(0.2f, 1.0f);
+        const float green = rng.Range(0.2f, 1.0f);
+        const float red = rng.Range(0.2f, 1.0f);
+        const float3 tint(red, green, blue);
         Material m{.name = std::format("Surface{}", i)};
         if (kind < 0.45f)
         {
@@ -302,7 +294,7 @@ SceneDesc MakeSphereField()
     };
     scatter(-30.0f, 30.0f, -45.0f, 8.0f, 1.5f);
     scatter(-70.0f, 70.0f, -110.0f, -46.0f, 3.0f);
-    AddSunAndSky(scene, 32.0f, 140.0f, 8000.0f);
+    AddSky(scene, 32.0f, 140.0f);
     LookAt(scene.camera, {0.0f, 3.2f, 13.0f}, {0.0f, 0.6f, -6.0f});
     scene.camera.verticalFov = 0.75f;
     scene.camera.ev100 = 14.5f;
@@ -391,8 +383,10 @@ SceneDesc MakeManyLights()
     }
     for (u32 i = 0; i < 300; ++i)
     {
-        SetTransform(AddInstance(scene, std::format("Led{}", i), led, ledMaterials[rng.NextU32() % 12]),
-                     {rng.Range(x0 + 0.5f, x1 - 0.5f), 0.04f, rng.Range(z0 + 1.0f, z1 - 1.0f)});
+        const float x = rng.Range(x0 + 0.5f, x1 - 0.5f); // one draw per statement, as in MakeSphereField
+        const float z = rng.Range(z0 + 1.0f, z1 - 1.0f);
+        const u32 material = ledMaterials[rng.NextU32() % 12];
+        SetTransform(AddInstance(scene, std::format("Led{}", i), led, material), {x, 0.04f, z});
     }
     LookAt(scene.camera, {0.0f, 1.7f, 2.5f}, {0.0f, 1.4f, -20.0f});
     scene.camera.verticalFov = 0.9f;
@@ -529,10 +523,82 @@ SceneDesc MakeTerrain()
                 AddMesh(scene, MakeQuad("Lake", {-h, 6.0f, h}, {h, 6.0f, h}, {h, 6.0f, -h}, {-h, 6.0f, -h},
                                         {0.0f, 1.0f, 0.0f})),
                 water);
-    AddSunAndSky(scene, 18.0f, -60.0f, 6000.0f);
+    AddSky(scene, 18.0f, -60.0f, 300.0f);
     LookAt(scene.camera, {-60.0f, 65.0f, 260.0f}, {20.0f, 15.0f, -40.0f});
     scene.camera.verticalFov = 0.7f;
     scene.camera.ev100 = 14.0f;
+    return scene;
+}
+
+// Late afternoon on an open plain: the sun 4 degrees above the horizon, long shadows across a
+// 400 m ground, a few objects against the low sun. Shows the sky's colours, which come from the
+// spectral atmosphere, and the planet's ground beyond the plane.
+SceneDesc MakeSunset()
+{
+    SceneDesc scene;
+    scene.name = "sunset";
+    const u32 ground = AddMaterial(scene, {.name = "Grass", .baseColor = {0.16f, 0.2f, 0.09f}, .roughness = 0.9f});
+    const u32 white = AddMaterial(scene, {.name = "White", .baseColor = {0.8f, 0.8f, 0.8f}, .roughness = 0.5f});
+    const u32 metal =
+        AddMaterial(scene, {.name = "Steel", .baseColor = {0.9f, 0.9f, 0.88f}, .roughness = 0.15f, .metallic = 1.0f});
+    const u32 stone = AddMaterial(scene, {.name = "Stone", .baseColor = {0.45f, 0.4f, 0.35f}, .roughness = 0.8f});
+    constexpr float kHalf = 200.0f;
+    AddInstance(scene, "Ground",
+                AddMesh(scene, MakeQuad("Ground", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                ground);
+    const u32 sphere = AddMesh(scene, MakeSphere("Sphere", 1.0f, 48));
+    SetTransform(AddInstance(scene, "WhiteSphere", sphere, white), {-1.6f, 1.0f, 0.0f});
+    SetTransform(AddInstance(scene, "SteelSphere", sphere, metal), {1.4f, 0.8f, 1.2f}, 0.0f, 0.8f);
+    const u32 pillar = AddMesh(scene, MakeBox("Pillar", {0.4f, 2.5f, 0.4f}));
+    for (int i = 0; i < 5; ++i)
+    {
+        SetTransform(AddInstance(scene, std::format("Pillar{}", i), pillar, stone),
+                     {-6.0f + 3.0f * float(i), 2.5f, -7.0f - 1.5f * float(i)}, 0.3f * float(i));
+    }
+    AddSky(scene, 4.0f, -35.0f);
+    LookAt(scene.camera, {0.5f, 1.8f, 9.0f}, {-1.5f, 1.6f, -10.0f});
+    scene.camera.verticalFov = 0.9f;
+    scene.camera.ev100 = 11.5f;
+    return scene;
+}
+
+// A meadow under fair-weather cumulus (Clouds.h) in the afternoon: the clouds' bright tops and grey
+// bases, the sky between them, their shadows drifting over 4 km of grass, a farmstead for scale.
+SceneDesc MakeCumulus()
+{
+    SceneDesc scene;
+    scene.name = "cumulus";
+    const u32 grass = AddMaterial(scene, {.name = "Grass", .baseColor = {0.14f, 0.19f, 0.07f}, .roughness = 0.9f});
+    const u32 wall = AddMaterial(scene, {.name = "Whitewash", .baseColor = {0.75f, 0.73f, 0.68f}, .roughness = 0.7f});
+    const u32 roof = AddMaterial(scene, {.name = "Roof", .baseColor = {0.35f, 0.12f, 0.08f}, .roughness = 0.6f});
+    const u32 bark = AddMaterial(scene, {.name = "Bark", .baseColor = {0.2f, 0.15f, 0.1f}, .roughness = 0.9f});
+    const u32 leaves = AddMaterial(scene, {.name = "Leaves", .baseColor = {0.08f, 0.15f, 0.05f}, .roughness = 0.8f});
+    constexpr float kHalf = 2000.0f;
+    AddInstance(scene, "Meadow",
+                AddMesh(scene, MakeQuad("Meadow", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                grass);
+    AddBox(scene, "House", {-14.0f, 3.0f, -40.0f}, {6.0f, 3.0f, 4.0f}, wall, 0.3f);
+    AddBox(scene, "Roof", {-14.0f, 6.6f, -40.0f}, {6.4f, 0.6f, 4.4f}, roof, 0.3f);
+    AddBox(scene, "Barn", {6.0f, 4.0f, -70.0f}, {8.0f, 4.0f, 5.0f}, roof, -0.2f);
+    const u32 trunk = AddMesh(scene, MakeBox("Trunk", {0.25f, 2.0f, 0.25f}));
+    const u32 crown = AddMesh(scene, MakeSphere("Crown", 2.6f, 32));
+    const float3 trees[] = {{-30.0f, 0.0f, -25.0f},
+                            {-24.0f, 0.0f, -55.0f},
+                            {18.0f, 0.0f, -38.0f},
+                            {30.0f, 0.0f, -95.0f},
+                            {-60.0f, 0.0f, -120.0f}};
+    for (size_t i = 0; i < std::size(trees); ++i)
+    {
+        SetTransform(AddInstance(scene, std::format("Trunk{}", i), trunk, bark), trees[i] + float3(0.0f, 2.0f, 0.0f));
+        SetTransform(AddInstance(scene, std::format("Crown{}", i), crown, leaves), trees[i] + float3(0.0f, 5.6f, 0.0f));
+    }
+    AddSky(scene, 38.0f, 150.0f);
+    scene.clouds = {.enabled = true, .bottom = 1200.0f, .top = 3200.0f, .coverage = 0.4f, .seed = 5};
+    LookAt(scene.camera, {0.0f, 1.7f, 0.0f}, {-10.0f, 12.0f, -60.0f});
+    scene.camera.verticalFov = 1.0f;
+    scene.camera.ev100 = 14.5f;
     return scene;
 }
 

@@ -141,112 +141,105 @@ float GgxSingleScatterCos(float3 wo, float3 wi, float alpha)
     return GgxD(h, alpha) * GgxG2(wo, wi, alpha) / (4.0f * wo.z);
 }
 
-// Kulla-Conty multiple-scattering lobe with Fresnel = 1, times cos(theta_i).
-float GgxMultiScatterCos(float3 wo, float3 wi, float roughness)
-{
-    float eo = LutBilinear(kLutE, wo.z, roughness);
-    float ei = LutBilinear(kLutE, wi.z, roughness);
-    float eavg = LutLinear(kLutEavg, roughness);
-    return (1.0f - eo) * (1.0f - ei) / (kPi * max(1.0f - eavg, 1e-4f)) * wi.z;
-}
-
 // Color of the multiple-scattering lobe: Favg^2 Eavg / (1 - Favg (1 - Eavg)) (Kulla & Conty 2017).
-float3 MultiScatterFresnel(float3 f0, float roughness)
+float3 MultiScatterFresnelFromAverage(float3 f0, float eavg)
 {
     float3 favg = FresnelAverage(f0);
-    float eavg = LutLinear(kLutEavg, roughness);
     return favg * favg * eavg / (1.0f - favg * (1.0f - eavg));
+}
+
+float3 MultiScatterFresnel(float3 f0, float roughness)
+{
+    return MultiScatterFresnelFromAverage(f0, LutLinear(kLutEavg, roughness));
 }
 
 // --- Full material -------------------------------------------------------------------------------
 
-// Specular lobes of the metal and dielectric layers, and the dielectric diffuse base, times cos.
-struct BsdfLobes
+// The parts of a shading point's BSDF that depend only on the material and wo: most of the LUT
+// lookups (4 dependent loads each). Prepared once per point and shared by every evaluation and
+// sample there, which then only look up E(wi) and Es(wi).
+struct BsdfContext
 {
-    float3 metal;
-    float3 dielectricSpecular;
-    float3 diffuse;
+    BsdfMaterial material;
+    float3 wo;
+    float roughness; // clamped to kMinRoughness
+    float alpha;
+    float eo;           // E(wo)
+    float eso;          // Es(wo)
+    float msScale;      // 1 / (pi (1 - Eavg)): Kulla-Conty lobe normalization
+    float diffuseScale; // 1 / (pi (1 - EsAvg)): layered diffuse normalization
+    float3 metalMsFresnel;
+    float3 dielectricMsFresnel;
+    // Probability of sampling the GGX lobe (otherwise the cosine lobe), proportional to the energy
+    // the specular lobes reflect towards wo.
+    float specularProbability;
 };
 
-BsdfLobes EvaluateLobes(BsdfMaterial m, float3 wo, float3 wi)
+BsdfContext PrepareBsdf(BsdfMaterial m, float3 wo)
 {
-    BsdfLobes lobes;
-    lobes.metal = 0.0f;
-    lobes.dielectricSpecular = 0.0f;
-    lobes.diffuse = 0.0f;
-    if (wo.z <= 0.0f || wi.z <= 0.0f)
-    {
-        return lobes;
-    }
-    float roughness = max(m.roughness, kMinRoughness);
-    float alpha = roughness * roughness;
-    float3 h = normalize(wo + wi);
-    float ss = GgxSingleScatterCos(wo, wi, alpha);
-    float ms = GgxMultiScatterCos(wo, wi, roughness);
-    float cosOH = saturate(dot(wo, h));
-
-    float3 dielectricF0 = kDielectricF0;
-    lobes.metal = FresnelSchlick(m.baseColor, cosOH) * ss + MultiScatterFresnel(m.baseColor, roughness) * ms;
-    lobes.dielectricSpecular =
-        FresnelSchlick(dielectricF0, cosOH) * ss + MultiScatterFresnel(dielectricF0, roughness) * ms;
-
-    float eso = LutBilinear(kLutEs, wo.z, roughness);
-    float esi = LutBilinear(kLutEs, wi.z, roughness);
-    float esAvg = LutLinear(kLutEsAvg, roughness);
-    lobes.diffuse = m.baseColor * (kInvPi * (1.0f - eso) * (1.0f - esi) / max(1.0f - esAvg, 1e-4f) * wi.z);
-    return lobes;
+    BsdfContext c;
+    c.material = m;
+    c.wo = wo;
+    c.roughness = max(m.roughness, kMinRoughness);
+    c.alpha = c.roughness * c.roughness;
+    c.eo = LutBilinear(kLutE, wo.z, c.roughness);
+    c.eso = LutBilinear(kLutEs, wo.z, c.roughness);
+    float eavg = LutLinear(kLutEavg, c.roughness);
+    float esAvg = LutLinear(kLutEsAvg, c.roughness);
+    c.msScale = 1.0f / (kPi * max(1.0f - eavg, 1e-4f));
+    c.diffuseScale = kInvPi / max(1.0f - esAvg, 1e-4f);
+    c.metalMsFresnel = MultiScatterFresnelFromAverage(m.baseColor, eavg);
+    c.dielectricMsFresnel = MultiScatterFresnelFromAverage(float3(kDielectricF0, kDielectricF0, kDielectricF0), eavg);
+    float diffuseEnergy = (1.0f - c.eso) * max(Luminance(m.baseColor), 0.0f);
+    float pDielectric = c.eso + diffuseEnergy > 0.0f ? c.eso / (c.eso + diffuseEnergy) : 1.0f;
+    float pMetal = c.eo; // the rest is the diffuse-like multiple-scattering lobe
+    c.specularProbability = saturate(lerp(pDielectric, pMetal, saturate(m.metallic)));
+    return c;
 }
 
-// Probability of sampling the GGX lobe (otherwise the cosine lobe), proportional to the energy the
-// specular lobes reflect towards wo.
-float SpecularSamplingProbability(BsdfMaterial m, float3 wo)
-{
-    float roughness = max(m.roughness, kMinRoughness);
-    float es = LutBilinear(kLutEs, wo.z, roughness);
-    float diffuseEnergy = (1.0f - es) * max(Luminance(m.baseColor), 0.0f);
-    float pDielectric = es + diffuseEnergy > 0.0f ? es / (es + diffuseEnergy) : 1.0f;
-    float pMetal = LutBilinear(kLutE, wo.z, roughness); // the rest is the diffuse-like MS lobe
-    return saturate(lerp(pDielectric, pMetal, saturate(m.metallic)));
-}
-
-float BsdfPdf(BsdfMaterial m, float3 wo, float3 wi)
-{
-    if (wo.z <= 0.0f || wi.z <= 0.0f)
-    {
-        return 0.0f;
-    }
-    float alpha = RoughnessToAlpha(m.roughness);
-    float pSpec = SpecularSamplingProbability(m, wo);
-    float3 h = normalize(wo + wi);
-    return pSpec * GgxVndfReflectionPdf(wo, h, alpha) + (1.0f - pSpec) * wi.z * kInvPi;
-}
-
-BsdfEval EvaluateBsdf(BsdfMaterial m, float3 wo, float3 wi)
+// metal: GGX with Schlick(baseColor) plus its multiple scattering; dielectric: GGX with
+// Schlick(0.04) plus multiple scattering plus the layered Lambert base; blended by metallic.
+BsdfEval EvaluateBsdf(BsdfContext c, float3 wi)
 {
     BsdfEval e;
-    BsdfLobes lobes = EvaluateLobes(m, wo, wi);
-    float metallic = saturate(m.metallic);
-    e.fCos = lerp(lobes.dielectricSpecular + lobes.diffuse, lobes.metal, metallic);
-    e.pdf = BsdfPdf(m, wo, wi);
+    e.fCos = float3(0.0f, 0.0f, 0.0f);
+    e.pdf = 0.0f;
+    float3 wo = c.wo;
+    if (wo.z <= 0.0f || wi.z <= 0.0f)
+    {
+        return e;
+    }
+    float3 h = normalize(wo + wi);
+    float ss = GgxSingleScatterCos(wo, wi, c.alpha);
+    float ei = LutBilinear(kLutE, wi.z, c.roughness);
+    float ms = (1.0f - c.eo) * (1.0f - ei) * c.msScale * wi.z;
+    float cosOH = saturate(dot(wo, h));
+    float3 dielectricF0 = kDielectricF0;
+    float3 metal = FresnelSchlick(c.material.baseColor, cosOH) * ss + c.metalMsFresnel * ms;
+    float3 dielectricSpecular = FresnelSchlick(dielectricF0, cosOH) * ss + c.dielectricMsFresnel * ms;
+    float esi = LutBilinear(kLutEs, wi.z, c.roughness);
+    float3 diffuse = c.material.baseColor * ((1.0f - c.eso) * (1.0f - esi) * c.diffuseScale * wi.z);
+    e.fCos = lerp(dielectricSpecular + diffuse, metal, saturate(c.material.metallic));
+    e.pdf = c.specularProbability * GgxVndfReflectionPdf(wo, h, c.alpha) +
+            (1.0f - c.specularProbability) * wi.z * kInvPi;
     return e;
 }
 
-BsdfSample SampleBsdf(BsdfMaterial m, float3 wo, float uLobe, float2 u)
+BsdfSample SampleBsdf(BsdfContext c, float uLobe, float2 u)
 {
     BsdfSample s;
     s.wi = float3(0.0f, 0.0f, 1.0f);
     s.weight = 0.0f;
     s.pdf = 0.0f;
     s.valid = false;
-    if (wo.z <= 0.0f)
+    if (c.wo.z <= 0.0f)
     {
         return s;
     }
-    float alpha = RoughnessToAlpha(m.roughness);
-    if (uLobe < SpecularSamplingProbability(m, wo))
+    if (uLobe < c.specularProbability)
     {
-        float3 h = SampleGgxVndf(wo, alpha, u);
-        s.wi = reflect(-wo, h);
+        float3 h = SampleGgxVndf(c.wo, c.alpha, u);
+        s.wi = reflect(-c.wo, h);
     }
     else
     {
@@ -256,7 +249,7 @@ BsdfSample SampleBsdf(BsdfMaterial m, float3 wo, float uLobe, float2 u)
     {
         return s;
     }
-    BsdfEval e = EvaluateBsdf(m, wo, s.wi);
+    BsdfEval e = EvaluateBsdf(c, s.wi);
     if (e.pdf <= 0.0f)
     {
         return s;
@@ -265,6 +258,16 @@ BsdfSample SampleBsdf(BsdfMaterial m, float3 wo, float uLobe, float2 u)
     s.weight = e.fCos / e.pdf;
     s.valid = true;
     return s;
+}
+
+BsdfEval EvaluateBsdf(BsdfMaterial m, float3 wo, float3 wi)
+{
+    return EvaluateBsdf(PrepareBsdf(m, wo), wi);
+}
+
+BsdfSample SampleBsdf(BsdfMaterial m, float3 wo, float uLobe, float2 u)
+{
+    return SampleBsdf(PrepareBsdf(m, wo), uLobe, u);
 }
 
 // Directional albedo of the full material towards wo (for denoiser guides and debug views).

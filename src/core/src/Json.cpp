@@ -427,8 +427,8 @@ private:
                 }
                 if (*cp >= 0xD800 && *cp <= 0xDBFF) // high surrogate: a low one must follow
                 {
-                    std::optional<u32> low;
-                    if (!Consume("\\u") || !(low = ParseHex4()) || *low < 0xDC00 || *low > 0xDFFF)
+                    const std::optional<u32> low = Consume("\\u") ? ParseHex4() : std::nullopt;
+                    if (!low || *low < 0xDC00 || *low > 0xDFFF)
                     {
                         return Fail("unpaired surrogate");
                     }

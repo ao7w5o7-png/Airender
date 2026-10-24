@@ -47,26 +47,54 @@ struct InstanceData
     float4 normalToWorld2;
 };
 
-// An emissive triangle in world space, chosen for next event estimation proportionally to power.
-// The list doubles as a Walker/Vose alias table, so choosing a light is O(1): draw entry i
-// uniformly, keep it if a second uniform is below aliasThreshold, otherwise take entry `alias`.
+// An emissive triangle in world space. Next event estimation chooses one of two ways:
+//   * by power alone: the list doubles as a Walker/Vose alias table, so choosing is O(1): draw
+//     entry i uniformly, keep it if a second uniform is below aliasThreshold, else take `alias`;
+//   * by the light tree (LightTreeNode), which also weighs distance and orientation from the
+//     shading point. treeTrail is the path from the root to the light's leaf (bit d set: the second
+//     child at depth d), to recompute the probability the tree gives the light (for MIS).
 struct LightTriangle
 {
     float3 p0;
     float area;
     float3 e1;         // p1 - p0; the emitting side is cross(e1, e2)
-    float probability; // of being chosen
+    float probability; // of being chosen by power
     float3 e2;         // p2 - p0
     float aliasThreshold;
     float3 radiance;
     uint alias;
+    uint treeTrailLow;  // trail bits 0-31
+    uint treeTrailHigh; // trail bits 32-63
+    uint treeDepth;     // depth of its leaf; kInvalidIndex: not in the tree (no power)
+    uint pad0;
+};
+
+// A node of the light tree (renderer::BuildLightTree) over the emissive triangles: it bounds the
+// emitters below it in space (a box), in emission direction (normals within cosThetaO of `axis`,
+// each emitting within cosThetaE of its normal) and in power. Sampling walks down from the root and
+// picks each child with probability proportional to its importance at the shading point (power x
+// orientation bound / distance^2; Conty Estevez and Kulla 2018). Internal node: the first child
+// follows it, the second is at `child`. Leaf: `child` is the light.
+struct LightTreeNode
+{
+    float3 boundsMin;
+    float power; // of the emitters below, relative
+    float3 boundsMax;
+    float cosThetaO;
+    float3 axis;
+    float cosThetaE;
+    uint child;
+    uint isLeaf;
+    uint pad0;
+    uint pad1;
 };
 
 #ifdef __cplusplus
 static_assert(sizeof(Vertex) == 32);
 static_assert(sizeof(MaterialData) == 32);
 static_assert(sizeof(InstanceData) == 112);
-static_assert(sizeof(LightTriangle) == 64);
+static_assert(sizeof(LightTriangle) == 80);
+static_assert(sizeof(LightTreeNode) == 64);
 } // namespace air::gpu
 #endif
 

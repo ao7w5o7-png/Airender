@@ -19,6 +19,11 @@ std::optional<Image> ReadbackTexture(rhi::Device& device, rhi::TextureHandle tex
 // (Access::SRVCompute).
 rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc, const void* data, u64 size);
 
+// Creates a texture (2D or 3D, one mip) holding `texels`, tightly packed rows of desc.width texels
+// (x fastest, then y, then the slices of a 3D texture), ready for shader reads (Access::SRVCompute).
+rhi::TextureHandle CreateTextureWithData(rhi::Device& device, rhi::TextureDesc desc, const void* texels);
+
 float HalfToFloat(u16 half);
+u16 FloatToHalf(float value); // round to nearest even; overflow gives infinity
 
 } // namespace air::renderer

@@ -4,7 +4,9 @@
 
 #include "air/core/Assert.h"
 #include "air/features/pathtracer/Bsdf.h"
+#include "air/renderer/Sky.h"
 #include "air/renderer/shader/SceneShared.h"
+#include "air/renderer/shader/SkyShared.h"
 
 #include "PathTracerShared.h"
 
@@ -193,7 +195,10 @@ struct SceneTables
     std::vector<std::span<const u32>> indices;
     std::vector<MaterialData> materials;
     std::vector<LightTriangle> lights;
+    std::vector<LightTreeNode> lightTree;
     std::span<const float> lut;
+    renderer::SkyTable sky;
+    renderer::CloudVolume clouds;
     const Bvh* bvh = nullptr;
 };
 
@@ -209,6 +214,32 @@ struct Kernel
     Vertex LoadVertex(InstanceData instance, uint index) const { return tables.vertices[instance.vertexBuffer][index]; }
     MaterialData LoadMaterial(uint material) const { return tables.materials[material]; }
     LightTriangle LoadLight(uint light) const { return tables.lights[light]; }
+    LightTreeNode LoadLightNode(uint node) const { return tables.lightTree[node]; }
+    float3 SkyTableLoad(uint texel) const
+    {
+        const std::vector<float>& t = tables.sky.radiance;
+        return float3(t[texel * 3], t[texel * 3 + 1], t[texel * 3 + 2]);
+    }
+    float4 AerialInscatterSample(SkyData s, float3 uvw) const
+    {
+        return renderer::SampleTexture3DClamped(tables.sky.aerialInscatter.data(), tables.sky.aerialWidth,
+                                                tables.sky.aerialHeight, s.aerialSlices, uvw.x, uvw.y, uvw.z);
+    }
+    float4 AerialTransmittanceSample(SkyData s, float3 uvw) const
+    {
+        return renderer::SampleTexture3DClamped(tables.sky.aerialTransmittance.data(), tables.sky.aerialWidth,
+                                                tables.sky.aerialHeight, s.aerialSlices, uvw.x, uvw.y, uvw.z);
+    }
+    float CloudBaseSample(CloudData c, float3 uvw) const
+    {
+        return renderer::SampleTexture3D(tables.clouds.base.data(), c.gridX, c.gridZ, c.gridY + 2, uvw.x, uvw.y, uvw.z);
+    }
+    float CloudDetailSample(CloudData /*c*/, float3 uvw) const
+    {
+        const u32 n = tables.clouds.detailSize;
+        return renderer::SampleTexture3D(tables.clouds.detail.data(), n, n, n, uvw.x, uvw.y, uvw.z);
+    }
+    float CloudMajorantLoad(CloudData /*c*/, uint cell) const { return tables.clouds.majorants[cell]; }
     HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/) const
     {
         HitInfo hit{};
@@ -271,21 +302,37 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     }
     double lightPower = 0.0;
     tables.lights = renderer::BuildLightTriangles(scene, &lightPower);
+    tables.lightTree = renderer::BuildLightTree(tables.lights);
+    if (tables.lights.empty())
+    {
+        tables.lights.emplace_back(); // like the GPU list: NEE reads entry 0 when no light is chosen
+    }
     tables.lut = GetBsdfLut();
+    tables.sky = renderer::BuildSkyTable(scene.sky, scene.environment);
+    const renderer::SkyTable& sky = tables.sky;
+    tables.clouds = renderer::BuildCloudVolume(scene.clouds);
     const Bvh bvh(std::move(triangles));
     tables.bvh = &bvh;
 
     Kernel::IntegratorParams params;
-    params.environment = scene.environment;
+    params.sky = sky.data;
+    params.clouds = tables.clouds.data;
+    params.cloudEvents = settings.cloudEvents;
     params.lightCount = lightPower > 0.0 ? u32(tables.lights.size()) : 0u;
     params.maxBounces = settings.maxBounces;
     params.flags = (settings.furnace ? kFlagFurnace : 0u) | (settings.nextEventEstimation ? 0u : kFlagNoNee);
+    params.lightTreeBounces = settings.lightTreeBounces;
     float exposure = settings.applyExposure ? renderer::ExposureScale(camera.ev100) : 1.0f;
     if (settings.furnace)
     {
-        // Same convention as the GPU path tracer: the environment maps to 0.18.
-        const float environment = dot(scene.environment, float3(0.2126f, 0.7152f, 0.0722f));
-        params.environment = environment > 0.0f ? scene.environment : float3(1.0f);
+        // Same convention as the GPU path tracer: a uniform sky mapped to 0.18, no sun.
+        const float3 uniform = sky.data.width == 0 ? sky.data.uniformRadiance : float3(1.0f);
+        const float environment = dot(uniform, float3(0.2126f, 0.7152f, 0.0722f));
+        params.sky.width = 0;
+        params.sky.height = 0;
+        params.sky.uniformRadiance = environment > 0.0f ? uniform : float3(1.0f);
+        params.sky.sunRadiance = float3(0.0f);
+        params.sky.aerialDistance = 0.0f;
         exposure = settings.applyExposure ? 0.18f / (environment > 0.0f ? environment : 1.0f) : 1.0f;
     }
 
@@ -306,7 +353,8 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
                 const float jy = kernel.Rand(seed);
                 const float3 direction =
                     kernel.CameraRayDirection(cameraData, float2(float(x) + jx, float(y) + jy), size);
-                const Kernel::PathSample sample = kernel.TracePath(camera.position, direction, params, seed);
+                Kernel::PathSample sample = kernel.TracePath(camera.position, direction, params, seed);
+                kernel.AddAerialPerspective(params, direction, sample);
                 sum[0] += sample.radiance.x;
                 sum[1] += sample.radiance.y;
                 sum[2] += sample.radiance.z;
@@ -331,6 +379,48 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
         }
     }
     return image;
+}
+
+struct LightTreeProbe::Tables
+{
+    SceneTables scene;
+};
+
+LightTreeProbe::LightTreeProbe(const renderer::SceneDesc& scene) : mTables(std::make_unique<Tables>())
+{
+    mTables->scene.lights = renderer::BuildLightTriangles(scene);
+    mTables->scene.lightTree = renderer::BuildLightTree(mTables->scene.lights);
+}
+
+LightTreeProbe::~LightTreeProbe() = default;
+
+u32 LightTreeProbe::GetLightCount() const
+{
+    return u32(mTables->scene.lights.size());
+}
+
+u32 LightTreeProbe::GetNodeCount() const
+{
+    return u32(mTables->scene.lightTree.size());
+}
+
+u32 LightTreeProbe::GetDepth(u32 light) const
+{
+    return mTables->scene.lights[light].treeDepth;
+}
+
+float LightTreeProbe::Pmf(u32 light, renderer::float3 p, renderer::float3 n) const
+{
+    Kernel kernel{mTables->scene}; // the shader functions are not const members
+    return kernel.LightTreePmf(light, p, n);
+}
+
+u32 LightTreeProbe::Sample(renderer::float3 p, renderer::float3 n, float u, float* pmf) const
+{
+    Kernel kernel{mTables->scene}; // the shader functions are not const members
+    const Kernel::LightChoice choice = kernel.SampleLightTree(p, n, u);
+    *pmf = choice.pmf;
+    return choice.light;
 }
 
 } // namespace air::pt

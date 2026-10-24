@@ -13,7 +13,9 @@
 //
 // Passes declare every resource they touch and how; the graph then
 //   1. culls passes whose results nobody consumes,
-//   2. computes transient resource lifetimes and aliases them inside one placed heap,
+//   2. computes transient resource lifetimes and aliases them inside one placed heap (resources on
+//      different queues too, when the cross-queue waits order their uses); with a
+//      TransientResourcePool the heap and the placed resources are reused from earlier frames,
 //   3. derives every barrier (passes never write barriers by hand),
 //   4. records passes in parallel on the task system and submits them in declaration order,
 //   5. runs AsyncCompute passes on the compute queue, concurrently with graphics work they do not
@@ -27,6 +29,7 @@
 #include "air/core/TaskSystem.h"
 #include "air/rhi/RHIDevice.h"
 
+#include <array>
 #include <functional>
 #include <string>
 #include <thread>
@@ -36,6 +39,7 @@ namespace air::rdg
 {
 
 using rhi::Access;
+class TransientResourcePool;
 
 enum class PassFlags : u32
 {
@@ -129,9 +133,16 @@ public:
         u32 asyncComputePassCount = 0; // live passes on the compute queue
         u32 submissionCount = 0;       // batches submitted (one per run of passes on a queue)
         u32 queueWaitCount = 0;        // GPU-side cross-queue waits
+        // Transient memory set up by Execute(): with a TransientResourcePool a frame like the last
+        // one creates nothing; without one every frame creates the heap and every resource.
+        u32 transientHeapsCreated = 0;
+        u32 transientResourcesCreated = 0;
+        u32 transientResourcesReused = 0; // placed resources an earlier frame created
     };
 
-    RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config);
+    // `pool` keeps transient memory and placed resources from frame to frame (it must outlive the
+    // graph); without one, each frame gets a new heap and new resources.
+    RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config, TransientResourcePool* pool = nullptr);
     RenderGraph(rhi::Device& device, TaskSystem* tasks = nullptr) : RenderGraph(device, tasks, Config{}) {}
     ~RenderGraph();
 
@@ -208,15 +219,19 @@ private:
         bool used = false;
         u32 firstPass = ~0u;
         u32 lastPass = 0;
+        // First and last live pass using it on each queue (~0u: none), for ordering uses across queues.
+        std::array<u32, size_t(rhi::QueueType::Count)> firstUse = {~0u, ~0u, ~0u};
+        std::array<u32, size_t(rhi::QueueType::Count)> lastUse = {~0u, ~0u, ~0u};
         rhi::AllocationInfo allocation;
         u64 heapOffset = ~0ull;
-        // Used by a compute-queue pass: it may run alongside any graphics pass, so its memory is
-        // never shared with another transient.
-        bool asyncUse = false;
+        bool asyncUse = false;            // used by a compute-queue pass
+        Access lastAccess = Access::None; // its state after the frame's last use
 
         // Execute results
         rhi::TextureHandle texture;
         rhi::BufferHandle buffer;
+        Access currentAccess = Access::None; // the state the resource is in when the frame starts
+        u32 poolEntry = ~0u;                 // TransientResourcePool placement
 
         bool IsTransient() const { return !imported && !extracted; }
     };
@@ -268,8 +283,12 @@ private:
     void CullPasses();
     void BuildBatches();
     void ComputeLifetimes();
-    void AllocateTransientMemory();
     void BuildBarriers();
+    void ComputeReach();
+    void AllocateTransientMemory();
+    // Every use of resource `a` happens before every use of resource `b` on the GPU: on one queue
+    // by pass order, across queues through the cross-queue waits. Such resources may share memory.
+    bool Precedes(u32 a, u32 b) const;
     void RecordRange(rhi::CommandList& cmd, u32 begin, u32 end);
 
     const Resource& ResourceFor(u32 pass, u32 id, ResourceKind kind) const;
@@ -283,9 +302,14 @@ private:
     std::vector<Pass> mPasses;
     std::vector<u32> mLivePasses; // non-culled pass indices in order
     std::vector<Batch> mBatches;
+    // Per batch, the latest batch of each queue it starts after (itself on its own queue; ~0u: none
+    // of that queue): what the cross-queue waits order, directly or through other batches.
+    std::vector<std::array<u32, size_t(rhi::QueueType::Count)>> mReach;
     std::vector<rhi::Barrier> mFinalBarriers;
     std::vector<u32> mFinalBarrierResources;
     rhi::HeapHandle mTransientHeap;
+    TransientResourcePool* mPool = nullptr;
+    u32 mPoolSlot = ~0u; // the pool heap this frame's transients live in
     bool mCompiled = false;
     bool mExecuted = false;
     Stats mStats;

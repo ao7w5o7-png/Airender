@@ -173,24 +173,48 @@ GpuMemoryAllocator           thread-safe; one pool per memoryTypeKey, one mutex 
 - Statistics: `Device::GetMemoryStats()` reports heaps / reserved bytes / used bytes / allocation
   count / dedicated count per memory type.
 
-### 4.3 Transient memory in the render graph (aliasing)
+### 4.3 Transient memory in the render graph (aliasing and reuse)
 
-Temporary resources created inside the render graph do not use the pools above. Instead:
+Temporary resources created inside the render graph do not use the pools above. Memory is reused
+twice: within a frame, by resources whose lifetimes do not overlap, and across frames, by the
+transient pool.
 
-1. at compile time each resource gets a lifetime `[first pass, last pass]`;
-2. resources are packed first-fit in descending size order: resources whose lifetimes do not
-   overlap may share the same memory;
-3. the frame allocates a single placed heap and calls `CreatePlacedTexture/Buffer` inside it.
+**Within a frame** (`AllocateTransientMemory`, after the barriers so the cross-queue waits are
+known):
 
-`RenderGraph::GetStats()` reports `transientHeapSize` (with aliasing) and
-`transientBytesUnaliased` (without). The first barrier of a resource carries a `discard` flag so
-the backend can issue an aliasing barrier / drop old contents.
+1. each resource records its first and last pass on every queue it is used on;
+2. `Precedes(a, b)` holds when every use of `a` happens before every use of `b` on the GPU: on one
+   queue by pass order, across queues when `b`'s first pass starts after a wait that covers `a`'s
+   last batch (`mReach`: per batch, the latest batch of each queue it is ordered after, through
+   chains of waits too);
+3. resources are packed first-fit in descending size order; two may share memory when one
+   precedes the other. A transient of an async compute pass therefore shares memory with
+   graphics transients its waits order it against (e.g. one consumed before the pass's input was
+   produced), and with nothing that may run beside it.
 
-A transient touched by an async compute pass may be in use while any graphics pass runs, so it
-never shares memory: its lifetime counts as the whole frame.
+The first barrier of a resource carries a `discard` flag: the backend issues an aliasing barrier
+and transitions from the barrier's `before` state.
 
-Next: cache transient heaps across frames instead of
-creating one per frame.
+**Across frames** (`rdg::TransientResourcePool`, owned by FrameRunner; `poolTransients = false`
+or `aircli render --no-transient-pool` turns it off):
+
+- a frame's transients go into a pooled heap whose last frame the GPU has finished (its graphics
+  fence passed); the least recently used fitting heap is taken, so with N frames in flight N heaps
+  alternate, each laid out like the frame before it. Heap sizes are rounded up to 16 MiB.
+- a transient described exactly like one placed at the same offset of that heap before reuses the
+  placed resource and its bindless descriptors. The pool remembers the state the frame left it in
+  and the graph patches the next first barrier's `before` to it. A transient first used on the
+  compute queue that a frame would leave in a graphics-only state ends that frame in common
+  (a final barrier), or the compute queue could never take it back.
+- heaps and resources unused for 120 frames are released; FrameRunner calls `Trim()` sooner when
+  the process uses over 95% of its VRAM budget (checked every 120 frames).
+
+In a steady frame nothing is created: `RenderGraph::Stats` reports `transientHeapsCreated`,
+`transientResourcesCreated` and `transientResourcesReused` next to `transientHeapSize` (with
+aliasing) and `transientBytesUnaliased`; FrameResult (and its JSON) adds the pool's totals
+(`transientPool`). Measured on door at 1080p with DLSS (7 transients, D3D12 debug build): 4.7 ms
+per frame on the CPU instead of 5.7 ms, two 48 MiB heaps instead of a 41 MiB heap per frame
+(three alive at a time while the GPU catches up), and no creation after the second frame.
 
 ### 4.4 Deferred release
 
@@ -288,7 +312,8 @@ The graph schedules it in `Compile()`:
    last compute batch (an epilogue batch is added when needed), so the frame's graphics fence and
    imported resources' final states include the compute work. The next frame's graphics passes
    therefore come after this frame's compute work, and its compute passes after the fork.
-6. **Memory**: transients touched by an async pass are not aliased (§4.3).
+6. **Memory**: a transient touched by an async pass shares memory only with transients the waits
+   order it against (§4.3).
 
 `DumpText()` prints the schedule under `Submissions:`, one line per submission, e.g.
 `(0) Graphics: fork`, `(1) Graphics: [0] [1]`, `(2) Compute: [2], waits for (0)`,
@@ -378,7 +403,8 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `furnace`, `debugView` and `debugScale`.
+`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `restir*` (§8.7), `furnace`, `debugView`, `ser`
+and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -404,13 +430,15 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `furnace` | spheres of roughness 0..1 in a uniform environment | energy conservation (`furnace=1`) |
   | `veach_mis` | 4 glossy plates, 4 spherical lights of equal power, r = 3 cm..90 cm | MIS: NEE and BSDF sampling each fail somewhere |
   | `material_grid` | white / red / gold spheres, roughness 0..1, one area light | BSDF appearance |
-  | `sphere_field` | ~2400 instances of 2 meshes, 32 materials, sun (1.6e9 nits) + sky | TLAS scale, dynamic range, light imbalance |
+  | `sphere_field` | ~2400 instances of 2 meshes, 32 materials, physical sky and sun | TLAS scale, dynamic range, light imbalance |
   | `many_lights` | hall with 66 panels + 300 LEDs, radiance over 2 orders of magnitude | light selection (baseline for many-light sampling) |
   | `door` | light reaches the camera's room only through a door left ajar | indirect-dominated transport |
-  | `terrain` | 2.1M triangle height field, lake, sun + sky | dense geometry, BLAS build and memory |
+  | `terrain` | 2.1M triangle height field, lake, physical sky and sun | dense geometry, BLAS build and memory |
+  | `sunset` | a plain, two spheres and five pillars under a sun 4 degrees high | the physical sky (§8.9), long shadows |
+  | `cumulus` | a 4 km meadow, a farmstead and trees under fair-weather cumulus | volumetric clouds (§8.10): their light, shadows, cost |
 
-  The sun is a disc 10 km away with the real angular radius (0.2665 degrees) and luminance, so
-  daylight scenes use daylight exposure (EV100 14..15).
+  Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
+  luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
 
 ### 8.2 Integrator
 
@@ -429,15 +457,20 @@ differ.
   with BSDF sampling by the power heuristic (MIS). Emitters are one sided (front = `cross(e1, e2)`).
   The light list is also a Walker/Vose alias table, so choosing a light is O(1) (one or two loads)
   whatever the light count; the alias decision uses its own random number, so the selection
-  probability is exactly `probability`, as MIS assumes. Russian roulette from the third bounce.
-- **Hardware ray tracing**: DXR raygen + closest hit for primary and bounce rays (20 byte payload
-  with access qualifiers, bounce loop in raygen, recursion depth 1); inline `RayQuery` for shadow
-  rays and the intersection heatmap. Push constants only carry bindless indices; per-frame data comes
-  from rings in the GPU upload heap (`DeviceLocalHost`) where available.
-- **Kernel variants**: `PathTracer.hlsl` (SM 6.6) and `PathTracerSer.hlsl` (SM 6.9, DXR 1.2 shader
-  execution reordering: bounce rays trace into hit objects, threads regroup by hit instance, the
-  hit is read from the object without a closest-hit call) share `PathTracerKernel.hlsli`. SER is
-  chosen with `pathtracer.ser=1` on GPUs that reorder (`DeviceCaps::shaderExecutionReordering`).
+  probability is exactly `probability`, as MIS assumes. A light tree can choose instead (§8.6).
+  Russian roulette from the third bounce.
+- **Hardware ray tracing**: a DXR ray generation shader runs the whole path (bounce loop in raygen);
+  primary, bounce and shadow rays are inline `RayQuery`s. `TraceRay` into a closest-hit shader (20
+  byte payload) measured 19-29% slower on every test scene at 1080p (cornell_box 2.00 -> 1.53 ms,
+  many_lights 4.00 -> 2.93 ms): the call saves the megakernel's live state around each ray. The miss
+  and closest-hit shaders remain for the SER variant. Push constants only carry bindless indices;
+  per-frame data comes from rings in the GPU upload heap (`DeviceLocalHost`) where available.
+- **Kernel variants** of `PathTracerKernel.hlsli`: `PathTracer.hlsl` (SM 6.6), `PathTracerSer.hlsl`
+  (SM 6.9, DXR 1.2 shader execution reordering: bounce rays trace into hit objects, threads regroup
+  by hit instance, the hit is read from the object without a closest-hit call; `pathtracer.ser=1` on
+  GPUs that reorder, `DeviceCaps::shaderExecutionReordering`) and `PathTracerGi.hlsl`
+  (`AIR_PT_RESTIR_GI`: records ReSTIR GI's candidates, §8.8; compiled apart because that state
+  halves the plain kernel's speed).
 - **Guides** (albedos, normal/roughness, depth, motion) are written only when an active feature
   lists them in `RenderFeature::ConsumedSlots()` (dlss does): they cost about a tenth of the trace.
 
@@ -541,6 +574,348 @@ including each other. Slots live in `renderer::slots`:
   `aces` or `neutral` (Khronos PBR Neutral), highlights NaN/Inf (magenta) and negative values
   (cyan), and optionally encodes sRGB.
 
+### 8.6 Many lights: the light tree
+
+Choosing the light by power ignores where the shading point is: in `many_lights` most samples go
+to panels across the hall that barely light the point. The light tree (Conty Estevez and Kulla,
+"Importance Sampling of Many Lights with Adaptive Tree Splitting", 2018, in the form of pbrt-v4)
+chooses by power, distance and orientation as seen from the point instead.
+
+- **Build** (`renderer::BuildLightTree`, `src/renderer/src/LightTree.cpp`): a binary tree over the
+  light list, split by the surface area orientation heuristic (12 buckets per axis; median splits
+  past depth 40 bound the depth). A node (`gpu::LightTreeNode`, 64 bytes) stores its box, its power
+  and an orientation cone: the emitters' normals lie within `cosThetaO` of `axis`, and each emits
+  within `cosThetaE` (90 degrees for these one-sided triangles) beyond that. Every light stores the
+  bits of its path from the root (`treeTrailLow/High`, `treeDepth`); lights without power are not
+  in the tree. Built with the light list and uploaded with it in the same ring slot, so editing
+  emission rebuilds both.
+- **Sampling** (`SampleLightTree` in `Integrator.hlsli`): from the root, compute the importance of
+  both children (power x a bound of the emitter cosine / squared distance, times a bound of the
+  receiver cosine) and descend into one with probability proportional to it; the product of the
+  choices is the light's probability. Two exact tests give zero importance, so samples are not
+  spent where nothing can arrive: the whole box is below the receiver's tangent plane (the box's
+  support function), or the node's emitters all face one way (`cosThetaO` about 1, such as a group
+  of coplanar panels) and the whole box faces away from the point. When both children are zero no
+  light is chosen: a valid sample of zero.
+- **MIS**: a BSDF-sampled ray that hits an emitter needs the probability the tree would have given
+  that light at the previous vertex; `LightTreePmf` follows the light's trail from the root.
+- **Where**: `pathtracer.lightTreeBounces=N` uses the tree at the first N path vertices and the
+  alias table beyond. `aircli reference --light-tree-bounces N` does the same on the CPU.
+
+Measured (RTX 5070, idle VRAM). Noise is relMSE at 16 spp, 640x360, against an 8192 spp
+reference; time is the `PathTracer.Trace` pass at 1920x1080, 4 spp:
+
+| Scene | Power | Tree at vertex 1 | Tree everywhere |
+|---|---|---|---|
+| `many_lights` noise | 2.27 | 2.01 | 1.16 |
+| `many_lights` trace | 13.4 ms | 27.9 ms | 42.2 ms |
+| `sphere_field` noise | 0.082 | 0.077 | 0.111 |
+| `sphere_field` trace | 5.1 ms | 11.3 ms | 13.1 ms |
+
+The tree halves the noise per sample among many lights, but in `many_lights` (36k emissive
+triangles) each choice walks 16 to 19 levels of dependent loads in divergent warps, so in
+time-to-quality it loses to the O(1) alias table, and in
+`sphere_field`, where the sun dominates every point, it adds noise. That is why
+`lightTreeBounces` defaults to 0. Use it for offline references of many-light scenes, where samples
+are expensive anyway. The images are unbiased either way: means agree within 0.2% at 16 spp and
+0.01% at 8192 spp. `tests/LightTreeTests.cpp` checks that every light has a leaf, that the
+sampled frequencies match `LightTreePmf` and sum to at most 1, and that nearby lights win and lights
+behind the horizon get nothing.
+
+### 8.7 ReSTIR DI
+
+ReSTIR DI estimates the direct light at each pixel's first surface with spatiotemporal reservoir
+resampling (Bitterli et al. 2020) instead of one NEE sample per path, in the generalized RIS
+formulation (Lin et al. 2022; the 2023 SIGGRAPH course "A Gentle Introduction to ReSTIR").
+`pathtracer.restirDi` (and `restirGi`, §8.8): 0 off, 1 (default) only when frames do not accumulate
+(`accumulate=0`, the real-time path under a denoiser), 2 always (to check it is unbiased by
+accumulating). Files: `shaders/ReSTIRDI.hlsli` (the DI math), `shaders/ReSTIRCommon.hlsli` (shared
+with GI: receivers, neighbours, push constants), `ReSTIRDIInitial/Temporal/Spatial.hlsl`,
+`shaders/ReSTIRShared.h`, `src/ReSTIR.h/.cpp` (buffers and passes of both).
+
+- **Split with the path tracer**: with `kFlagReSTIR`, `PathTracer.Trace` leaves out the direct light
+  from emissive triangles at the first surface (no NEE there, and no emission found by its BSDF
+  sample), and writes the first sample's hit (`PrimaryHit`: instance, primitive, barycentrics, plus a
+  normal, roughness and distance for the choice of neighbours). The passes rebuild the surface from it with the
+  integrator's own `LoadSurface`, so they shade exactly what the path tracer would have, and add
+  the result (times the samples per pixel) to the accumulation before `PathTracer.Resolve`. The
+  environment is still reached only by BSDF sampling, and deeper vertices keep NEE.
+- **Samples**: a point on an emissive triangle (light index, barycentrics), the same point in every
+  pixel's domain, so shifts are the identity with Jacobian 1. The target function p̂ is the luminance
+  of the unshadowed contribution f · Le · cos / d². A reservoir (16 bytes) holds the sample, its
+  unbiased contribution weight W and its confidence M.
+- **Passes** (one thread per pixel, 8x8 groups):
+
+  | Pass | Inputs | What it does | Shadow rays |
+  |---|---|---|---|
+  | `ReSTIRDI.Initial` | primary hits | RIS over `restirLights` points on lights chosen by power and `restirBsdf` BSDF rays that hit an emitter, balance heuristic between the two strategies | 1 BSDF + 1 |
+  | `ReSTIRDI.Temporal` | + last frame's hits and final reservoirs | reprojects the point with the previous camera; if the surface there is similar, generalized balance heuristic between the two domains, last frame's confidence capped at `restirHistory` | 1 + 1 |
+  | `ReSTIRDI.Spatial` | temporal reservoirs | `restirSpatial` neighbours in a disc of `restirRadius` pixels (`restirDisocclusion` where the pixel has no history), defensive pairwise MIS (course eq. 7.8) with this pixel's visibility in the target; shades and stores the result as next frame's history | k + k |
+
+- **Visibility reuse, without bias**: each pass traces the shadow ray of the sample it chose when the
+  sample is new to the pixel, and zeroes W when it is occluded, so a reservoir only ever holds light
+  its own surface sees. That domain restriction must appear in the MIS weights: another pixel's (or
+  frame's) reservoir may get weight for a sample only if that surface sees it. With
+  `restirUnbiased=1` (default) the weights trace exactly that visibility, one ray per reused
+  reservoir. `restirUnbiased=0` assumes the other surface sees the sample: the classic biased
+  visibility reuse, fewer rays, penumbrae and contact shadows darker (-2% on `many_lights`, -2.8% on
+  `cornell_box` direct light).
+- **Shading with every candidate**: the spatial pass traces this pixel's visibility for each reused
+  sample, so its target is p̂ times visibility and the chosen sample needs no shading ray. The
+  direct light it adds is the sum of all candidates' contributions weighted by their resampling
+  weights (the expectation of f(Y) W over the choice, as in ReSTIR PT Enhanced, Lin et al. 2026)
+  instead of the chosen sample's alone: with the scalar target choosing by luminance, one light per
+  pixel otherwise shows as colour noise. Per-channel relMSE on `many_lights` drops 4x (5.4 -> 1.3),
+  for about 0.15 ms.
+- **Neighbour choice**: from geometry only (normal within 60 degrees, distance to the eye within
+  10%), never from the samples, so heuristics change the noise but not the expected value. Pixels
+  without a hit keep empty reservoirs.
+- **History**: primary hits and final reservoirs are double-buffered by frame parity (`ReSTIR` owns
+  them; they exist only once ReSTIR has been used). A scene or setting change, or a frame without
+  ReSTIR, starts without history; a camera move does not (the reprojection handles it).
+- **Limits**: lights must not move between frames (samples are reused as light-list points); light
+  indices have 24 bits. Reuse is per-pixel only: large disocclusions recover over a few
+  frames (the disocclusion boost helps); stochastic pairwise MIS over screen-space cells (Hedstrom et
+  al. 2026) is the known fix.
+
+Validation (`aircli render --set pathtracer.debugView=8` isolates the direct light):
+
+- Unbiased: accumulating ReSTIR frames (`accumulate=1`) converges to the NEE reference. Mean
+  difference after 8192 frames: `many_lights` -0.013%, full image -0.010%; `cornell_box` -0.012%
+  and `veach_mis` -0.07% after 4096 (NEE alone: -0.010% and +0.09%). With `spp=4` the scaling holds.
+- Noise of one frame (`accumulate=0, spp=1`, after 30 frames of history), relMSE of the direct
+  light at 1920x1080: `many_lights` NEE 21.8, ReSTIR 0.20 (k=3: 0.18, 16 light candidates: 0.13,
+  no BSDF candidate: 1.95, which the glossy floor needs). At 640x360: `veach_mis` 1.88 -> 0.0098,
+  `cornell_box` 0.0089 -> 0.0019.
+- Cost at 1920x1080 (RTX 5070, defaults, `accumulate=0, spp=1`):
+
+  | Scene | Trace | Initial | Temporal | Spatial |
+  |---|---|---|---|---|
+  | `cornell_box` | 1.45 ms | 0.32 ms | 0.35 ms | 0.73 ms |
+  | `door` | 2.73 ms | 0.46 ms | 0.39 ms | 0.76 ms |
+  | `many_lights` | 2.74 ms | 1.10 ms | 0.65 ms | 1.62 ms |
+  | `sphere_field` | 1.12 ms | 0.60 ms | 0.61 ms | 1.22 ms |
+
+  The unbiased MIS rays cost about 0.1 ms; each neighbour about 0.4 ms on `many_lights`, each light
+  candidate about 0.1 ms. Rebuilding a surface from its `PrimaryHit` costs about 0.1 ms per use
+  (six per pixel), cheaper in total than storing a full-precision G-buffer twice.
+- When frames accumulate, ReSTIR's correlated samples converge about as fast per unit of time as
+  plain paths (§8.8 has the measurement), and with several samples per pixel per frame only the first
+  one's light is resampled; hence the default of running it in real time only.
+- Tests: `PathTracer_ReSTIRResamplesAcrossFrames` and `PathTracer_ReSTIROnlyRunsForLitViews`
+  (Null backend: passes, buffer ping-pong, modes, which views run it).
+
+### 8.8 ReSTIR GI
+
+`pathtracer.restirGi` (same modes as `restirDi`) resamples the indirect light at each pixel's first
+surface, all paths of two or more bounces, across pixels and frames (Ouyang et al. 2021), in the
+path-space form of ReSTIR PT (Lin et al. 2022) with the reconnection shift always at the second
+vertex x2. Files: `shaders/ReSTIRGI.hlsli`, `ReSTIRGITemporal/Spatial.hlsl`, the `GiPath` part of
+`TracePath` (Integrator.hlsli), `PathTracerGi.hlsl`.
+
+- **Initial samples from the path tracer**: with `kFlagReSTIRGI` the trace kernel (its GI variant)
+  leaves every path of two or more bounces out of the radiance. Its first sample records them at x2
+  instead, as two candidate paths: NEE at x2 (the light point), and x2's BSDF continuation, whose
+  radiance arriving at x2 splits into the emission at x3 (weighted against NEE at x2 by MIS) and the
+  rest, gathered with throughputs from x3 on. RIS picks one by the luminance of its contribution and
+  writes it as the pixel's initial reservoir (`GiReservoir`, 64 bytes): x2's hit, the outgoing
+  direction at x2, the two radiances, the light pdf the MIS needs, W, M and which of the two it is.
+  The two candidates' sum is exactly what the path tracer would have added.
+- **The shift, without a Lambertian assumption**: a sample moves to another pixel by connecting
+  that pixel's x1 to the same x2 and keeping the rest: in area measure at x2 times solid angle at x2
+  the shift is the identity. Its value there is evaluated in full: x1's BSDF towards x2, the
+  geometry term, x2's BSDF between the new incoming and the kept outgoing direction (x2's shading
+  frame rebuilt as `TracePath` builds it), and the power heuristic between NEE and BSDF sampling at
+  x2, whose BSDF pdf depends on the incoming direction. Only the radiance arriving at x2 is reused as
+  it is, and that does not depend on x1, so the reuse stays unbiased on glossy x2 too.
+- **Where reconnection is allowed**: through a near-mirror vertex a moved path's value swings
+  between nothing and a spike, which reuse turns into fireflies that persist. The shift exists only
+  when x1 on both sides and x2 have a roughness of at least 0.25 (`kGiMinRoughness`; ReSTIR PT
+  Enhanced, Lin et al. 2026, keeps such a threshold before the reconnection too): smoother pixels
+  keep their own sample, neighbours are chosen among rough pixels, and a sample with a smooth x2
+  stays where it was found. The criteria depend on surfaces only, so the reuse stays unbiased.
+- **Passes**, sharing DI's receivers, neighbour choice, confidence cap and visibility handling (a
+  reservoir only holds samples whose x2 its surface sees; MIS weights trace the other surfaces'
+  visibility with `restirUnbiased`):
+
+  | Pass | Inputs | What it does | Shadow rays |
+  |---|---|---|---|
+  | `ReSTIRGI.Temporal` | initial reservoirs, last frame's hits and history | generalized balance heuristic with the reprojected pixel | 1 + 1 |
+  | `ReSTIRGI.Spatial` | temporal reservoirs | defensive pairwise MIS with neighbours; shades every candidate by its resampling weight; history | k + k |
+
+Validation (`--set pathtracer.debugView=9` isolates the indirect light):
+
+- Unbiased: accumulated ReSTIR GI (`restirGi=2`, 4096 frames, 640x360) matches 8192 spp NEE
+  references within 0.06% on `cornell_box`, `many_lights`, `door` and `material_grid` (NEE alone:
+  within 0.03%); DI and GI together on the full image within 0.04%. In the white furnace the
+  accumulated mean is the same 0.1799 as without it.
+- Noise of one frame (`accumulate=0, spp=1`, after 30 frames, 640x360), relMSE of the indirect
+  light: `cornell_box` 0.284 -> 0.0089 (temporal reuse alone 0.0138, spatial alone 0.0606), `door`
+  52.9 -> 0.68, `many_lights` 78.9 -> 5.0, `material_grid` 0.044 -> 0.026. Of the whole image with
+  DI and GI: `door` 50.7 -> 0.57, `cornell_box` 0.223 -> 0.0083, `many_lights` 40.4 -> 2.94.
+- The white furnace is the exception: white, energy-conserving BSDFs under a uniform sky make plain
+  BSDF sampling almost noiseless, so any reuse adds noise there (std of one frame 0.016 -> 0.021).
+  It stays a test of the mean only.
+- Cost at 1920x1080 (RTX 5070, `accumulate=0, spp=1`, frame time NEE -> DI -> GI -> both):
+  `cornell_box` 1.44 -> 2.89 -> 5.52 -> 6.87 ms, `door` 2.75 -> 4.37 -> 8.47 -> 9.98 ms,
+  `many_lights` 2.88 -> 6.17 -> 8.88 -> 11.65 ms. Of GI's share, the trace kernel's recording costs
+  1.1-1.3 ms (register pressure), the temporal pass 1.0-1.5 ms and the spatial pass 2.0-3.3 ms
+  (per neighbour two surfaces rebuilt, three BSDF pairs, two shadow rays). Next steps there: ReSTIR
+  PT Enhanced's paired spatial reuse (one shift serves both pixels) and a cheaper target function.
+- Accumulating instead (`accumulate=1`): at equal time, 4096 frames of DI+GI against 16384 frames of
+  NEE reach about the same error (`many_lights` 0.0067 vs 0.0066, `door` 0.0077 vs 0.0093,
+  `cornell_box` rmse 0.0027 vs 0.0019), which is why both default to real time only.
+- Tests: `PathTracer_ReSTIRGIResamplesTheIndirectLight` (Null backend: passes, history ping-pong,
+  with and without DI, the furnace).
+
+
+### 8.9 Physical sky
+
+`SceneDesc::sky` (`renderer/Sky.h`) replaces the uniform `environment` with an Earth-like
+atmosphere lit by the sun: sun elevation, azimuth and angular radius, the scene's altitude, the
+aerosol (haze) optical depth at 550 nm (0.005 pristine, 0.05 the default clear day, 0.3 and up
+hazy) and the albedo of the planet seen below the horizon. `sphere_field`, `terrain` and `sunset`
+use it; `aircli render|reference --sun ELEVATION,AZIMUTH [--aerosols DEPTH]` gives it to any scene,
+and the editor's Scene panel edits it.
+
+- **Model** (`src/renderer/src/Sky.cpp`): the medium and data of Bruneton's 2017 reference
+  implementation (Rayleigh scattering 1.24062e-6 / lambda^4 per metre over an 8 km scale height;
+  aerosols over 1.2 km with single-scattering albedo 0.9 and a Cornette-Shanks phase, g = 0.8; 300
+  Dobson units of ozone peaking at 25 km; the measured solar spectrum outside the atmosphere), and
+  the light transport of Hillaire 2020: a transmittance table (256 x 64, Bruneton's
+  parameterisation, 500 steps each), a multiple-scattering table (32 x 32; 64 directions, all
+  orders as the geometric series of the second) and a 96-step ray march per sky direction with the
+  planet's sunlit ground below the horizon.
+- **Spectral, then RGB**: every table is computed for 16 bins of 25 nm (380-780 nm) and the sky
+  radiance converted to linear sRGB in nits through the CIE 1931 colour matching functions (the
+  analytic fit of Wyman, Sloan and Shirley 2013) and 683 lm/W. Colours come from spectra: the
+  reddening of a low sun, the blue zenith, the twilight sky.
+- **One table, two renderers**: the result is a 256 x 256 table of sky radiance over all
+  directions as seen from the scene (`u = sqrt(azimuth from the sun / pi)`, elevation through a
+  signed square root: texels gather near the sun's azimuth and the horizon) plus the sun's
+  radiance after the atmosphere (`gpu::SkyData`, `shader/SkyShared.h`). The CPU builds it when the
+  sky changes (0.75 s in debug builds, on all cores) and `Scene` uploads it into its ring; the GPU
+  kernels and the CPU reference read it through the same `SkyLookup.hlsli`, so their skies are
+  identical.
+- **The sun is a disc light**: every path vertex samples a direction uniformly within the disc
+  (next event estimation, one shadow ray), weighted by the power heuristic against BSDF samples
+  that reach the disc, exactly like the emissive triangles. The sky itself is only reached by BSDF
+  sampling. ReSTIR DI keeps resampling the triangles only; in ReSTIR GI the sun's NEE at x2 is one
+  more NEE candidate (streamed with the triangle's), and a continuation that escapes into the disc
+  keeps the sun as its MIS-weighted emission. The furnace replaces the sky with a uniform white one
+  and switches the sun off.
+- **Aerial perspective**: the same ray march, stopped at 32 distances (quadratically spaced up to
+  100 km, the first at 104 m), fills two 32 x 64 x 32 RGBA16F tables over the sky table's
+  directions: the light the air scatters towards the viewer over that distance and its
+  transmittance (spectral, turned into RGB as the factor by which it changes sunlight's colour).
+  What a camera ray sees on its surface becomes `inscatter + transmittance * radiance`
+  (`AddAerialPerspective`; ReSTIR's light at that surface gets the same transmittance), and so does
+  everything a ray sees on the clouds (§8.10); the sky table includes the air already. Segments
+  between surfaces of the scene are taken as clear. The GPU samples the tables with hardware
+  filtering (linear clamp), the CPU reference emulates it (half-float texels, 8-bit weights).
+
+Validation:
+
+- `tests/SkyTests.cpp`: the zenith optical depth at 550 nm (0.19: Rayleigh 0.11, ozone 0.03,
+  aerosols 0.05) and its transmittance; the solar spectrum's illuminance outside the atmosphere
+  (about 128 klux); with the sun 60 degrees high a sun of 1.3-1.75e9 nits, 75-100 klux direct and
+  8-30 klux of sky light on a horizontal surface, a blue zenith of 1.5-12 kcd/m^2; a red sun and
+  warm horizon at 2 degrees; no sun and a dim sky in civil twilight; the lookup returns the table and
+  is mirror-symmetric; sun samples stay in the disc.
+- `Integrator_SunNeeAndBsdfSamplingAgree`: with a 12-degree sun, NEE + MIS and BSDF sampling alone
+  agree (0.5% apart at 256 spp).
+- GPU against the CPU reference on `sunset` (96x54): the means differ by 0.06%, by 0.13% with
+  ReSTIR DI and GI accumulated.
+- `Sky_AerialPerspectiveMatchesTheSkyAndTheAir`: no air at the viewer; looking up through the whole
+  atmosphere the air's light is the sky's within 1% (2% near the sun and 3% at the zenith, where the
+  table's texels are wide); 10 km along the ground let through exp(-optical depth) in green (within
+  0.03), red more than blue; the air's light grows with distance.
+- GPU against the CPU reference on `terrain` (160x90): the means differ by 0.023%, by 0.024% with
+  ReSTIR DI and GI accumulated.
+- Not modelled yet: the air's light in cloud shadows (crepuscular rays: the tables assume clear
+  sunlight); a viewer far above the scene's altitude (the tables are computed for that altitude);
+  the sun's limb darkening.
+
+### 8.10 Volumetric clouds
+
+`SceneDesc::clouds` (`renderer/Clouds.h`) adds a layer of cumulus above the scene: the heights of
+its base and tops, coverage, extinction at density 1, the droplets' effective diameter and
+single-scattering albedo, a shape scale and a seed. `cumulus` uses it; `aircli render|reference
+--clouds COVERAGE[,BOTTOM,TOP]` adds it to any scene (0 removes it; it switches on the physical sky,
+whose sun lights the clouds), and the editor's Scene panel edits it.
+
+- **Density** (`src/renderer/src/Clouds.cpp`), procedural, baked on the CPU into two 8-bit 3D
+  textures when the clouds change (0.2 s in debug builds, all cores):
+  - the base, 256 x 256 texels over a 12.8 km tile that repeats horizontally and 25 m layers in
+    height. A 2D weather field (gradient noise for regional variation, cellular noise that gathers
+    clouds into cells) is thresholded at its 1 - coverage quantile, so the requested fraction of the
+    tile lies under cloud outlines; how far it exceeds the threshold sets a cloud's height and
+    density. Bases are flat at the condensation level, tops are domes, billowy cellular noise
+    carves the outline and liquid water grows with height above the base.
+  - the detail, 64^3 texels of cellular noise repeating every 400 m, which erodes the base's fringe
+    at render time; the eroded density is then sharpened (times 10, clamped to 1): crisp outlines,
+    even interiors.
+  - majorants, one per 8 x 4 x 8 base texels plus the texels around them that trilinear filtering
+    reaches. They bound the density everywhere because the erosion only lowers it and the
+    sharpening is monotonic.
+- **One lookup, two renderers**: `shader/CloudLookup.hlsli` (the density, a 3D DDA over the
+  majorant cells that skips empty ones, delta and ratio tracking, the phase function) is shared
+  like the integrator. The GPU samples the textures with hardware trilinear filtering (the root
+  signature's linear-wrap static sampler); the CPU reference emulates that filter including its
+  8-bit weights (`renderer::SampleTexture3D`). Hardware filtering halved the cost of a cloud frame
+  compared with 8 buffer loads per lookup.
+- **Phase function**: Mie scattering by water droplets as fitted by Jendersie and d'Eon 2023:
+  Henyey-Greenstein for the diffraction peak (g = 0.995 at 20 micrometres) blended with Draine's
+  function for the rest (g = 0.59, alpha = 27), all four parameters from the droplet diameter
+  (5-50 micrometres); both lobes are sampled exactly (Draine's CDF inverts in closed form).
+- **Delta-M scaling** by default (`Clouds::exactPhase` false, Wiscombe 1977): the diffraction peak,
+  about half of all scattering within a fraction of a degree, counts as unscattered light. The
+  extinction becomes sigma (1 - f albedo) and the albedo albedo (1 - f) / (1 - f albedo) for the
+  peak's weight f, and Draine's function alone is the phase function. Transport away from the
+  forward direction is unchanged (the means of the two agree to 0.1%), but the rare paths that line
+  up with the sun inside the peak, each carrying a large share of its 1.6e9 nits, are gone: with the
+  exact phase function sunlit clouds sparkle with fireflies for thousands of samples. It only
+  changes the image within a degree or so of the sun (the sun seen through a thin cloud keeps its
+  sharp disc instead of a glowing peak around it).
+- **Transport** (`EscapeRadiance` in `Integrator.hlsli`): the layer lies above all geometry
+  (`Validate` checks it), so a path meets it only on its way to the sky. Every ray that leaves the
+  geometry, and a camera ray from above the cloud base before it reaches its surface, walks through
+  the clouds by delta tracking. At each scattering event the sun is sampled by next event
+  estimation, its transmittance by ratio tracking (Russian roulette below 0.1), and weighted by the
+  power heuristic against phase sampling, which continues the walk. A walk that leaves the layer
+  gets the sky table's radiance; below the horizon that is the planet's sunlit ground: light that
+  the scene's own geometry reflects back up into the clouds is not traced. The sun's NEE at a
+  surface is dimmed by the clouds' transmittance, which casts their shadows. `pathtracer.cloudEvents`
+  (256) caps the scattering events of a walk; light beyond it is lost (raising it to 4096 changes
+  `cumulus` by less than its noise).
+- **ReSTIR**: DI is unchanged (it resamples triangle lights only). In GI the sun's NEE at x2
+  carries the clouds' transmittance into its candidate, and a continuation through the clouds
+  splits into the sun seen straight through (the MIS-weighted emission) and the rest.
+
+Validation:
+
+- `tests/CloudTests.cpp`: the phase fit at 20 micrometres; the phase function integrates to 1 for
+  5, 20 and 50 micrometres with a mean cosine of 0.75-0.92; sampled cosines follow its CDF at 8 cuts
+  (400k samples, within 0.003); the volume covers about the requested sky and, along 2000 random
+  rays, the density never exceeds the majorant of the cell the DDA is in; the density repeats with
+  the tile; ratio and delta tracking both match a 0.5 m ray march of exp(-optical depth) for rays of
+  optical depth 0.1-3; disabled clouds are transparent.
+- `Integrator_CloudsVanishInAWhiteFurnace`: with albedo 1 in a uniform environment every path
+  through the clouds returns the environment exactly, so every pixel is 0.18.
+- `Integrator_CloudSunNeeAndPhaseSamplingAgree`: with a 12-degree sun, NEE + MIS and phase sampling
+  alone agree within 0.5% at 512 spp, with and without delta-M scaling.
+- `Scene_CloudsStayAboveTheGeometry`, `Scene_CloudResourcesFollowEdits`.
+- GPU against the CPU reference on `cumulus` (160x90, `--sun 38,-20`, 8192 against 2048 spp): the
+  means differ by 0.014%; sky, horizon and ground separately by at most 0.2%.
+- Cost (RTX 5070, 960x540, 4 spp per frame, front-lit `cumulus`): 78 ms per frame. Multiple
+  scattering in thick media is the most expensive transport here, and noisy: a cloud pixel's
+  samples have a relative standard deviation of about 0.8, so clouds need hundreds of samples (or
+  a denoiser).
+- The air between a ray's origin and its first collision with the clouds dims and adds to their
+  light (§8.9's aerial perspective), so distant clouds fade into the haze.
+- Not modelled: the planet's curvature (the layer is flat and ends 100 km along a ray), wind, the
+  scene's own geometry lighting the clouds, the clouds' shadows in the air between them and the
+  viewer.
 ---
 
 ## 9. Editor

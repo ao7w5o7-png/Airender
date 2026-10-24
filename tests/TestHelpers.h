@@ -5,6 +5,7 @@
 
 #include "TestFramework.h"
 
+#include "air/core/Assert.h"
 #include "air/core/TaskSystem.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/RenderFeature.h"
@@ -16,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -27,6 +29,14 @@ inline bool ContainsLine(const std::vector<std::string>& lines, std::string_view
 {
     return std::any_of(lines.begin(), lines.end(),
                        [&](const std::string& l) { return l.find(needle) != std::string::npos; });
+}
+
+// A built-in scene the test names: it must exist.
+inline air::renderer::SceneDesc BuiltinScene(std::string_view name)
+{
+    std::optional<air::renderer::SceneDesc> scene = air::renderer::MakeBuiltinScene(name);
+    AIR_CHECK(scene.has_value(), "no built-in scene '{}'", name);
+    return std::move(*scene);
 }
 
 inline size_t CountLines(const std::vector<std::string>& lines, std::string_view needle)

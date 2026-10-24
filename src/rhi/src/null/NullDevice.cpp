@@ -822,8 +822,10 @@ private:
                                       describe(), QueueName(last.queue), last.fence, QueueName(queue)));
         }
         last = {queue, fence};
+        // A discarding barrier too: like D3D12 it transitions from `before`, which for a reused
+        // placed resource is the state an earlier frame left it in.
         auto [it, inserted] = mTrackedState.try_emplace(key, Access::None);
-        if (!barrier.discard && it->second != barrier.before)
+        if (it->second != barrier.before)
         {
             const std::string name =
                 barrier.type == Barrier::Type::Texture ? Describe(barrier.texture) : Describe(barrier.buffer);

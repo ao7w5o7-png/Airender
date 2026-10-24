@@ -1,6 +1,7 @@
 #include "TestFramework.h"
 
 #include "air/rdg/RenderGraph.h"
+#include "air/rdg/TransientResourcePool.h"
 
 #include <algorithm>
 
@@ -379,30 +380,69 @@ TEST(RenderGraph_GraphicsWaitsForAsyncReader)
     f.device->DestroyTexture(shared);
 }
 
-// A transient touched by an async pass may be in use while any graphics pass runs, so it never
-// shares memory, even with a transient whose declared lifetime does not overlap.
-TEST(RenderGraph_AsyncTransientsAreNotAliased)
+// Transients on different queues share memory only when the cross-queue waits order every use of one
+// before every use of the other; declaration order says nothing about when an async pass runs.
+TEST(RenderGraph_AsyncTransientsAliasOnlyWhenWaitsOrderThem)
 {
-    for (bool async : {false, true})
     {
+        // "Early" is written on the compute queue while the graphics queue uses "Late": no order.
         Fixture f;
         RenderGraph graph(*f.device);
         TextureRef out = graph.ImportTexture(f.output, Access::None, Access::SRVCompute);
-        TextureRef first = graph.CreateTexture(UavTexture("First"));
-        TextureRef second = graph.CreateTexture(UavTexture("Second"));
+        TextureRef early = graph.CreateTexture(UavTexture("Early"));
+        TextureRef late = graph.CreateTexture(UavTexture("Late"));
         graph.AddPass(
-            "WriteFirst", async ? PassFlags::Compute | PassFlags::AsyncCompute : PassFlags::Compute,
-            [&](PassBuilder& b) { b.Write(first, Access::UAVCompute); }, f.Dispatch());
+            "WriteEarly", PassFlags::Compute | PassFlags::AsyncCompute,
+            [&](PassBuilder& b) { b.Write(early, Access::UAVCompute); }, f.Dispatch());
         graph.AddPass(
-            "UseFirst", PassFlags::Compute,
+            "WriteLate", PassFlags::Compute, [&](PassBuilder& b) { b.Write(late, Access::UAVCompute); }, f.Dispatch());
+        graph.AddPass(
+            "UseLate", PassFlags::Compute,
             [&](PassBuilder& b)
             {
-                b.Read(first, Access::SRVCompute);
+                b.Read(late, Access::SRVCompute);
                 b.Write(out, Access::UAVCompute);
             },
             f.Dispatch());
         graph.AddPass(
-            "WriteSecond", PassFlags::Compute, [&](PassBuilder& b) { b.Write(second, Access::UAVCompute); },
+            "UseEarly", PassFlags::Compute,
+            [&](PassBuilder& b)
+            {
+                b.Read(early, Access::SRVCompute);
+                b.Write(out, Access::UAVCompute);
+            },
+            f.Dispatch());
+        graph.Execute();
+        EXPECT(graph.GetStats().transientHeapSize == graph.GetStats().transientBytesUnaliased);
+        EXPECT(!HasValidationErrors(f.device->TakeCapturedCommands()));
+    }
+    {
+        // "First" ends on the graphics queue before the async pass that writes "Second" starts (it
+        // waits for that submission), and its reader waits for it: the two share memory.
+        Fixture f;
+        RenderGraph graph(*f.device);
+        TextureRef out = graph.ImportTexture(f.output, Access::None, Access::SRVCompute);
+        TextureRef first = graph.CreateTexture(UavTexture("First"));
+        TextureRef middle = graph.CreateTexture(UavTexture("Middle"));
+        TextureRef second = graph.CreateTexture(UavTexture("Second"));
+        graph.AddPass(
+            "WriteFirst", PassFlags::Compute, [&](PassBuilder& b) { b.Write(first, Access::UAVCompute); },
+            f.Dispatch());
+        graph.AddPass(
+            "FirstToMiddle", PassFlags::Compute,
+            [&](PassBuilder& b)
+            {
+                b.Read(first, Access::SRVCompute);
+                b.Write(middle, Access::UAVCompute);
+            },
+            f.Dispatch());
+        graph.AddPass(
+            "MiddleToSecond", PassFlags::Compute | PassFlags::AsyncCompute,
+            [&](PassBuilder& b)
+            {
+                b.Read(middle, Access::SRVCompute);
+                b.Write(second, Access::UAVCompute);
+            },
             f.Dispatch());
         graph.AddPass(
             "UseSecond", PassFlags::Compute,
@@ -414,11 +454,133 @@ TEST(RenderGraph_AsyncTransientsAreNotAliased)
             f.Dispatch());
         graph.Execute();
         const auto& stats = graph.GetStats();
-        // Without async the two share memory; with it each has its own.
-        EXPECT(async ? stats.transientHeapSize == stats.transientBytesUnaliased
-                     : stats.transientHeapSize < stats.transientBytesUnaliased);
+        EXPECT(stats.asyncComputePassCount == 1);
+        EXPECT(stats.transientHeapSize < stats.transientBytesUnaliased); // First and Second share
         EXPECT(!HasValidationErrors(f.device->TakeCapturedCommands()));
     }
+}
+
+// A TransientResourcePool keeps the heap and the placed resources: a second frame like the first
+// creates nothing, and its first barriers start from the states the first frame left.
+TEST(RenderGraph_TransientPoolReusesMemoryAcrossFrames)
+{
+    Fixture f;
+    TransientResourcePool pool(*f.device);
+    const u32 texturesBefore = f.device->GetMemoryStats().liveTextures;
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        {
+            RenderGraph graph(*f.device, nullptr, {}, &pool);
+            const Access initial = frame == 0 ? Access::None : Access::SRVCompute;
+            TextureRef out = graph.ImportTexture(f.output, initial, Access::SRVCompute);
+            TextureRef temp = graph.CreateTexture(UavTexture("Temp"));
+            graph.AddPass(
+                "Write", PassFlags::Compute, [&](PassBuilder& b) { b.Write(temp, Access::UAVCompute); }, f.Dispatch());
+            graph.AddPass(
+                "Read", PassFlags::Compute,
+                [&](PassBuilder& b)
+                {
+                    b.Read(temp, Access::SRVCompute); // the frame leaves Temp in SRVCompute
+                    b.Write(out, Access::UAVCompute);
+                },
+                f.Dispatch());
+            graph.Execute();
+            const auto& stats = graph.GetStats();
+            EXPECT(stats.transientResourcesCreated == (frame == 0 ? 1u : 0u));
+            EXPECT(stats.transientResourcesReused == (frame == 0 ? 0u : 1u));
+        }
+        f.device->EndFrame();
+    }
+    const auto lines = f.device->TakeCapturedCommands();
+    EXPECT(Contains(lines, "Barrier [tex 'Temp' None -> UAVCompute discard]"));       // new
+    EXPECT(Contains(lines, "Barrier [tex 'Temp' SRVCompute -> UAVCompute discard]")); // reused
+    EXPECT(!HasValidationErrors(lines));
+    EXPECT(pool.GetStats().heaps == 1 && pool.GetStats().heapsCreated == 0 && pool.GetStats().resources == 1);
+    EXPECT(f.device->GetMemoryStats().liveTextures == texturesBefore + 1); // only the pooled Temp
+}
+
+// A pooled transient first used on the compute queue but last read by a pixel shader ends the frame
+// in common, so the compute queue can take it back next frame.
+TEST(RenderGraph_TransientPoolReturnsResourcesTheComputeQueueCanTake)
+{
+    Fixture f;
+    TransientResourcePool pool(*f.device);
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        TextureHandle drawn;
+        {
+            RenderGraph graph(*f.device, nullptr, {}, &pool);
+            TextureDesc desc = UavTexture("Shared");
+            TextureRef shared = graph.CreateTexture(desc);
+            TextureDesc targetDesc = UavTexture("Target");
+            targetDesc.usage = targetDesc.usage | TextureUsage::RenderTarget;
+            TextureRef target = graph.CreateTexture(targetDesc);
+            graph.ExtractTexture(target, Access::SRVGraphics, &drawn);
+            graph.AddPass(
+                "Generate", PassFlags::Compute | PassFlags::AsyncCompute,
+                [&](PassBuilder& b) { b.Write(shared, Access::UAVCompute); }, f.Dispatch());
+            graph.AddPass(
+                "Draw", PassFlags::Raster,
+                [&](PassBuilder& b)
+                {
+                    b.Read(shared, Access::SRVGraphics); // graphics only: the compute queue cannot leave it
+                    b.Write(target, Access::RenderTarget);
+                },
+                [](PassContext&) {});
+            graph.Execute();
+            EXPECT(graph.GetStats().transientResourcesReused == (frame == 0 ? 0u : 1u));
+        }
+        f.device->DestroyTexture(drawn);
+        f.device->EndFrame();
+    }
+    const auto lines = f.device->TakeCapturedCommands();
+    EXPECT(Contains(lines, "[tex 'Shared' SRVGraphics -> None]")); // among the graphics queue's final barriers
+    EXPECT(Contains(lines, "[Compute] Barrier [tex 'Shared' None -> UAVCompute discard]"));
+    EXPECT(!HasValidationErrors(lines));
+    f.device->WaitIdle();
+}
+
+// What frames stop using is released after Config::retireAfterFrames frames; a bigger frame gets a
+// bigger heap.
+TEST(RenderGraph_TransientPoolRetiresUnusedMemory)
+{
+    Fixture f;
+    TransientResourcePool pool(*f.device, {.heapGranularity = 64 << 10, .retireAfterFrames = 3});
+    auto frame = [&](u32 size)
+    {
+        RenderGraph graph(*f.device, nullptr, {}, &pool);
+        TextureRef out = graph.ImportTexture(f.output, Access::None, Access::None);
+        TextureDesc desc = UavTexture("Temp");
+        desc.width = desc.height = size;
+        TextureRef temp = graph.CreateTexture(desc);
+        graph.AddPass(
+            "Write", PassFlags::Compute, [&](PassBuilder& b) { b.Write(temp, Access::UAVCompute); }, f.Dispatch());
+        graph.AddPass(
+            "Read", PassFlags::Compute,
+            [&](PassBuilder& b)
+            {
+                b.Read(temp, Access::SRVCompute);
+                b.Write(out, Access::UAVCompute);
+            },
+            f.Dispatch());
+        graph.Execute();
+        f.device->TakeCapturedCommands();
+    };
+    frame(256); // needs a bigger heap than the 64 KiB granularity
+    const u64 bigHeap = pool.GetStats().heapBytes;
+    frame(16); // fits the big heap: no new one
+    EXPECT(pool.GetStats().heaps == 1 && pool.GetStats().heapBytes == bigHeap);
+    EXPECT(pool.GetStats().resources == 2); // the 256 and the 16 texture at offset 0
+    for (int i = 0; i < 4; ++i)
+    {
+        frame(16);
+    }
+    EXPECT(pool.GetStats().resources == 1); // the 256 one went unused for 3 frames
+    // Trim releases sooner (near the VRAM budget): here what the last frame did not use.
+    frame(256);
+    EXPECT(pool.GetStats().resources == 2);
+    pool.Trim(2);
+    EXPECT(pool.GetStats().resources == 1 && pool.GetStats().resourcesReleased == 1);
 }
 
 // Each frame's async pass rewrites a texture the previous frame's graphics pass read: the compute

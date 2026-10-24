@@ -22,6 +22,7 @@
 #define AIR_INOUT(T) T&
 #define AIR_OUT(T) T&
 #define AIR_CONST static constexpr
+#define AIR_INLINE inline // functions defined in shared headers, outside a class
 
 // HLSL spells its intrinsics in lower case; the C++ mirror keeps the same names.
 // NOLINTBEGIN(readability-identifier-naming)
@@ -165,6 +166,7 @@ inline bool isfinite(float v)
 }
 using std::abs;
 using std::acos;
+using std::asin;
 using std::cos;
 using std::exp;
 using std::floor;
@@ -271,6 +273,7 @@ inline bool any(float3 v)
 #define AIR_INOUT(T) inout T
 #define AIR_OUT(T) out T
 #define AIR_CONST static const
+#define AIR_INLINE
 
 #endif
 

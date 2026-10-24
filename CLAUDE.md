@@ -29,10 +29,18 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Rendering correctness: `aircli reference --scene cornell_box --output ref.pfm` renders on the CPU
   with the same `.hlsli` integrator; compare a GPU `render --output gpu.pfm` against it. BSDF and
   integrator changes must keep `BsdfTests` / `IntegratorTests` (white furnace, energy) green.
+- Sample reuse (ReSTIR DI / GI, on by default when `accumulate=0`; docs/architecture.md §8.7, §8.8)
+  must stay unbiased: force it on while accumulating (`--set pathtracer.restirDi=2 --set
+  pathtracer.restirGi=2`, thousands of frames) and compare the mean against an NEE reference of the
+  same scene; `--set pathtracer.debugView=8` / `9` isolates the direct / indirect light.
 - Test scenes (`aircli scenes` lists them with sizes; docs/architecture.md §8.1): pick the one that
   stresses the change, e.g. `veach_mis` for MIS / light sampling, `many_lights` for light
-  selection, `door` for indirect transport, `sphere_field` / `terrain` for instancing, dense
-  geometry and memory. Validate GPU against `aircli reference` on the same scene.
+  selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`
+  for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory,
+  `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9),
+  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10).
+  `--camera EX,EY,EZ,TX,TY,TZ[,FOV]` and `--ev EV100` move a scene's camera.
+  Validate GPU against `aircli reference` on the same scene.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.

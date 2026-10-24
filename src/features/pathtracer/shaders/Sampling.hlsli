@@ -22,6 +22,24 @@ float Rand(AIR_INOUT(uint) seed)
     return float(seed >> 8) * (1.0f / 16777216.0f);
 }
 
+// Two and three uniforms, drawn in order. float2(Rand(seed), Rand(seed)) is not: C++ leaves the
+// order of a constructor's arguments open (MSVC and GCC draw the last one first, clang and DXC the
+// first), so the CPU reference would follow other random streams on other compilers.
+float2 Rand2(AIR_INOUT(uint) seed)
+{
+    float x = Rand(seed);
+    float y = Rand(seed);
+    return float2(x, y);
+}
+
+float3 Rand3(AIR_INOUT(uint) seed)
+{
+    float x = Rand(seed);
+    float y = Rand(seed);
+    float z = Rand(seed);
+    return float3(x, y, z);
+}
+
 float Luminance(float3 c)
 {
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));

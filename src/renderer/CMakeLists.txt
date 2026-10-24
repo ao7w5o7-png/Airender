@@ -1,13 +1,17 @@
 add_library(air_renderer
+    src/Clouds.cpp
     src/Diagnostics.cpp
     src/FeatureRegistry.cpp
     src/FrameRunner.cpp
+    src/LightTree.cpp
     src/Parameters.cpp
     src/ProfileReport.cpp
     src/Transfer.cpp
     src/Scene.cpp
     src/SceneLibrary.cpp
+    src/Sky.cpp
     src/TestScenes.cpp
+    src/TextureSampling.cpp
     src/ShaderHotReload.cpp
     src/ShaderLoader.cpp
 )

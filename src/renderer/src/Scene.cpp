@@ -2,6 +2,7 @@
 
 #include "air/core/Assert.h"
 #include "air/core/Profiler.h"
+#include "air/renderer/Transfer.h"
 
 #include <algorithm>
 #include <array>
@@ -89,7 +90,7 @@ std::vector<u32> FirstLightIndices(const SceneDesc& desc)
 
 gpu::InstanceData MakeInstanceData(const Instance& in, u32 vertexBuffer, u32 indexBuffer)
 {
-    gpu::InstanceData data;
+    gpu::InstanceData data{};
     data.vertexBuffer = vertexBuffer;
     data.indexBuffer = indexBuffer;
     data.materialIndex = in.material;
@@ -122,7 +123,7 @@ std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, doubl
         }
         for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3)
         {
-            gpu::LightTriangle light;
+            gpu::LightTriangle light{};
             const float3 p0 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t]].position);
             const float3 p1 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t + 1]].position);
             const float3 p2 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t + 2]].position);
@@ -199,6 +200,10 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
     }
     mLightRing.assign(slots, {});
     mLightRingCapacity.assign(slots, 0);
+    mLightTreeRing.assign(slots, {});
+    mLightTreeRingCapacity.assign(slots, 0);
+    mSkyRing.assign(slots, {});
+    mSkyRingCapacity.assign(slots, 0);
     for (u32 i = 0; i < slots; ++i)
     {
         mInstanceLightRing.push_back(
@@ -208,7 +213,6 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
                                   .memory = MemoryLocation::DeviceLocalHost,
                                   .debugName = std::format("{}.InstanceLights[{}]", mDesc.name, i)}));
     }
-    mGpu.environment = mDesc.environment;
     Update();
 }
 
@@ -224,17 +228,22 @@ Scene::~Scene()
     {
         mDevice.DestroyBuffer(buffer);
     }
-    for (rhi::BufferHandle buffer : mLightRing)
+    for (const auto* ring : {&mLightRing, &mLightTreeRing, &mSkyRing})
     {
-        if (buffer.IsValid())
+        for (rhi::BufferHandle buffer : *ring)
         {
-            mDevice.DestroyBuffer(buffer);
+            if (buffer.IsValid())
+            {
+                mDevice.DestroyBuffer(buffer);
+            }
         }
     }
     for (rhi::BufferHandle buffer : mInstanceLightRing)
     {
         mDevice.DestroyBuffer(buffer);
     }
+    DestroyClouds();
+    DestroyAerial();
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
 }
@@ -350,6 +359,24 @@ void Scene::SetMaterial(u32 index, const Material& material)
     }
 }
 
+void Scene::SetSky(const Sky& sky)
+{
+    if (!(mDesc.sky == sky))
+    {
+        mDesc.sky = sky;
+        mDirty = true;
+    }
+}
+
+void Scene::SetClouds(const Clouds& clouds)
+{
+    if (!(mDesc.clouds == clouds))
+    {
+        mDesc.clouds = clouds;
+        mDirty = true;
+    }
+}
+
 void Scene::SetEnvironment(float3 radiance)
 {
     if (!(mDesc.environment == radiance))
@@ -367,7 +394,6 @@ void Scene::Update()
     }
     mRingSlot = (mRingSlot + 1) % u32(mMaterialRing.size());
     WriteDynamicData();
-    mGpu.environment = mDesc.environment;
     ++mGpu.version;
     mDirty = false;
 }
@@ -386,33 +412,135 @@ void Scene::WriteDynamicData()
 
     double totalPower = 0.0;
     std::vector<gpu::LightTriangle> lights = BuildLightTriangles(mDesc, &totalPower);
+    const std::vector<gpu::LightTreeNode> tree = BuildLightTree(lights); // also sets the lights' trails
     if (lights.empty())
     {
         lights.emplace_back(); // keep a valid buffer to bind
     }
 
-    const u64 bytes = lights.size() * sizeof(gpu::LightTriangle);
-    if (mLightRingCapacity[mRingSlot] < lights.size())
+    // Grows a ring slot to hold `count` elements; the old buffer goes once the GPU is done with it.
+    auto ensure = [&](std::vector<rhi::BufferHandle>& ring, std::vector<u32>& capacity, size_t count, u32 stride,
+                      const char* what)
     {
-        if (mLightRing[mRingSlot].IsValid())
+        if (capacity[mRingSlot] >= count)
         {
-            mDevice.DestroyBuffer(mLightRing[mRingSlot]); // deferred until the GPU is done with it
+            return;
         }
-        mLightRing[mRingSlot] =
-            mDevice.CreateBuffer({.size = bytes,
-                                  .stride = sizeof(gpu::LightTriangle),
-                                  .usage = BufferUsage::ShaderResource,
-                                  .memory = MemoryLocation::DeviceLocalHost,
-                                  .debugName = std::format("{}.Lights[{}]", mDesc.name, mRingSlot)});
-        mLightRingCapacity[mRingSlot] = u32(lights.size());
-    }
-    WriteBuffer(mDevice, mLightRing[mRingSlot], lights.data(), bytes);
+        if (ring[mRingSlot].IsValid())
+        {
+            mDevice.DestroyBuffer(ring[mRingSlot]);
+        }
+        ring[mRingSlot] = mDevice.CreateBuffer({.size = count * stride,
+                                                .stride = stride,
+                                                .usage = BufferUsage::ShaderResource,
+                                                .memory = MemoryLocation::DeviceLocalHost,
+                                                .debugName = std::format("{}.{}[{}]", mDesc.name, what, mRingSlot)});
+        capacity[mRingSlot] = u32(count);
+    };
+    ensure(mLightRing, mLightRingCapacity, lights.size(), sizeof(gpu::LightTriangle), "Lights");
+    WriteBuffer(mDevice, mLightRing[mRingSlot], lights.data(), lights.size() * sizeof(gpu::LightTriangle));
     mGpu.lights = mLightRing[mRingSlot];
+    ensure(mLightTreeRing, mLightTreeRingCapacity, tree.size(), sizeof(gpu::LightTreeNode), "LightTree");
+    WriteBuffer(mDevice, mLightTreeRing[mRingSlot], tree.data(), tree.size() * sizeof(gpu::LightTreeNode));
+    mGpu.lightTree = mLightTreeRing[mRingSlot];
     const std::vector<u32> firstLights = FirstLightIndices(mDesc);
     WriteBuffer(mDevice, mInstanceLightRing[mRingSlot], firstLights.data(), firstLights.size() * sizeof(u32));
     mGpu.instanceLights = mInstanceLightRing[mRingSlot];
     mGpu.lightCount = totalPower > 0.0 ? u32(lights.size()) : 0u;
     mGpu.lightPower = float(totalPower);
+
+    // The sky table is only rebuilt when the sky changes; every slot gets a copy.
+    if (!mSkyTableBuilt || !(mSkyTableFor == mDesc.sky))
+    {
+        mSkyTable = BuildSkyTable(mDesc.sky, mDesc.environment);
+        mSkyTableFor = mDesc.sky;
+        mSkyTableBuilt = true;
+        DestroyAerial();
+        if (!mSkyTable.aerialInscatter.empty())
+        {
+            auto upload = [&](const std::vector<u16>& texels, const char* what)
+            {
+                return CreateTextureWithData(mDevice,
+                                             {.dimension = rhi::TextureDimension::Tex3D,
+                                              .format = rhi::Format::RGBA16_FLOAT,
+                                              .width = mSkyTable.aerialWidth,
+                                              .height = mSkyTable.aerialHeight,
+                                              .depthOrArraySize = mSkyTable.data.aerialSlices,
+                                              .debugName = std::format("{}.{}", mDesc.name, what)},
+                                             texels.data());
+            };
+            mGpu.aerialInscatter = upload(mSkyTable.aerialInscatter, "AerialInscatter");
+            mGpu.aerialTransmittance = upload(mSkyTable.aerialTransmittance, "AerialTransmittance");
+        }
+    }
+    mSkyTable.data.uniformRadiance = mDesc.environment;
+    const std::vector<float> placeholder(3, 0.0f);
+    const std::vector<float>& skyTable = mSkyTable.radiance.empty() ? placeholder : mSkyTable.radiance;
+    ensure(mSkyRing, mSkyRingCapacity, skyTable.size(), sizeof(float), "SkyTable");
+    WriteBuffer(mDevice, mSkyRing[mRingSlot], skyTable.data(), skyTable.size() * sizeof(float));
+    mGpu.skyTable = mSkyRing[mRingSlot];
+    mGpu.sky = mSkyTable.data;
+
+    // The clouds are baked and uploaded only when they change (the old resources go once the GPU
+    // is done with them).
+    if (!mCloudsBuilt || !(mCloudsFor == mDesc.clouds))
+    {
+        DestroyClouds();
+        const CloudVolume volume = BuildCloudVolume(mDesc.clouds);
+        mGpu.clouds = volume.data;
+        if (volume.data.enabled != 0)
+        {
+            const gpu::CloudData& c = volume.data;
+            mGpu.cloudBase = CreateTextureWithData(mDevice,
+                                                   {.dimension = rhi::TextureDimension::Tex3D,
+                                                    .format = rhi::Format::R8_UNORM,
+                                                    .width = c.gridX,
+                                                    .height = c.gridZ,
+                                                    .depthOrArraySize = c.gridY + 2,
+                                                    .debugName = std::format("{}.CloudBase", mDesc.name)},
+                                                   volume.base.data());
+            mGpu.cloudDetail = CreateTextureWithData(mDevice,
+                                                     {.dimension = rhi::TextureDimension::Tex3D,
+                                                      .format = rhi::Format::R8_UNORM,
+                                                      .width = volume.detailSize,
+                                                      .height = volume.detailSize,
+                                                      .depthOrArraySize = volume.detailSize,
+                                                      .debugName = std::format("{}.CloudDetail", mDesc.name)},
+                                                     volume.detail.data());
+            mGpu.cloudMajorants =
+                CreateBufferWithData(mDevice,
+                                     {.stride = sizeof(float),
+                                      .usage = BufferUsage::ShaderResource,
+                                      .debugName = std::format("{}.CloudMajorants", mDesc.name)},
+                                     volume.majorants.data(), volume.majorants.size() * sizeof(float));
+        }
+        mCloudsFor = mDesc.clouds;
+        mCloudsBuilt = true;
+    }
+}
+
+void Scene::DestroyAerial()
+{
+    if (mGpu.aerialInscatter.IsValid())
+    {
+        mDevice.DestroyTexture(mGpu.aerialInscatter);
+        mDevice.DestroyTexture(mGpu.aerialTransmittance);
+    }
+    mGpu.aerialInscatter = {};
+    mGpu.aerialTransmittance = {};
+}
+
+void Scene::DestroyClouds()
+{
+    if (mGpu.cloudBase.IsValid())
+    {
+        mDevice.DestroyTexture(mGpu.cloudBase);
+        mDevice.DestroyTexture(mGpu.cloudDetail);
+        mDevice.DestroyBuffer(mGpu.cloudMajorants);
+    }
+    mGpu.cloudBase = {};
+    mGpu.cloudDetail = {};
+    mGpu.cloudMajorants = {};
 }
 
 } // namespace air::renderer

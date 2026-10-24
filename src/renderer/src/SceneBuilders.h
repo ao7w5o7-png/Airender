@@ -53,5 +53,7 @@ SceneDesc MakeSphereField();
 SceneDesc MakeManyLights();
 SceneDesc MakeDoor();
 SceneDesc MakeTerrain();
+SceneDesc MakeSunset();
+SceneDesc MakeCumulus();
 
 } // namespace air::renderer::detail

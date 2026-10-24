@@ -46,6 +46,42 @@ float HalfToFloat(u16 half)
     return std::bit_cast<float>(bits);
 }
 
+u16 FloatToHalf(float value)
+{
+    const u32 bits = std::bit_cast<u32>(value);
+    const u32 sign = (bits >> 16) & 0x8000u;
+    const u32 exponent = (bits >> 23) & 0xFFu;
+    u32 mantissa = bits & 0x7FFFFFu;
+    if (exponent == 0xFF)
+    {
+        return u16(sign | 0x7C00u | (mantissa != 0 ? 0x200u : 0u)); // inf / nan
+    }
+    const int e = int(exponent) - 127 + 15;
+    if (e >= 31)
+    {
+        return u16(sign | 0x7C00u);
+    }
+    if (e <= 0)
+    {
+        // Subnormal (or zero): the implicit bit joins the mantissa, shifted into place.
+        if (e < -10)
+        {
+            return u16(sign);
+        }
+        mantissa |= 0x800000u;
+        const u32 shift = u32(14 - e);
+        u32 half = mantissa >> shift;
+        const u32 rest = mantissa & ((1u << shift) - 1u);
+        const u32 halfway = 1u << (shift - 1u);
+        half += (rest > halfway || (rest == halfway && (half & 1u) != 0)) ? 1u : 0u;
+        return u16(sign | half);
+    }
+    u32 half = (u32(e) << 10) | (mantissa >> 13);
+    const u32 rest = mantissa & 0x1FFFu;
+    half += (rest > 0x1000u || (rest == 0x1000u && (half & 1u) != 0)) ? 1u : 0u; // a carry rounds up the exponent
+    return u16(sign | half);
+}
+
 rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc, const void* data, u64 size)
 {
     desc.memory = rhi::MemoryLocation::DeviceLocal;
@@ -72,6 +108,41 @@ rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc
     device.WaitForFence(rhi::QueueType::Graphics, device.Submit(rhi::QueueType::Graphics, lists));
     device.DestroyBuffer(staging);
     return buffer;
+}
+
+rhi::TextureHandle CreateTextureWithData(rhi::Device& device, rhi::TextureDesc desc, const void* texels)
+{
+    desc.usage |= rhi::TextureUsage::CopyDst | rhi::TextureUsage::ShaderResource;
+    desc.mipLevels = 1;
+    const u32 depth = desc.dimension == rhi::TextureDimension::Tex3D ? desc.depthOrArraySize : 1u;
+    const u64 rowBytes = u64(desc.width) * rhi::FormatBytesPerPixel(desc.format);
+    const u64 pitch = rhi::TextureCopyRowPitch(desc.format, desc.width);
+    const u64 rows = u64(desc.height) * depth;
+    const rhi::TextureHandle texture = device.CreateTexture(desc);
+    const rhi::BufferHandle staging = device.CreateBuffer({.size = pitch * rows,
+                                                           .usage = rhi::BufferUsage::CopySrc,
+                                                           .memory = rhi::MemoryLocation::Upload,
+                                                           .debugName = desc.debugName + ".Staging"});
+    if (!texture.IsValid() || !staging.IsValid())
+    {
+        AIR_LOG(Error, "Transfer", "out of memory creating '{}'", desc.debugName);
+        return texture;
+    }
+    auto* mapped = static_cast<u8*>(device.GetMappedPointer(staging));
+    for (u64 row = 0; row < rows; ++row)
+    {
+        std::memcpy(mapped + row * pitch, static_cast<const u8*>(texels) + row * rowBytes, rowBytes);
+    }
+    auto cmd = device.CreateCommandList(rhi::QueueType::Graphics);
+    cmd->Begin();
+    cmd->Barriers(std::array{Barrier::Tex(texture, Access::None, Access::CopyDst)});
+    cmd->CopyBufferToTexture(texture, 0, staging, 0);
+    cmd->Barriers(std::array{Barrier::Tex(texture, Access::CopyDst, Access::SRVCompute)});
+    cmd->End();
+    rhi::CommandList* lists[] = {cmd.get()};
+    device.WaitForFence(rhi::QueueType::Graphics, device.Submit(rhi::QueueType::Graphics, lists));
+    device.DestroyBuffer(staging);
+    return texture;
 }
 
 std::optional<Image> ReadbackTexture(rhi::Device& device, rhi::TextureHandle texture, Access current)
