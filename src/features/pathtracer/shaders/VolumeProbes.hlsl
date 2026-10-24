@@ -1,7 +1,7 @@
 // air-shader-target: cs_6_6
 // The light in and around the volumes for their ray march (docs/architecture.md §8.13): kVolumeProbes
-// probes per volume on a lattice over its box, each a thread group tracing kVolumeProbeRays paths a
-// frame. They are the path tracer's paths through the volumes (tracked, AIR_PT_VOLUME), with kFlagProbe:
+// probes per volume on a lattice over its box, each tracing kVolumeProbeRays paths a frame (a thread
+// group holds kProbesPerGroup probes, a thread per ray). They are the path tracer's paths through the volumes (tracked, AIR_PT_VOLUME), with kFlagProbe:
 // without the sunlight and the light of the march's light groups that reach the probe without
 // scattering, which the march adds itself. So a probe holds the rest of the light arriving at its
 // point: the sky and the surfaces as the volumes dim them, and the light the volumes scatter, which
@@ -55,15 +55,17 @@ float ProbeOcclusion(VolumeMarchData v, float3 x)
     return VolumeAoSample(v, uvw);
 }
 
-groupshared float4 gProjected[kVolumeProbeRays][3];
+groupshared float4 gProjected[kProbesPerGroup * kVolumeProbeRays][3];
 
-[numthreads(kVolumeProbeRays, 1, 1)]
+[numthreads(kProbesPerGroup * kVolumeProbeRays, 1, 1)]
 void Main(uint3 group : SV_GroupID, uint index : SV_GroupIndex)
 {
     StructuredBuffer<FrameData> frames = ResourceDescriptorHeap[g.frameData];
     FrameData f = frames[g.frameSlot];
     gVolumeShadows = f.volumeShadows;
-    uint probe = group.x;
+    uint slot = index / kVolumeProbeRays; // the thread's probe in the group
+    uint ray = index % kVolumeProbeRays;
+    uint probe = group.x * kProbesPerGroup + slot; // kVolumeProbes is a multiple: one volume per group
     StructuredBuffer<VolumeMarchData> volumes = ResourceDescriptorHeap[g.volumes];
     VolumeMarchData v = volumes[probe / kVolumeProbes];
 
@@ -84,8 +86,8 @@ void Main(uint3 group : SV_GroupID, uint index : SV_GroupIndex)
 
     uint local = probe % kVolumeProbes;
     float3 position = ProbePosition(v, local);
-    float3 direction = ProbeRayDirection(probe, g.frame, index);
-    uint seed = Pcg(index + Pcg(probe + Pcg(g.frame + 0x50524F42u)));
+    float3 direction = ProbeRayDirection(probe, g.frame, ray);
+    uint seed = Pcg(ray + Pcg(probe + Pcg(g.frame + 0x50524F42u)));
     PathSample s = TracePath(position, direction, params, seed);
     float3 radiance = all(isfinite(s.radiance)) ? s.radiance : float3(0.0f, 0.0f, 0.0f);
     float4 basis = ProbeBasis(direction) * (4.0f * kPi / float(kVolumeProbeRays));
@@ -93,20 +95,21 @@ void Main(uint3 group : SV_GroupID, uint index : SV_GroupIndex)
     gProjected[index][1] = basis * radiance.y;
     gProjected[index][2] = basis * radiance.z;
     GroupMemoryBarrierWithGroupSync();
-    if (index < kProbeBlocks)
+    if (ray < kProbeBlocks)
     {
+        // The probe's first threads write its blocks: thread b sums block b over the probe's rays.
         float4 value = float4(ProbeOcclusion(v, position), 0.0f, 0.0f, 0.0f);
-        if (index < 3u)
+        if (ray < 3u)
         {
             value = float4(0.0f, 0.0f, 0.0f, 0.0f);
             for (uint i = 0u; i < kVolumeProbeRays; ++i)
             {
-                value += gProjected[i][index];
+                value += gProjected[slot * kVolumeProbeRays + i][ray];
             }
         }
         RWTexture3D<float4> field = ResourceDescriptorHeap[g.probes];
         uint volume = probe / kVolumeProbes;
-        uint3 texel = uint3(ProbeTexelX(volume, local), ProbeTexelY(local), ProbeTexelZ(local, index));
+        uint3 texel = uint3(ProbeTexelX(volume, local), ProbeTexelY(local), ProbeTexelZ(local, ray));
         field[texel] = g.blend >= 1.0f ? value : lerp(field[texel], value, g.blend);
     }
 }

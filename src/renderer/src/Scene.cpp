@@ -519,6 +519,7 @@ void Scene::WriteDynamicData()
     std::vector<gpu::LightTriangle> lights = BuildLightTriangles(mDesc, &totalPower);
     const std::vector<gpu::LightTreeNode> tree = BuildLightTree(lights); // also sets the lights' trails
     mGpu.lightGroups = BuildLightGroups(lights, mDesc);
+    mGpu.lightTriangles = lights;
     if (lights.empty())
     {
         lights.emplace_back(); // keep a valid buffer to bind

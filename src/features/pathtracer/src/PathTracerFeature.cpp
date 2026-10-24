@@ -102,6 +102,10 @@ public:
                         "Real-time volumes: light groups (emissive instances) that light the volumes besides the sun, "
                         "those that matter most to them",
                         0, kMaxVolumeLights);
+        mParameters.Add("volumeLightOrigins", &march.lightOrigins,
+                        "Real-time volumes: shadow maps of a large emitter close to them, from points spread over it "
+                        "(1: its centre only)",
+                        1, kMaxLightOrigins);
         mParameters.Add("volumeAdaptive", &march.adaptive,
                         "Real-time volumes: adaptive sampling groups, waves deep in smoke share their lighting over "
                         "2 x 2 or 4 x 4 pixels");

@@ -8,6 +8,8 @@
 // (Muenstermann et al. 2018), rendered once per light for volumes as Mueller describes (SIGGRAPH 2026).
 // A third R32_FLOAT slice holds the depth of the texel ray's first opaque hit (a plain shadow map,
 // ray traced): the light that reaches a point inside a volume is that of both maps.
+// A large emitter close to the volumes has several point maps, from points spread over it: the light
+// it sends through them is the mean over its extent, not what its centre would see.
 #ifndef AIR_RENDERER_MOMENT_SHADOW_SHARED_H
 #define AIR_RENDERER_MOMENT_SHADOW_SHARED_H
 
@@ -34,8 +36,8 @@ struct MomentShadowMap
     uint slice;        // in the map texture arrays
     uint size;         // texels per side
     uint skipInstance; // point: the light's own instance, which its rays do not hit (kInvalidIndex: none)
+    uint count;        // the light's maps: this one and the count - 1 after it
     uint pad0;
-    uint pad1;
 };
 
 // What a map's opaque slice holds where the texel's ray hits nothing, and for a sun map whose texel

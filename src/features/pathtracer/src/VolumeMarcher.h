@@ -66,12 +66,14 @@ private:
     renderer::LazyComputePipeline mMarchPipeline;
     rhi::BufferHandle mBlueNoise; // StructuredBuffer<uint>, 64 x 64 ranks
 
-    // The moment shadow maps: one slice per map (the sun's first, then the light groups').
+    // The moment shadow maps: one slice per map (the sun's first, then the light groups', one or
+    // kMaxLightOrigins each).
     rhi::TextureHandle mB0;
     rhi::TextureHandle mMoments;
     rhi::TextureHandle mOccluders; // the depth of each texel ray's first opaque hit
     rhi::Access mMapsAccess = rhi::Access::None;
     u32 mShadowSize = 0;
+    u32 mShadowSlices = 0;
     rhi::BufferHandle mMaps;        // StructuredBuffer<MomentShadowMap>
     rhi::BufferHandle mGroupMaps;   // StructuredBuffer<uint>: per light group its map
     rhi::BufferHandle mMarchLights; // StructuredBuffer<uint>: the groups with maps

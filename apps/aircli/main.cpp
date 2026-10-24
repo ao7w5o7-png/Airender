@@ -18,6 +18,8 @@
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
 //                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
 //                    [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]
+//                    [--volume-march [--frames N] [--probe-frames N] [--volume-step S]
+//                    [--volume-shadow-size N] [--volume-lights N]]   (the real-time volumes' method)
 //   aircli vdb FILE.vdb [--read GRID] [--max-resolution N]   the grids of an OpenVDB file (JSON); --read
 //                    reads one as a volume would and reports its voxels
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
@@ -83,6 +85,8 @@ int Usage()
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
                "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
+               "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
+               "                [--volume-shadow-size N] [--volume-lights N]]\n"
                "  aircli features | scenes\n"
                "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
@@ -365,7 +369,9 @@ struct SceneOptions
 };
 
 // ---------------------------------------------------------------------------
-// reference: the path tracer's estimator on the CPU, to validate GPU output with `compare`
+// reference: the path tracer's estimator on the CPU, to validate GPU output with `compare`; with
+// --volume-march the real-time volumes' (pt::RenderVolumeMarchReference), `--spp` paths per pixel and
+// frame
 // ---------------------------------------------------------------------------
 int CommandReference(Args& args)
 {
@@ -375,7 +381,9 @@ int CommandReference(Args& args)
     pt::ReferenceSettings settings;
     settings.width = 320;
     settings.height = 180;
-    settings.samplesPerPixel = 256;
+    settings.samplesPerPixel = 0; // 256, or 16 a frame with --volume-march
+    bool volumeMarch = false;
+    pt::VolumeMarchReferenceSettings march;
     while (!args.Done())
     {
         const std::string_view arg = args.Take();
@@ -423,6 +431,30 @@ int CommandReference(Args& args)
         {
             settings.lightTreeBounces = u32(std::stoul(std::string(args.Next()))); // as pathtracer.lightTreeBounces
         }
+        else if (arg == "--volume-march")
+        {
+            volumeMarch = true;
+        }
+        else if (arg == "--frames")
+        {
+            march.frames = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--probe-frames")
+        {
+            march.probeFrames = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--volume-step")
+        {
+            march.march.step = std::stof(std::string(args.Next())); // as pathtracer.volumeStep
+        }
+        else if (arg == "--volume-shadow-size")
+        {
+            march.march.shadowSize = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeShadowSize
+        }
+        else if (arg == "--volume-lights")
+        {
+            march.march.lights = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeLights
+        }
         else if (sceneOptions.Parse(arg, args))
         {
         }
@@ -438,10 +470,20 @@ int CommandReference(Args& args)
         return Usage();
     }
     sceneOptions.Apply(*scene);
+    if (volumeMarch && scene->volumes.empty())
+    {
+        AIR_LOG(Error, "aircli", "--volume-march: scene '{}' has no volumes", sceneName);
+        return kExitUsage;
+    }
+    if (settings.samplesPerPixel == 0)
+    {
+        settings.samplesPerPixel = volumeMarch ? 16 : 256;
+    }
     TaskSystem tasks;
     settings.tasks = &tasks;
     const auto start = std::chrono::steady_clock::now();
-    const Image image = pt::RenderReference(*scene, scene->camera, settings);
+    const Image image = volumeMarch ? pt::RenderVolumeMarchReference(*scene, scene->camera, settings, march)
+                                    : pt::RenderReference(*scene, scene->camera, settings);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     const bool ppm = outputPath.ends_with(".ppm");
     if (!(ppm ? WritePpm(outputPath, image) : WritePfm(outputPath, image)))

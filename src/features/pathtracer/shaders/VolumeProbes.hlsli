@@ -4,13 +4,15 @@
 #ifndef AIR_PT_VOLUME_PROBES_HLSLI
 #define AIR_PT_VOLUME_PROBES_HLSLI
 
-// Probe i (0 .. kVolumeProbes - 1, x fastest) of a volume: the centres of a 4 x 4 x 4 lattice of cells
-// over its box, so that none sits on the box's faces (often on a surface).
+// Probe i (0 .. kVolumeProbes - 1, x fastest) of a volume: the centres of a lattice of kVolumeProbeAxis^3
+// cells over its box, so that none sits on the box's faces (often on a surface).
 float3 ProbePosition(VolumeMarchData v, uint i)
 {
     float n = float(kVolumeProbeAxis);
-    float3 cell = float3(float(i % kVolumeProbeAxis) + 0.5f, float((i / kVolumeProbeAxis) % kVolumeProbeAxis) + 0.5f,
-                         float(i / (kVolumeProbeAxis * kVolumeProbeAxis)) + 0.5f);
+    uint x = i % kVolumeProbeAxis;
+    uint y = (i / kVolumeProbeAxis) % kVolumeProbeAxis;
+    uint z = i / (kVolumeProbeAxis * kVolumeProbeAxis);
+    float3 cell = float3(float(x) + 0.5f, float(y) + 0.5f, float(z) + 0.5f);
     return v.boundsMin + (v.boundsMax - v.boundsMin) * (cell / n);
 }
 

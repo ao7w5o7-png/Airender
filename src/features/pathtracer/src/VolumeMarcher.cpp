@@ -5,50 +5,22 @@
 #include "air/renderer/BlueNoise.h"
 #include "air/renderer/Transfer.h"
 
+#include "VolumeShadowLayout.h"
+
 #include <algorithm>
-#include <cmath>
-#include <numeric>
+#include <utility>
 
 namespace air::pt
 {
 
-using hlsl::float3;
 using rhi::Access;
 
 namespace
 {
 
 constexpr Access kRest = Access::SRVCompute;
-// Always an array: a texture of one slice would be seen as a plain 2D texture.
-constexpr u32 kMapSlices = 1 + gpu::kMaxVolumeLights;
 static_assert(kMaxVolumeLights == gpu::kMaxVolumeLights);
-
-float BoxDistance(float3 p, float3 lo, float3 hi)
-{
-    const float3 d = hlsl::max(hlsl::max(lo - p, p - hi), float3(0.0f));
-    return hlsl::length(d);
-}
-
-float BoxFarthest(float3 p, float3 lo, float3 hi)
-{
-    float farthest = 0.0f;
-    for (int c = 0; c < 8; ++c)
-    {
-        const float3 corner((c & 1) != 0 ? hi.x : lo.x, (c & 2) != 0 ? hi.y : lo.y, (c & 4) != 0 ? hi.z : lo.z);
-        farthest = std::max(farthest, hlsl::length(corner - p));
-    }
-    return farthest;
-}
-
-// Two unit vectors that make an orthonormal basis with unit w (Duff et al. 2017).
-void Perpendicular(float3 w, float3& u, float3& v)
-{
-    const float s = w.z >= 0.0f ? 1.0f : -1.0f;
-    const float a = -1.0f / (s + w.z);
-    const float b = w.x * w.y * a;
-    u = float3(1.0f + s * w.x * w.x * a, s * b, -s * w.x);
-    v = float3(b, s + w.y * w.y * a, -w.y);
-}
+static_assert(kMaxLightOrigins == gpu::kMaxLightOrigins);
 
 void Destroy(rhi::Device& device, rhi::BufferHandle& buffer)
 {
@@ -106,6 +78,7 @@ void VolumeMarcher::ReleaseShadows()
     Destroy(mDevice, mMarchLights);
     mMapsAccess = Access::None;
     mShadowSize = 0;
+    mShadowSlices = 0;
 }
 
 void VolumeMarcher::BeginFrame(rdg::RenderGraph& graph, const renderer::GpuScene& scene,
@@ -120,13 +93,7 @@ void VolumeMarcher::BeginFrame(rdg::RenderGraph& graph, const renderer::GpuScene
             {.stride = sizeof(u32), .usage = rhi::BufferUsage::ShaderResource, .debugName = "VolumeMarch.BlueNoise"},
             ranks.data(), ranks.size() * sizeof(u32));
     }
-    mSettings = settings;
-    mSettings.shadowSize = std::clamp(settings.shadowSize, 16u, 2048u);
-    mSettings.lights = std::min(settings.lights, gpu::kMaxVolumeLights);
-    mSettings.level = std::min(settings.level, air::gpu::kVolumeLevels - 1);
-    mSettings.shadowLevel = std::min(settings.shadowLevel, air::gpu::kVolumeLevels - 1);
-    mSettings.step = std::max(settings.step, 0.05f);
-    mSettings.shadowStep = std::max(settings.shadowStep, 0.05f);
+    mSettings = ClampVolumeMarchSettings(settings);
     ++mFrame;
 
     // The maps show what the scene's version and the shadow settings say; anything else renders them again.
@@ -135,105 +102,38 @@ void VolumeMarcher::BeginFrame(rdg::RenderGraph& graph, const renderer::GpuScene
     shadowKey.step = 0.0f;
     shadowKey.level = 0;
     shadowKey.air = false;
-    const bool resize = mShadowSize != mSettings.shadowSize;
-    mRenderShadows = resize || scene.version != mShadowVersion || !(shadowKey == mShadowSettings) ||
-                     mSettings.everyFrame || !mMaps.IsValid();
-    if (resize)
-    {
-        ReleaseShadows();
-        auto make = [&](rhi::Format format, const char* name)
-        {
-            return mDevice.CreateTexture(
-                {.format = format,
-                 .width = mSettings.shadowSize,
-                 .height = mSettings.shadowSize,
-                 .depthOrArraySize = kMapSlices,
-                 .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
-                 .debugName = name});
-        };
-        mB0 = make(rhi::Format::R16_FLOAT, "VolumeMarch.ShadowDepth");
-        mMoments = make(rhi::Format::RGBA16_FLOAT, "VolumeMarch.ShadowMoments");
-        mOccluders = make(rhi::Format::R32_FLOAT, "VolumeMarch.ShadowOccluders");
-        mShadowSize = mSettings.shadowSize;
-    }
+    mRenderShadows = mShadowSize != mSettings.shadowSize || scene.version != mShadowVersion ||
+                     !(shadowKey == mShadowSettings) || mSettings.everyFrame || !mMaps.IsValid();
     if (mRenderShadows)
     {
-        // The light groups that matter most to the volumes: power over the squared distance to their box.
-        float3 lo(1e30f);
-        float3 hi(-1e30f);
-        for (const air::gpu::VolumeMarchData& v : scene.volumeMarch)
+        VolumeShadowLayout layout =
+            LayoutVolumeShadows(scene.volumeMarch, scene.lightGroups, scene.lightTriangles, scene.sky, mSettings);
+        // A slice per map, in arrays that only grow (of two slices at least: an array of one would be
+        // seen as a plain 2D texture).
+        const u32 slices = std::max(u32(layout.maps.size()), 2u);
+        if (mShadowSize != mSettings.shadowSize || slices > mShadowSlices)
         {
-            lo = hlsl::min(lo, v.boundsMin);
-            hi = hlsl::max(hi, v.boundsMax);
-        }
-        std::vector<std::pair<float, u32>> ranked;
-        for (u32 i = 0; i < scene.lightGroups.size() && !scene.volumeMarch.empty(); ++i)
-        {
-            const air::gpu::LightGroup& g = scene.lightGroups[i];
-            if (g.power > 0.0f)
+            ReleaseShadows();
+            auto make = [&](rhi::Format format, const char* name)
             {
-                const float d = BoxDistance(g.centre, lo, hi);
-                ranked.emplace_back(g.power / (d * d + g.radius * g.radius + 1e-4f), i);
-            }
+                return mDevice.CreateTexture(
+                    {.format = format,
+                     .width = mSettings.shadowSize,
+                     .height = mSettings.shadowSize,
+                     .depthOrArraySize = slices,
+                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                     .debugName = name});
+            };
+            mB0 = make(rhi::Format::R16_FLOAT, "VolumeMarch.ShadowDepth");
+            mMoments = make(rhi::Format::RGBA16_FLOAT, "VolumeMarch.ShadowMoments");
+            mOccluders = make(rhi::Format::R32_FLOAT, "VolumeMarch.ShadowOccluders");
+            mShadowSize = mSettings.shadowSize;
+            mShadowSlices = slices;
         }
-        std::stable_sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-        mLights.clear();
-        for (size_t i = 0; i < ranked.size() && i < mSettings.lights; ++i)
-        {
-            mLights.push_back(ranked[i].second);
-        }
-
-        // A map for the sun over the volumes' box (orthographic), one around each group's centre
-        // (octahedral), their depths spanning the box as seen from the light.
-        mMapData.clear();
-        mSunMap = air::gpu::kInvalidIndex;
-        const float margin = 0.02f * std::max(hlsl::length(hi - lo), 1e-3f);
-        const bool sun = hlsl::dot(scene.sky.sunRadiance, float3(1.0f)) > 0.0f && !scene.volumeMarch.empty();
-        if (sun)
-        {
-            air::gpu::MomentShadowMap m{};
-            m.kind = air::gpu::kMomentMapSun;
-            m.axisW = -scene.sky.sunDirection;
-            float3 u;
-            float3 v;
-            Perpendicular(m.axisW, u, v);
-            float3 low(1e30f);
-            float3 high(-1e30f);
-            for (int c = 0; c < 8; ++c)
-            {
-                const float3 corner((c & 1) != 0 ? hi.x : lo.x, (c & 2) != 0 ? hi.y : lo.y, (c & 4) != 0 ? hi.z : lo.z);
-                const float3 projected(hlsl::dot(corner, u), hlsl::dot(corner, v), hlsl::dot(corner, m.axisW));
-                low = hlsl::min(low, projected);
-                high = hlsl::max(high, projected);
-            }
-            low = low - float3(margin);
-            high = high + float3(margin);
-            m.origin = u * low.x + v * low.y + m.axisW * low.z;
-            m.axisU = u * (high.x - low.x);
-            m.axisV = v * (high.y - low.y);
-            m.depthNear = 0.0f;
-            m.depthFar = high.z - low.z;
-            m.slice = 0;
-            m.size = mSettings.shadowSize;
-            m.skipInstance = air::gpu::kInvalidIndex;
-            mSunMap = 0;
-            mMapData.push_back(m);
-        }
-        std::vector<u32> groupMaps(std::max<size_t>(scene.lightGroups.size(), 1), air::gpu::kInvalidIndex);
-        for (u32 group : mLights)
-        {
-            const air::gpu::LightGroup& g = scene.lightGroups[group];
-            air::gpu::MomentShadowMap m{};
-            m.kind = air::gpu::kMomentMapPoint;
-            m.origin = g.centre;
-            m.depthNear = std::max(BoxDistance(g.centre, lo, hi) - margin, 0.0f);
-            m.depthFar = BoxFarthest(g.centre, lo, hi) + margin;
-            m.slice = u32(mMapData.size());
-            m.size = mSettings.shadowSize;
-            m.skipInstance = g.instance;
-            groupMaps[group] = u32(mMapData.size());
-            mMapData.push_back(m);
-        }
+        mLights = std::move(layout.lights);
+        mMapData = std::move(layout.maps);
+        mSunMap = layout.sunMap;
+        const std::vector<u32>& groupMaps = layout.groupMaps;
         Destroy(mDevice, mMaps);
         Destroy(mDevice, mGroupMaps);
         Destroy(mDevice, mMarchLights);
@@ -386,7 +286,7 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
                 c.probes = ctx.UAV(probes);
                 ctx.cmd.SetPipeline(pipeline);
                 ctx.cmd.PushConstants(&c, sizeof(c));
-                ctx.cmd.Dispatch(volumes * gpu::kVolumeProbes, 1, 1);
+                ctx.cmd.Dispatch(volumes * gpu::kVolumeProbes / gpu::kProbesPerGroup, 1, 1);
             });
     }
 

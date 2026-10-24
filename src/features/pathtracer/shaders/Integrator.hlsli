@@ -22,9 +22,10 @@
 //   float         VolumeDensitySample(VolumeData v, float3 uvw), VolumeMajorantLoad(VolumeData v, uint cell)
 //                                                     a volume's voxels (VolumeLookup.hlsli)
 // and, compiled with AIR_PT_VOLUME_SHADOWS (the real-time volumes' kernels, VolumeMarchShared.h):
-//   float         VolumeSunShadow(float3 p), VolumeGroupShadow(uint group, float3 p)
+//   float         VolumeSunShadow(float3 p), VolumeGroupShadow(uint group, float3 p, float3 lightPoint)
 //                                                     what the volumes let through of the sun's / a light
-//                                                     group's light at p (their moment shadow maps)
+//                                                     group's light at p (their moment shadow maps; from
+//                                                     lightPoint on the group's emitter)
 // and, compiled with AIR_PT_PROBE (their probes' kernel):
 //   bool          VolumeExplicitGroup(uint group)     the ray march lights the volumes with this group
 // and, compiled with AIR_PT_NRC (the neural radiance cache's kernels, NrcShared.h):
@@ -597,7 +598,7 @@ float LightTransmittance(IntegratorParams params, LightTriangle light, float3 or
 #if AIR_PT_VOLUME
     return VolumesTransmittance(params, origin, direction, tMax, seed);
 #elif AIR_PT_VOLUME_SHADOWS
-    return VolumeGroupShadow(light.group, origin);
+    return VolumeGroupShadow(light.group, origin, origin + direction * tMax);
 #else
     return 1.0f;
 #endif

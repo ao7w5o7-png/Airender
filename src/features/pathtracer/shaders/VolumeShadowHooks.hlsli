@@ -45,10 +45,27 @@ float VolumeSunShadow(float3 p)
     return gVolumeShadows.sunMap == kInvalidIndex ? 1.0f : MomentShadow(LoadMomentMap(gVolumeShadows.sunMap), p);
 }
 
-float VolumeGroupShadow(uint group, float3 p)
+// From the map of the group whose origin is nearest to lightPoint (a large emitter has several).
+float VolumeGroupShadow(uint group, float3 p, float3 lightPoint)
 {
-    uint map = VolumeGroupMap(group);
-    return map == kInvalidIndex ? 1.0f : MomentShadow(LoadMomentMap(map), p);
+    uint first = VolumeGroupMap(group);
+    if (first == kInvalidIndex)
+    {
+        return 1.0f;
+    }
+    MomentShadowMap m = LoadMomentMap(first);
+    float nearest = dot(m.origin - lightPoint, m.origin - lightPoint);
+    for (uint k = 1u; k < m.count; ++k)
+    {
+        MomentShadowMap other = LoadMomentMap(first + k);
+        float d = dot(other.origin - lightPoint, other.origin - lightPoint);
+        if (d < nearest)
+        {
+            nearest = d;
+            m = other;
+        }
+    }
+    return MomentShadow(m, p);
 }
 
 bool VolumeExplicitGroup(uint group)

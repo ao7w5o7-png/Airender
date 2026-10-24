@@ -5,11 +5,15 @@ air_add_feature(NAME pathtracer
         src/PathTracerFeature.cpp
         src/RadianceCache.cpp
         src/ReferenceRenderer.cpp
+        src/ReferenceScene.cpp
         src/ReSTIR.cpp
         src/VolumeMarcher.cpp
+        src/VolumeMarchReference.cpp
+        src/VolumeShadowLayout.cpp
     TESTS
         tests/BsdfTests.cpp
         tests/IntegratorTests.cpp
         tests/LightTreeTests.cpp
         tests/PathTracerTests.cpp
+        tests/VolumeMarchTests.cpp
 )

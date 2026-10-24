@@ -6,6 +6,7 @@
 
 #include "air/core/Image.h"
 #include "air/core/TaskSystem.h"
+#include "air/features/pathtracer/PathTracer.h"
 #include "air/renderer/Scene.h"
 
 #include <memory>
@@ -32,6 +33,57 @@ struct ReferenceSettings
 
 Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& camera,
                       const ReferenceSettings& settings);
+
+// The real-time volumes (pathtracer.volumeMarch, docs/architecture.md §8.13) on the CPU, with the
+// GPU's shader code: their moment shadow maps, their probes (the light of probeFrames frames of them
+// averaged, as when accumulating), the surfaces path traced and lit through the maps, and the ray march
+// over them. Frame after frame like the pathtracer feature accumulating with pathtracer.volumeMarch=2:
+// one camera ray per pixel at the frame's sub-pixel offset and march jitter, settings.samplesPerPixel
+// paths along it. The march lights every step (pathtracer.volumeAdaptive=0). For checking the method
+// against RenderReference, which tracks the volumes, and the GPU against the method.
+struct VolumeMarchReferenceSettings
+{
+    u32 frames = 16;
+    u32 probeFrames = 32;
+    VolumeMarchSettings march; // its step, level, shadowSize, shadowLevel, shadowStep, lights and air
+};
+
+Image RenderVolumeMarchReference(const renderer::SceneDesc& scene, const renderer::Camera& camera,
+                                 const ReferenceSettings& settings, const VolumeMarchReferenceSettings& march);
+
+// The real-time volumes' lighting on the CPU, for tests: their moment shadow maps (VolumeShadows.hlsl)
+// and what the sun's lets through to a point (as surfaces read it, MomentShadow) and inside the
+// volumes (with the geometry's shadow, MomentLightVisibility), against the transmittance marched
+// finely through the voxels; and the light a light group sends through a point of the march.
+class VolumeMarchProbe
+{
+public:
+    VolumeMarchProbe(const renderer::SceneDesc& scene, const VolumeMarchSettings& settings,
+                     TaskSystem* tasks = nullptr);
+    ~VolumeMarchProbe();
+    VolumeMarchProbe(const VolumeMarchProbe&) = delete;
+    VolumeMarchProbe& operator=(const VolumeMarchProbe&) = delete;
+
+    u32 GetMapCount() const;
+    u32 GetLightCount() const; // light groups with maps
+    bool HasSunMap() const;
+    float SunShadow(renderer::float3 p) const;
+    float SunVisibility(renderer::float3 p) const;
+    float SunTransmittance(renderer::float3 p) const; // the volumes' alone, marched at a quarter voxel
+    // The same for light group `group` (the mean over its maps, MomentLightVisibility, as the frames
+    // read them in turn; 1 without maps) and towards the points they look from.
+    float GroupVisibility(u32 group, renderer::float3 p) const;
+    float GroupTransmittance(u32 group, renderer::float3 p) const;
+    u32 GetGroupMapCount(u32 group) const;
+    // The light of light group `group` (one per emissive instance, in their order) that a medium at x
+    // scatters along direction d, per unit scattering coefficient, with a Henyey-Greenstein phase
+    // function of `anisotropy`, before shadows (VolumeMarch.hlsli's GroupInScattering).
+    renderer::float3 GroupInScattering(u32 group, renderer::float3 x, renderer::float3 d, float anisotropy) const;
+
+private:
+    struct State;
+    std::unique_ptr<State> mState;
+};
 
 // The integrator's light tree functions (Integrator.hlsli, shared with the GPU) on a scene's lights,
 // for tests: the probability next event estimation at point p with normal n chooses a light, and

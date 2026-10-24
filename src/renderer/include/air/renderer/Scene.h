@@ -154,9 +154,11 @@ struct GpuScene
     u32 lightCount = 0;
     float lightPower = 0.0f; // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
     // StructuredBuffer<gpu::LightGroup>, one per emissive instance (at least one element), written with
-    // `lights`; `lightGroups` is the same on the CPU (empty without emitters).
+    // `lights`; `lightGroups` is the same on the CPU (empty without emitters), and `lightTriangles`
+    // the triangles of `lights`.
     rhi::BufferHandle lightGroupTable;
     std::vector<gpu::LightGroup> lightGroups;
+    std::vector<gpu::LightTriangle> lightTriangles;
     float3 boundsMin{}; // the box around the geometry (SceneBounds)
     float3 boundsMax{};
     gpu::SkyData sky{};         // the sun and how to read skyTable (uniform radiance when width == 0)

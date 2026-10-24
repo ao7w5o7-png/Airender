@@ -74,4 +74,23 @@ float SampleTexture3DClampedR16(const u16* texels, u32 width, u32 height, u32 de
                             { return HalfToFloat(texels[(size_t(z) * height + size_t(y)) * width + size_t(x)]); });
 }
 
+float SampleTexture3DClampedR8(const u8* texels, u32 width, u32 height, u32 depth, float u, float v, float w)
+{
+    return Trilinear<float>(Axis(u, width, false), Axis(v, height, false), Axis(w, depth, false),
+                            [&](int x, int y, int z)
+                            { return float(texels[(size_t(z) * height + size_t(y)) * width + size_t(x)]) / 255.0f; });
+}
+
+hlsl::float4 SampleTexture3DClampedRGBA32(const float* texels, u32 width, u32 height, u32 depth, float u, float v,
+                                          float w)
+{
+    return Trilinear<hlsl::float4>(Axis(u, width, false), Axis(v, height, false), Axis(w, depth, false),
+                                   [&](int x, int y, int z)
+                                   {
+                                       const float* p =
+                                           texels + ((size_t(z) * height + size_t(y)) * width + size_t(x)) * 4;
+                                       return hlsl::float4(p[0], p[1], p[2], p[3]);
+                                   });
+}
+
 } // namespace air::renderer

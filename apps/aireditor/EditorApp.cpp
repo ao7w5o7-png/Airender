@@ -1204,9 +1204,10 @@ void EditorApp::BuildDebugPanel()
     if (pt)
     {
         ImGui::SeparatorText("Path tracer view");
-        static const char* const kViews[] = {"Lit",          "Normals",        "Base color",    "Roughness",
-                                             "Metallic",     "Depth",          "Intersections", "Bounces",
-                                             "Direct light", "Indirect light", "Radiance cache"};
+        static const char* const kViews[] = {"Lit",          "Normals",        "Base color",     "Roughness",
+                                             "Metallic",     "Depth",          "Intersections",  "Bounces",
+                                             "Direct light", "Indirect light", "Radiance cache", "Volume steps",
+                                             "Volume rate",  "Volumes per ray"};
         u32* view = nullptr;
         bool* furnace = nullptr;
         bool* nee = nullptr;

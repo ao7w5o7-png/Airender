@@ -312,7 +312,9 @@ void Main(uint3 groupId : SV_GroupID, uint index : SV_GroupIndex)
     s.stepScale = g.stepScale;
     s.flags = g.flags;
     StructuredBuffer<uint> noise = ResourceDescriptorHeap[g.blueNoise];
-    float jitter = MarchJitter(noise[(pixel.y % 64u) * 64u + pixel.x % 64u], f.frameIndex);
+    uint rank = noise[(pixel.y % 64u) * 64u + pixel.x % 64u];
+    s.lightSample = MarchLightSample(rank, f.frameIndex);
+    float jitter = MarchJitter(rank, f.frameIndex);
     uint share = 1u;
     MarchResult r;
     if ((g.flags & kMarchAdaptive) != 0u)

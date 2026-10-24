@@ -12,7 +12,7 @@
 // The including code defines, before including this file, VolumeBricks.hlsli's and MomentShadow.hlsli's
 // hooks and
 //   MomentShadowMap   LoadMomentMap(uint index)       VolumeShadowsData::maps
-//   uint              VolumeGroupMap(uint group)      its moment shadow map, kInvalidIndex: none
+//   uint              VolumeGroupMap(uint group)      its first moment shadow map, kInvalidIndex: none
 //   LightGroup        LoadLightGroup(uint group)
 //   LightTriangle     LoadLight(uint index)           the light list
 //   uint              LoadMarchLight(uint i)          the light groups that light the volumes
@@ -30,14 +30,23 @@ AIR_CONST uint kMarchMaxSteps = 2048u;
 
 struct MarchSetup
 {
-    SkyData sky;      // the sun's direction, radiance and disc
-    uint sunMap;      // the sun's moment shadow map; kInvalidIndex: no sunlight in the volumes
-    uint lightCount;  // light groups that light the volumes (LoadMarchLight)
+    SkyData sky;       // the sun's direction, radiance and disc
+    uint sunMap;       // the sun's moment shadow map; kInvalidIndex: no sunlight in the volumes
+    uint lightCount;   // light groups that light the volumes (LoadMarchLight)
     uint probeVolumes; // volumes in the probe field
-    uint level;       // of the bricks
-    float stepScale;  // the step, in voxels of that level
-    uint flags;       // kMarchNoDirect, kMarchNoIndirect
+    uint level;        // of the bricks
+    float stepScale;   // the step, in voxels of that level
+    uint flags;        // kMarchNoDirect, kMarchNoIndirect
+    uint lightSample;  // which of a light's maps the ray reads (MarchLightSample)
 };
+
+// Which of a light's maps (when it has several, VolumeShadowLayout.h) a pixel reads in a frame: its
+// quarter of the 64 x 64 blue noise ranks, moved on by one every frame, so that neighbouring pixels read
+// different maps and every pixel reads each of them in turn (accumulation and TAA average them).
+uint MarchLightSample(uint rank, uint frame)
+{
+    return (rank >> 10u) + frame;
+}
 
 // The volumes a ray crosses in front of its surface (at most kMarchMaxVolumes): their entries in the
 // volume table (8 bits each) and where the ray is inside their boxes.
@@ -248,6 +257,18 @@ MarchPoint MarchPointAt(MarchSetup s, MarchRayVolumes rv, float3 x, float3 d, fl
     return p;
 }
 
+// How much of a light group's light reaches x in the volumes, from map `sample` of its maps (points
+// spread over a large emitter close to them, VolumeShadowLayout.h): their mean over the frames.
+float GroupVisibility(uint first, float3 x, uint sample)
+{
+    MomentShadowMap m = LoadMomentMap(first);
+    if (m.count > 1u)
+    {
+        m = LoadMomentMap(first + sample % m.count);
+    }
+    return MomentLightVisibility(m, x);
+}
+
 // The light of the sun and of the light groups that the volumes at point p scatter towards the camera
 // at x, per unit length.
 float3 MarchDirect(MarchSetup s, MarchRayVolumes rv, MarchPoint p, float3 x, float3 d)
@@ -271,7 +292,7 @@ float3 MarchDirect(MarchSetup s, MarchRayVolumes rv, MarchPoint p, float3 x, flo
         for (uint j = 0u; j < s.lightCount; ++j)
         {
             uint group = LoadMarchLight(j);
-            float shadow = MomentLightVisibility(LoadMomentMap(VolumeGroupMap(group)), x);
+            float shadow = GroupVisibility(VolumeGroupMap(group), x, s.lightSample);
             if (shadow > 0.0f)
             {
                 direct += GroupInScattering(LoadLightGroup(group), x, d, p.sigmaS, p.phaseG, rv.count) * shadow;

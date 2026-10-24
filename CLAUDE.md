@@ -47,9 +47,15 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9),
   `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10),
   `smoke` for volumes (`--volume FILE.vdb|plume[,EXTINCTION,ALBEDO,G] --volume-at X,Y,Z,SIZE` puts
-  an OpenVDB grid in any scene, repeated for several; `aircli vdb FILE` lists a file's grids; §8.12).
+  an OpenVDB grid in any scene, repeated for several; `aircli vdb FILE` lists a file's grids; §8.12),
+  `braziers` for several volumes and lights close to them (§8.13).
   `--camera EX,EY,EZ,TX,TY,TZ[,FOV]` and `--ev EV100` move a scene's camera.
   Validate GPU against `aircli reference` on the same scene.
+- Real-time volumes (`pathtracer.volumeMarch`, on when `accumulate=0`; docs/architecture.md §8.13):
+  measure the method against tracked volumes with its CPU twin, `aircli reference --volume-march`
+  (the same shader code; `--frames` frames of `--spp` paths), and the GPU against both with
+  `--set pathtracer.accumulate=1 --set pathtracer.volumeMarch=2`. Debug views 11 / 12 / 13 show the
+  march's steps, adaptive sampling rate and volumes per ray.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.

@@ -18,15 +18,17 @@ using air::gpu::VolumeBrickLevel;
 using air::gpu::VolumeMarchData;
 #endif
 
-AIR_CONST uint kMaxVolumeLights = 8;     // light groups with a moment shadow map (besides the sun)
+AIR_CONST uint kMaxVolumeLights = 8;     // light groups with moment shadow maps (besides the sun)
+AIR_CONST uint kMaxLightOrigins = 4;     // maps of a large emitter close to the volumes, over its extent
 AIR_CONST uint kExactGroupTriangles = 8; // groups of up to this many triangles light volumes exactly
-AIR_CONST uint kVolumeProbeAxis = 4;     // probes per volume and axis, spanning its box
-AIR_CONST uint kVolumeProbes = 64;       // kVolumeProbeAxis^3
-AIR_CONST uint kVolumeProbeRays = 64;    // traced per probe and frame (one thread group)
+AIR_CONST uint kVolumeProbeAxis = 8;     // probes per volume and axis, spanning its box
+AIR_CONST uint kVolumeProbes = 512;      // kVolumeProbeAxis^3
+AIR_CONST uint kVolumeProbeRays = 16;    // traced per probe and frame
+AIR_CONST uint kProbesPerGroup = 4;      // in a thread group of 64, a thread per ray (kVolumeProbes / 4 groups)
 // The probes live in one Texture3D<float4> (RGBA32F) that the march samples with hardware trilinear
-// filtering: volume v's probe (i, j, k) at texel (4 v + i, j, 4 b + k) of block b, the blocks holding
-// L1 spherical harmonics of the red, green and blue radiance arriving at the probe and (in x) the
-// volume's occlusion there. Lookups stay inside one volume's block (VolumeProbes.hlsli).
+// filtering: volume v's probe (i, j, k) at texel (n v + i, j, n b + k) of block b, n = kVolumeProbeAxis,
+// the blocks holding L1 spherical harmonics of the red, green and blue radiance arriving at the probe
+// and (in x) the volume's occlusion there. Lookups stay inside one volume's block (VolumeProbes.hlsli).
 AIR_CONST uint kProbeBlocks = 4;
 AIR_CONST uint kMarchTile = 8;        // the march's thread groups cover 8 x 8 pixels
 AIR_CONST uint kMarchMaxVolumes = 4;  // volumes a ray marches through at once (its segments' masks)
@@ -118,6 +120,7 @@ struct VolumeMarchConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(VolumeShadowsData) == 32);
+static_assert(kVolumeProbes % kProbesPerGroup == 0 && kProbesPerGroup * kVolumeProbeRays == 64);
 static_assert(sizeof(VolumeShadowConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(VolumeProbeConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(VolumeMarchConstants) <= 128, "push constants are limited to 128 bytes");

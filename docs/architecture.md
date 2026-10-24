@@ -332,9 +332,12 @@ The graph schedules it in `Compile()`:
    previous frame and using an imported resource the batch writes (a LUT, a reservoir buffer).
    With it, compute work overlaps this frame's graphics passes, and a frame's GPU timings
    (first to last timestamp) cover only that frame.
-3. **Waits**: any use of a resource last used on another queue waits for the batch of that use.
-   This covers read after write, write after read and state changes; two reads in a row also
-   wait (conservative). Waiting for a later batch of a queue covers its earlier ones, so a batch
+3. **Waits**: a use of a resource waits for its last write or change of state on another queue
+   (read after write); a write or a change of state also waits for every read on the other queues
+   since then (write after read). Reads that leave the state as it is run side by side on both
+   queues (the volume probes read the shadow maps on the compute queue while the trace reads them
+   on the graphics queue, §8.13), and so does the first use of an imported resource in the state
+   its import declared. Waiting for a later batch of a queue covers its earlier ones, so a batch
    keeps one wait per queue.
 4. **Hand-over**: a transition the compute queue cannot make (e.g. `RenderTarget -> SRVCompute`)
    is recorded at the end of the graphics batch that used the resource last (the prologue for an
@@ -435,8 +438,8 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `volumeEvents` (§8.12), `restir*` (§8.7), `nrc*`
-(§8.11), `furnace`, `debugView`, `ser` and `debugScale`.
+`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `volumeEvents` (§8.12), `volumeMarch` and the other
+`volume*` (§8.13), `restir*` (§8.7), `nrc*` (§8.11), `furnace`, `debugView`, `ser` and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -469,6 +472,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `sunset` | a plain, two spheres and five pillars under a sun 4 degrees high | the physical sky (§8.9), long shadows |
   | `cumulus` | a 4 km meadow, a farmstead and trees under fair-weather cumulus | volumetric clouds (§8.10): their light, shadows, cost |
   | `smoke` | smoke rising from a brazier in a walled yard, the low sun behind it | volumes (§8.12): scattering, NEE in a medium, its shadow |
+  | `braziers` | three overlapping plumes over braziers at dusk, a lantern among them | several volumes and light groups near them (§8.13) |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -506,7 +510,9 @@ differ.
   halves the plain kernel's speed). `PathTracerNrc.hlsl` and `PathTracerNrcPortable.hlsl` (§8.11)
   end paths in the neural radiance cache; they are compute shaders (`AIR_PT_COMPUTE`) that run the
   same `TracePixel` with inline ray queries. `PathTracerVolume.hlsl` (`AIR_PT_VOLUME`) tracks the
-  scene's volume (§8.12) and runs instead of the plain kernel while there is one.
+  scene's volume (§8.12) and runs instead of the plain kernel while there is one;
+  `PathTracerVolumeShadows.hlsl` (`AIR_PT_VOLUME_SHADOWS`) lights surfaces through the real-time
+  volumes' moment shadow maps instead, when they are marched (§8.13).
 - **Guides** (albedos, normal/roughness, depth, motion) are written only when an active feature
   lists them in `RenderFeature::ConsumedSlots()` (dlss does): they cost about a tenth of the trace.
 
@@ -558,7 +564,9 @@ differ.
 `pathtracer.debugView` selects what `Resolve` writes: 0 lit, 1 normals, 2 base color,
 3 roughness, 4 metallic, 5 first-hit distance, 6 intersection count heatmap (Turbo colormap),
 7 path length heatmap, 8 direct light only, 9 indirect light only, 10 what the neural radiance
-cache predicts the first surface reflects (§8.11). `debugScale` scales the distance and heatmap views. `furnace=1` turns every
+cache predicts the first surface reflects (§8.11), and for the real-time volumes (§8.13) 11 their
+march's steps, 12 its adaptive sampling rate, 13 the volumes per ray. `debugScale` scales the
+distance and heatmap views. `furnace=1` turns every
 material white and every emitter off with a uniform environment, so any visible structure is an
 energy error.
 
@@ -1054,7 +1062,8 @@ FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] [--volume-grid NAME] [--v
 X,Y,Z[,SIZE]]` sets a scene's volume, once per volume (the n-th `--volume` sets or adds the n-th,
 `--volume-grid` and `--volume-at` apply to the last one given, `none` removes them all), `aircli vdb
 FILE [--read GRID]` lists a file's grids (and reads one as a volume would), and the editor's Scene
-panel lists, adds, edits and removes them.
+panel lists, adds, edits and removes them. In real time (not accumulating) they are ray marched over
+the path traced surfaces by default instead of tracked (§8.13).
 
 - **OpenVDB without the library** (`renderer/Vdb.h`; the format is described at the top of
   `src/renderer/src/Vdb.cpp`): files of format version 222 (OpenVDB 2.0) on, float, double and half
@@ -1140,6 +1149,158 @@ Validation:
   three alternating rounds each), with no volume to track.
 - Not modelled: emission (a fire's temperature grid), extinction varying with wavelength, a sparse
   layout for the path tracer (its grids are dense: 2 bytes a voxel), Z-up files.
+
+### 8.13 Real-time volumes: ray marched, lit through moment shadow maps
+
+Tracking the volumes along every path (§8.12) is exact but costs a frame what the volumes' many
+scattering events cost. In real time (`pathtracer.volumeMarch=1`, the default, when not accumulating;
+`2` also when accumulating, to measure it) the paths ignore the volumes and every pixel ray marches
+them over its path traced surface instead. The design follows Mueller's description of a production
+volume renderer (SIGGRAPH 2026): per-pixel marching of sparse 4-bit bricks; a moment shadow map
+rendered once per light (b0 in R16, four moments in RGBA16) and looked up everywhere, on async
+compute; segments of up to four overlapping volumes per ray; light from the volumes' surroundings
+(here probes) scaled by an occlusion grid; blue-noise jitter that accumulation or a temporal filter
+resolves; adaptive sampling groups that share lighting over 2 x 2 and 4 x 4 pixels; mip levels of the
+volumes; lights cast volume shadows by default, those that matter most to the volumes. Files:
+`src/features/pathtracer/src/VolumeMarcher.*`, `VolumeShadowLayout.*`, `shaders/VolumeMarch*`,
+`VolumeShadow*`, `VolumeProbes*`; `src/renderer/` `VolumeBricks.cpp`, `BlueNoise.cpp`,
+`shader/VolumeBricks*`, `shader/MomentShadow*`.
+
+**Data** (`renderer::Scene`, `GpuScene::volumeMarch`, `volumeLevels`, `lightGroups`):
+
+- *Bricks* (`renderer::BuildVolumeBricks`, `shader/VolumeBricks.hlsli`): each volume at three levels of
+  detail (2^l voxels averaged), cut into bricks of 4^3 voxels stored as 5^3 4-bit codes (the apron
+  voxel makes trilinear filtering local to a brick) scaled between the brick's half-float minimum and
+  maximum, an indirection table (empty bricks hold none) and occupancy words of 4 x 4 x 2 bricks, so
+  a march skips an empty brick, or a whole empty word, at once. The plume keeps 2177 of 9537 bricks;
+  its densities read back within 0.0003 on average of the path tracer's texture.
+- *Occlusion grid*: per 8^3 voxels the volume's own mean transmittance over 32 directions, marched at
+  the coarsest level with diffusion's effective extinction, sigma_t sqrt(3 (1 - albedo)(1 - g
+  albedo)): light that scatters on its way in reaches deeper than Beer's law says.
+- *Light groups* (`renderer::BuildLightGroups`): one per emissive instance, its centre, area, summed
+  normal, mean radiance, power and radius; the light triangles carry their group.
+
+**Passes** each frame, around `PathTracer.Trace`:
+
+| Pass | Queue | What it does |
+|---|---|---|
+| `VolumeMarch.Shadows` | compute, async | the moment shadow maps, again only when the scene's version or the shadow settings change |
+| `PathTracer.Trace` | graphics | `PathTracerVolumeShadows.hlsl` (`AIR_PT_VOLUME_SHADOWS`): paths that light surfaces through the maps; writes the frame's samples and their first hit's distance (`PathTracer.FrameSamples`) |
+| `VolumeMarch.Probes` | compute, async, beside the trace | 512 probes per volume, 16 paths each |
+| `VolumeMarch.March` | graphics | every pixel's ray through the volumes in front of its hit, over its samples, into the accumulation |
+
+- **Moment shadow maps** (`MomentShadow.hlsli`, `VolumeShadowLayout.cpp`): up to
+  `pathtracer.volumeLights` (8) light groups, ranked by power over (distance to the volumes' box^2 +
+  radius^2), and the sun get maps: orthographic over the box for the sun, octahedral around a point
+  of the group, its depth through a square root (rays from a point cross the volumes in a short
+  stretch of distances). A texel's ray is marched (`VolumeShadowMarch.hlsli`, `volumeShadowLevel` 1,
+  `volumeShadowStep` 1 voxel) and its optical depth's power moments stored as half floats; a lookup
+  reconstructs the transmittance in front of a depth with moment-based order-independent
+  transparency's algorithm (Muenstermann et al. 2018; overestimation 0.25, bias 1e-3: rounded to
+  half floats, moments need a stronger pull than 32-bit ones, `MomentTests.cpp`). A third slice holds
+  the depth of the texel ray's first opaque hit, ray traced (past the light's own instance; for the
+  sun also towards it), filtered as percentage-closer for points inside the volumes; surfaces trace
+  their own opaque shadows and read the moments only.
+- **Large emitters** (`volumeLightOrigins`, 4): a point sees a column of smoke over a bed of embers
+  through its dense foot, which hides the embers' centre from the smoke above while their edges light
+  it past the foot. An open emitter whose radius is at least a quarter of its distance to the volumes
+  plus that radius gets a map from the centre of its area in each quadrant of its plane (around its
+  centre, along the principal axes of the area). A surface reads the one nearest the point its path
+  sampled on the emitter; the march reads one per pixel and frame (`MarchLightSample`: the pixel's
+  quarter of the blue noise ranks, moved on every frame), so every pixel reads each in turn and
+  accumulation or TAA averages them, at the cost of one.
+- **Probes** (`VolumeProbes.hlsl`): 8^3 per volume at the cell centres of a lattice over its box
+  trace the path tracer's paths (`AIR_PT_VOLUME` and `AIR_PT_PROBE`: they track the volumes), 16 a
+  frame along a Fibonacci lattice turned at random per probe and frame. With `kFlagProbe` a path
+  leaves out the light that reaches the probe without scattering from the sun and from the march's
+  light groups, which the march adds itself; the rest (the sky and the surfaces through the volumes,
+  the light the volumes scatter, other emitters) is projected onto L1 spherical harmonics per colour
+  channel. The march scatters it once more, so its single scattering of the probes' light gives all
+  orders beyond the first. The probe field (an RGBA32F 3D texture, `VolumeMarchShared.h`) keeps per
+  probe the three channels and the occlusion grid's value there, filtered trilinearly within a volume.
+  It is a running mean of the frames while the scene stands still and accumulates, 5% a frame when it
+  does not.
+- **The march** (`VolumeMarch.hlsl`, shared with the CPU in `VolumeMarch.hlsli`): a thread group
+  covers 8 x 8 pixels, its lanes in Morton order; it gathers the volumes its rays cross in front of
+  their surfaces and marches the first four. A ray steps from the first box it enters to its surface,
+  `volumeStep` (1) voxels of `volumeLevel` (0) of the smallest voxel among its volumes, from a jitter
+  in [0, 1) (its blue-noise rank moved on by the golden ratio every frame), and skips what the
+  occupancy says is empty. Each step: the volumes' extinction and scattering, the sun's light
+  through its map, each light group's (exactly per triangle for up to 8 triangles, by their solid
+  angle, Van Oosterom and Strackee, and the phase function at their centre; else a sphere or a disc of
+  its area) through its maps, and the probes' light (the harmonics convolved with Henyey-Greenstein,
+  which scales band l by g^l) times the ratio of the occlusion grid at the step to the probes' (at
+  most 4): the grid is finer than the probes. A step's light is integrated as if constant over it
+  (energy conserving); the ray ends where the transmittance falls below 1e-3. Over the surface: the
+  volumes' light plus the surface's samples times their transmittance, the air (aerial perspective)
+  fused at the depth the volumes' light comes from (its transmittance-weighted mean).
+- **Adaptive sampling groups** (`volumeAdaptive`): once every pixel of a wave has less than
+  `volumeShareBelow2` (0.3) of the light from behind left, each 2 x 2 block lights a block of 4 steps
+  with one step per pixel and every pixel takes the light of its step's lane (mixed with the next
+  one's by its jitter); below `volumeShareBelow4` (0.1), 4 x 4 blocks and 16 steps. Densities, depths
+  and transmittances stay every pixel's own. The wave decides, so all its lanes stay in the loop.
+- **Debug views** 11 (march steps per pixel, `debugScale` steps to the top of the Turbo colormap),
+  12 (sampling rate: blue every pixel, green 2 x 2, red 4 x 4) and 13 (volumes per ray). Direct-only
+  (8) and indirect-only (9) leave the probes' and the lights' light out of the march respectively.
+- **Render graph**: the probes read the maps on the compute queue while the trace reads them on the
+  graphics queue (reads in the same state no longer wait for each other, §5.4).
+
+Parameters: `volumeMarch`, `volumeStep`, `volumeLevel`, `volumeShadowSize` (256), `volumeShadowLevel`,
+`volumeShadowStep`, `volumeLights`, `volumeLightOrigins`, `volumeAdaptive`, `volumeShareBelow2`,
+`volumeShareBelow4`, `volumeAir`, `volumeShadowsEveryFrame` (render the maps every frame, to time
+them). Status: `volumeMarch` (whether it runs), `volumeMarchLights` (light groups with maps).
+
+**CPU twin** (`pt::RenderVolumeMarchReference`, `VolumeMarchReference.cpp`; `aircli reference
+--volume-march [--frames N] [--probe-frames N] [--volume-step S] [--volume-shadow-size N]
+[--volume-lights N]`): the same shader code on the CPU, the maps marched and ray traced against the
+reference's BVH and stored as half floats, the probes traced by the reference's kernel
+(`AIR_PT_PROBE`), the surfaces by one with `AIR_PT_VOLUME_SHADOWS`, the march at full rate. It
+accumulates `--frames` frames of one camera ray per pixel at the frame's sub-pixel offset, `--spp`
+paths along it (16 by default). So the method can be measured against the path tracer that tracks
+the volumes without a GPU, and the GPU against the method. `pt::VolumeMarchProbe` exposes the maps
+and the light groups' light to tests.
+
+Validation (`src/features/pathtracer/tests/VolumeMarchTests.cpp`, `tests/MomentTests.cpp`,
+`tests/VolumeBricksTests.cpp`):
+
+- An octant-sized triangle lights the march with exactly an eighth of its radiance (isotropic); a
+  sphere and a square of 32 triangles are within 1% of the integral over their triangles, within 8%
+  scattering forwards (g 0.5; the phase function at the centre, +5.6% at worst). A single triangle
+  spanning an octant is 12% dark at g 0.5.
+- The sun's map against the transmittance marched at a quarter voxel through the finest bricks, over
+  1246 points the plume shades: 0.049 on average, 0.26 at worst. It is slightly too dark where the
+  light enters (-0.05 to -0.08 at transmittances 0.7-1) and too bright deep inside (+0.08 at 0.1-0.4),
+  the reconstruction's own error.
+- The embers' four maps against the transmittance towards their four points: 0.027 on average; above
+  1.6 m they let through 0.39 of the light, the embers' centre alone 0.025.
+- White furnace: the plume vanishes, 0.18000 at every pixel.
+- Against tracked volumes on the CPU (24 x 24, the plume close up): in the sun from its side -2.9%, at
+  night over its embers +0.9% (above the embers). With the probes on a lattice of 4^3 the first was
+  -11%; with the embers' map from their centre alone the second was -44%, and -99% for the single
+  scattering above the plume's foot.
+- `PathTracer_RealTimeVolumesAreMarched` (Null backend): the passes and pipelines, the maps rendered
+  once, the probes on the compute queue beside the trace, the status, the debug views, the maps
+  rendered again after a change, tracking while accumulating and the march with `volumeMarch=2`.
+- GPU (`volumeMarch=2`, accumulating 512 frames of 4 spp, 160 x 90) against the tracked CPU reference
+  (512 spp): `smoke` -0.01% (the plume +0.55%, relative MSE 0.006), `braziers` +1.1% (the plumes
+  +1.4%); the GPU and the CPU twin agree within 0.3% in the plume.
+
+Cost (RTX 5070, 1920 x 1080, 1 spp, `accumulate=0`):
+
+| Scene | Tracked | Trace | March | Probes (async) | Busy |
+|---|---|---|---|---|---|
+| `smoke` | 5.3 ms | 2.0 ms | 0.92 ms | 0.41 ms | 3.0 ms |
+| `braziers` | 10.1 ms | 2.4 ms | 3.5 ms | 0.94 ms | 6.0 ms |
+
+Adaptive sampling saves a sixth of the march in `smoke` (1.11 ms without) for an image within 0.04%
+of the full rate. Four maps per ember bed cost the `braziers` march 0.14 ms over one map;
+reading all four at every step instead of one per frame cost 1.8 ms.
+
+Not modelled: the light the volumes scatter onto surfaces (a wall next to the glowing plume at night
+is 8-11% darker than tracked), volumes seen in reflections and refractions (BSDF-sampled rays from
+surfaces do not meet them), more than four volumes per 8 x 8 pixels, the march through the cloud
+layer (§8.10, which the trace kernels still render), detail finer than the probes beyond what the
+occlusion grid restores, emission.
 
 ---
 
