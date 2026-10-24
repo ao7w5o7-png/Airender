@@ -35,7 +35,7 @@ hlsl::float3 SunDirection(const Sky& sky);
 
 struct SkyTable
 {
-    gpu::SkyData data;
+    gpu::SkyData data{};         // all zero: without a physical sky only the sun and the uniform radiance are set
     std::vector<float> radiance; // data.width * data.height texels, 3 floats each (linear sRGB, nits)
     // Aerial perspective (SkyShared.h): aerialWidth * aerialHeight * data.aerialSlices RGBA16F texels
     // each, x fastest; empty without a physical sky.

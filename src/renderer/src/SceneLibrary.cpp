@@ -38,7 +38,7 @@ float ExposureScale(float ev100)
 
 gpu::MaterialData Material::ToGpu() const
 {
-    gpu::MaterialData out;
+    gpu::MaterialData out{};
     out.baseColor = baseColor;
     out.roughness = roughness;
     out.metallic = metallic;

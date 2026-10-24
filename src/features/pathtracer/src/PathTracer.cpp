@@ -33,7 +33,7 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
 {
-    gpu::CameraData out;
+    gpu::CameraData out{};
     out.position = {camera.position, std::tan(camera.verticalFov * 0.5f)};
     out.forward = {camera.Forward(), aspect};
     out.right = {camera.Right(), 0.0f};

@@ -90,7 +90,7 @@ std::vector<u32> FirstLightIndices(const SceneDesc& desc)
 
 gpu::InstanceData MakeInstanceData(const Instance& in, u32 vertexBuffer, u32 indexBuffer)
 {
-    gpu::InstanceData data;
+    gpu::InstanceData data{};
     data.vertexBuffer = vertexBuffer;
     data.indexBuffer = indexBuffer;
     data.materialIndex = in.material;
@@ -123,7 +123,7 @@ std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, doubl
         }
         for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3)
         {
-            gpu::LightTriangle light;
+            gpu::LightTriangle light{};
             const float3 p0 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t]].position);
             const float3 p1 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t + 1]].position);
             const float3 p2 = TransformPoint(in.transform, mesh.vertices[mesh.indices[t + 2]].position);
