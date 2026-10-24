@@ -467,13 +467,13 @@ Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, 
         throughput *= albedo;
         if (sunNee)
         {
-            float3 wi = SampleSunDirection(params.sky, float2(Rand(seed), Rand(seed)));
+            float3 wi = SampleSunDirection(params.sky, Rand2(seed));
             float phase = CloudPhase(c, dot(d, wi));
             float transmittance = CloudTransmittance(c, p, wi, 1e30f, seed);
             float weight = PowerHeuristic(sunPdf, phase);
             escape.rest += params.sky.sunRadiance * (throughput * transmittance * phase * weight / sunPdf);
         }
-        float3 u = float3(Rand(seed), Rand(seed), Rand(seed));
+        float3 u = Rand3(seed);
         float3 next = SampleCloudPhase(c, d, u);
         phasePdf = CloudPhase(c, dot(d, next));
         d = next;
@@ -698,7 +698,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         {
             float uLight = Rand(seed);
             float uAlias = Rand(seed); // drawn in both modes: the random sequence stays the same
-            float2 uPoint = float2(Rand(seed), Rand(seed));
+            float2 uPoint = Rand2(seed);
             LightTriangle light = LoadLight(0u); // the list has an entry even without lights
             float pmf = 0.0f;
             if (lightTree)
@@ -762,7 +762,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         // the triangles.)
         if (sunNee)
         {
-            float2 uSun = float2(Rand(seed), Rand(seed));
+            float2 uSun = Rand2(seed);
             float3 wi = SampleSunDirection(params.sky, uSun);
             if (dot(wi, ng) > 0.0f)
             {
@@ -803,7 +803,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
 
         // Continue the path by sampling the BSDF.
         float uLobe = Rand(seed);
-        float2 u = float2(Rand(seed), Rand(seed));
+        float2 u = Rand2(seed);
         BsdfSample bs = SampleBsdf(s.material, woLocal, uLobe, u);
         if (!bs.valid)
         {

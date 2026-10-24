@@ -16,10 +16,14 @@ int main(int argc, char** argv)
             continue;
         }
         const int before = airtest::FailureCount();
+        // Flushed: failed expectations print to stderr at once, and through a pipe (a CI log) stdout
+        // is buffered, which would put them before their test's name.
         std::printf("[ RUN  ] %s\n", test.name);
+        std::fflush(stdout);
         test.fn();
         const bool ok = airtest::FailureCount() == before;
         std::printf("[ %s ] %s\n", ok ? " OK " : "FAIL", test.name);
+        std::fflush(stdout);
         ++ran;
         failedTests += ok ? 0 : 1;
     }

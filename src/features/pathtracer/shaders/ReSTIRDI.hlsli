@@ -218,7 +218,7 @@ void InitialPass(uint2 pixel)
         {
             float uSelect = Rand(seed);
             float uAlias = Rand(seed);
-            float2 uPoint = float2(Rand(seed), Rand(seed));
+            float2 uPoint = Rand2(seed);
             LightSample y;
             y.light = SampleLightIndex(uSelect, uAlias, params.lightCount);
             y.barycentrics = SampleTriangle(uPoint);
@@ -230,7 +230,7 @@ void InitialPass(uint2 pixel)
         for (uint j = 0u; j < g.bsdfCandidates; ++j)
         {
             float uLobe = Rand(seed);
-            float2 u = float2(Rand(seed), Rand(seed));
+            float2 u = Rand2(seed);
             BsdfSample bs = SampleBsdf(r.bsdf, uLobe, u);
             float3 wi = ToWorld(r.frame, bs.wi);
             if (!bs.valid || dot(wi, r.ng) <= 0.0f)

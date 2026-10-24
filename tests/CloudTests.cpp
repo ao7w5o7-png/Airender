@@ -47,6 +47,13 @@ struct CloudReader
         seed = Pcg(seed);
         return float(seed >> 8) * (1.0f / 16777216.0f);
     }
+    // Three uniforms in order (a constructor's arguments are unsequenced).
+    static float3 Rand3(uint& seed)
+    {
+        const float x = Rand(seed);
+        const float y = Rand(seed);
+        return float3(x, y, Rand(seed));
+    }
 
 // NOLINTBEGIN(readability-identifier-naming)
 #include "air/renderer/shader/CloudLookup.hlsli"
@@ -154,7 +161,7 @@ TEST(Clouds_PhaseSamplingFollowsThePhase)
         uint seed = 7u;
         for (int i = 0; i < kSamples; ++i)
         {
-            const float3 u(CloudReader::Rand(seed), CloudReader::Rand(seed), CloudReader::Rand(seed));
+            const float3 u = CloudReader::Rand3(seed);
             const float3 w = reader.SampleCloudPhase(c, axis, u);
             EXPECT(std::abs(length(w) - 1.0f) < 1e-4f);
             const double cosine = dot(w, axis);
@@ -187,8 +194,8 @@ TEST(Clouds_VolumeCoversTheRequestedSkyAndMajorantsBoundIt)
     int checked = 0;
     for (int ray = 0; ray < 2000; ++ray)
     {
-        const float3 o(CloudReader::Rand(seed) * 40000.0f - 20000.0f, CloudReader::Rand(seed) * 4000.0f,
-                       CloudReader::Rand(seed) * 40000.0f - 20000.0f);
+        const float3 o =
+            CloudReader::Rand3(seed) * float3(40000.0f, 4000.0f, 40000.0f) - float3(20000.0f, 0.0f, 20000.0f);
         const float z = CloudReader::Rand(seed) * 2.0f - 1.0f;
         const float phi = CloudReader::Rand(seed) * 6.2831853f;
         const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
@@ -223,8 +230,8 @@ TEST(Clouds_VolumeCoversTheRequestedSkyAndMajorantsBoundIt)
     // the shifted coordinate may move a weight by 1/256).
     for (int i = 0; i < 200; ++i)
     {
-        const float3 p(CloudReader::Rand(seed) * c.tileSize, c.bottom + CloudReader::Rand(seed) * (c.top - c.bottom),
-                       CloudReader::Rand(seed) * c.tileSize);
+        const float3 u = CloudReader::Rand3(seed);
+        const float3 p(u.x * c.tileSize, c.bottom + u.y * (c.top - c.bottom), u.z * c.tileSize);
         const float a = reader.CloudDensity(c, p);
         const float b = reader.CloudDensity(c, p + float3(c.tileSize, 0.0f, -2.0f * c.tileSize));
         EXPECT(std::abs(a - b) < 1.2e-2f);
@@ -242,7 +249,8 @@ TEST(Clouds_TrackingMatchesARayMarch)
     int tested = 0;
     for (int attempt = 0; attempt < 400 && tested < 6; ++attempt)
     {
-        const float3 o(CloudReader::Rand(seed) * c.tileSize, 0.0f, CloudReader::Rand(seed) * c.tileSize);
+        const float ox = CloudReader::Rand(seed) * c.tileSize;
+        const float3 o(ox, 0.0f, CloudReader::Rand(seed) * c.tileSize);
         const float elevation = 0.3f + CloudReader::Rand(seed) * 1.2f;
         const float azimuth = CloudReader::Rand(seed) * 6.2831853f;
         const float3 d(std::cos(elevation) * std::cos(azimuth), std::sin(elevation),

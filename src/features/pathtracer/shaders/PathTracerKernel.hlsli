@@ -146,7 +146,7 @@ void RayGen()
     float2 firstPixel = float2(pixel) + 0.5f;
     for (uint i = 0; i < f.samplesPerPixel; ++i)
     {
-        float2 jitter = (f.flags & kFlagGlobalJitter) != 0u ? f.jitter + 0.5f : float2(Rand(seed), Rand(seed));
+        float2 jitter = (f.flags & kFlagGlobalJitter) != 0u ? f.jitter + 0.5f : Rand2(seed);
         float2 pixelPos = float2(pixel) + jitter;
         float3 direction = CameraRayDirection(f.camera, pixelPos, size);
         params.flags = i == 0u ? f.flags | kFlagRecordGi : f.flags; // ReSTIR GI takes the first sample's
