@@ -2,7 +2,8 @@
 // rays: shared by the trace kernel and the ReSTIR passes. The including shader declares `g`, its push
 // constants, with the fields tlas, instances, materials, lights, instanceLights, lightTree, bsdfLut and
 // skyTable, and supplies TraceClosest itself (closest-hit shaders or an inline query). The clouds'
-// and the aerial perspective's resources come with their CloudData and SkyData.
+// and the aerial perspective's resources come with their CloudData and SkyData, the volumes' with
+// their table (IntegratorParams::volumeTable).
 #ifndef AIR_PT_SCENE_ACCESS_HLSLI
 #define AIR_PT_SCENE_ACCESS_HLSLI
 
@@ -86,6 +87,12 @@ float CloudMajorantLoad(CloudData c, uint cell)
 {
     StructuredBuffer<float> majorants = ResourceDescriptorHeap[c.majorants];
     return majorants[cell];
+}
+
+VolumeData LoadVolume(uint table, uint index)
+{
+    StructuredBuffer<VolumeData> volumes = ResourceDescriptorHeap[table];
+    return volumes[index];
 }
 
 float VolumeDensitySample(VolumeData v, float3 uvw)

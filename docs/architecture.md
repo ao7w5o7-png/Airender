@@ -1047,11 +1047,14 @@ Validation:
 
 ### 8.12 Volumes: smoke and OpenVDB grids
 
-`SceneDesc::volume` (`renderer/Volume.h`) puts a box of voxels among the surfaces that absorbs and
-scatters light: a grid of an OpenVDB file, or a procedural plume of smoke. `smoke` uses the plume;
-`aircli render|reference --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]
-[--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]` adds one to any scene, `aircli vdb FILE [--read
-GRID]` lists a file's grids (and reads one as a volume would), and the editor's Scene panel edits it.
+`SceneDesc::volumes` (`renderer/Volume.h`, up to 16) put boxes of voxels among the surfaces that
+absorb and scatter light: grids of OpenVDB files, or procedural plumes of smoke. They may overlap
+(their densities add up). `smoke` uses one plume; `aircli render|reference --volume
+FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] [--volume-grid NAME] [--volume-at
+X,Y,Z[,SIZE]]` sets a scene's volume, once per volume (the n-th `--volume` sets or adds the n-th,
+`--volume-grid` and `--volume-at` apply to the last one given, `none` removes them all), `aircli vdb
+FILE [--read GRID]` lists a file's grids (and reads one as a volume would), and the editor's Scene
+panel lists, adds, edits and removes them.
 
 - **OpenVDB without the library** (`renderer/Vdb.h`; the format is described at the top of
   `src/renderer/src/Vdb.cpp`): files of format version 222 (OpenVDB 2.0) on, float, double and half
@@ -1065,25 +1068,30 @@ GRID]` lists a file's grids (and reads one as a volume would), and the editor's 
   becomes a 6 GB dense grid. Voxel i's centre is at i x scale + translation (OpenVDB's convention).
 - **Placement**: `size` > 0 scales the box to that many metres along its longest side, its bottom
   centred on `position`; 0 keeps the file's own size and place, moved by `position`. Grids are read
-  as stored: a file from a Z-up tool lies on its side. `renderer::Scene` keeps the voxels it read
-  (up to 512 MiB), so edits of the optics or the placement do not read the file again; another
-  file, grid, resolution or seed does.
+  as stored: a file from a Z-up tool lies on its side. `renderer::Scene` builds each volume on its
+  own: one that did not change keeps its resources, and it keeps the voxels it read (up to 512 MiB in
+  all, shared by volumes of the same source), so edits of the optics or the placement do not read the
+  file again; another file, grid, resolution or seed does.
 - **The plume** (`MakeSmokePlume`): 64 x 128 x 64 voxels of 2.5 cm, a swaying column of value noise
   that widens with height and fades out in its top 30%.
-- **On the GPU** (`renderer::BuildVolume`, `renderer::Scene`): the densities as an R16_FLOAT 3D
-  texture with a zero voxel around them (hardware trilinear filtering through the static
+- **On the GPU** (`renderer::BuildVolume`, `renderer::Scene`): per volume, the densities as an
+  R16_FLOAT 3D texture with a zero voxel around them (hardware trilinear filtering through the static
   linear-clamp sampler reads zero outside), and majorants for cells of 8^3 texels: the largest
   texel trilinear filtering reaches from inside a cell, as rounded to half floats, times the
-  extinction. `shader/VolumeLookup.hlsli`, shared with the CPU reference (which emulates the filter,
+  extinction. `GpuScene::volumeTable` holds a `gpu::VolumeData` per volume that loaded, with the
+  bindless indices of its resources. `shader/VolumeLookup.hlsli`, shared with the CPU reference (which emulates the filter,
   `renderer::SampleTexture3DClampedR16`), marches a 3D DDA over the cells that skips empty ones:
   delta tracking finds collisions, ratio tracking (Russian roulette below 0.1) transmittance; the
   Henyey-Greenstein phase function is sampled exactly.
 - **Transport** (`Integrator.hlsli`): every ray, camera or bounce, is delta tracked through the
-  volume up to its surface. A collision is a path vertex: the throughput takes the albedo, NEE
-  samples a triangle light (the light tree without a receiver cosine, or by power) and the sun,
-  their transmittance through the volume (and the clouds, for the sun) by ratio tracking, weighed
-  by the power heuristic against phase sampling, which continues the path. NEE from surfaces is
-  dimmed by the volume's transmittance too, which casts its shadows. Scattering events are not
+  volumes up to its surface, each volume on its own: the nearest collision wins (the first collision
+  in a sum of media is distributed as the nearest of each medium's first collision, and the medium
+  it is in is the one that scattered), and each volume is tracked only up to the nearest collision
+  found so far. A collision is a path vertex: the throughput takes that volume's albedo, NEE samples
+  a triangle light (the light tree without a receiver cosine, or by power) and the sun, their
+  transmittance through the volumes (the product of each one's ratio tracking estimate; and the
+  clouds, for the sun), weighed by the power heuristic against phase sampling, which continues the
+  path. NEE from surfaces is dimmed by the volumes' transmittance too, which casts their shadows. Scattering events are not
   bounces: a path takes up to `pathtracer.volumeEvents` (256) of them on top of its `maxBounces`
   surfaces, and Russian roulette ends a walk only once its throughput has fallen below 0.25 (as the
   clouds' walks do), so walks through a bright medium are not cut short by chance. ReSTIR DI and GI
@@ -1108,7 +1116,12 @@ Validation:
   `bunny_cloud` and the Walt Disney Animation Studios cloud (eighth and sixteenth resolution) decode
   to the sums of densities (leaves and tiles) an independent reader finds, to 1e-11.
 - `Integrator_VolumeVanishesInAWhiteFurnace`: with albedo 1 in a uniform environment every pixel is
-  0.18 within 0.1%.
+  0.18 within 0.1%; `Integrator_OverlappingVolumesVanishInAWhiteFurnace` the same with two crossing
+  plumes of different densities and anisotropies.
+- `Integrator_TwoHalvesOfAVolumeLookLikeTheWhole`: two copies of the plume at half its extinction,
+  lit from the side by the sun, give the image of the whole within 2% (512 spp).
+- `Scene_VolumeResourcesFollowEdits`: a volume that does not change keeps its resources when another
+  is added or fails to load; the table holds the volumes that loaded.
 - `Integrator_VolumeNeeAndPhaseSamplingAgree`: three views, the plume's shadow on the wall and the
   plume lit from the side in a 12-degree sun, and the plume with its shadow on the ground under a
   3 m lamp: NEE with MIS and sampling alone agree within 4% at 512-1024 spp (at 16 times that, to
@@ -1125,8 +1138,8 @@ Validation:
   created the first time a scene has a volume): compiled into the plain kernel, the tracking code
   cost every other scene 1-6% (cornell_box +4.9%, sphere_field +5.8%, door +1.3%, sunset +5.4%,
   three alternating rounds each), with no volume to track.
-- Not modelled: emission (a fire's temperature grid), extinction varying with wavelength, more than
-  one volume, a sparse layout on the GPU (the grid is dense: 2 bytes a voxel), Z-up files.
+- Not modelled: emission (a fire's temperature grid), extinction varying with wavelength, a sparse
+  layout for the path tracer (its grids are dense: 2 bytes a voxel), Z-up files.
 
 ---
 

@@ -266,7 +266,7 @@ TEST(Integrator_VolumeVanishesInAWhiteFurnace)
     scene.meshes[scene.instances[0].mesh] =
         renderer::MakeQuad("Speck", {-0.01f, -1000.0f, 0.01f}, {0.01f, -1000.0f, 0.01f}, {0.01f, -1000.0f, -0.01f},
                            {-0.01f, -1000.0f, -0.01f}, {0.0f, 1.0f, 0.0f}); // instance 0, the yard, is not moved
-    scene.volume.extinction = 8.0f;
+    scene.volumes[0].extinction = 8.0f;
     scene.camera.position = {0.0f, 1.9f, 3.0f};
     scene.camera.yaw = 0.0f;
     scene.camera.pitch = 0.0f;
@@ -290,6 +290,79 @@ TEST(Integrator_VolumeVanishesInAWhiteFurnace)
     }
     EXPECT(Near(lowest, 0.18, 1e-3, "darkest pixel"));
     EXPECT(Near(highest, 0.18, 1e-3, "brightest pixel"));
+}
+
+// Overlapping volumes (each tracked on its own, the nearest collision scattering with its own phase
+// function) neither lose nor make energy either: two plumes that cross, of different densities and
+// anisotropies, vanish in the white furnace.
+TEST(Integrator_OverlappingVolumesVanishInAWhiteFurnace)
+{
+    TaskSystem tasks(4);
+    renderer::SceneDesc scene = airtest::BuiltinScene("smoke");
+    scene.instances.resize(1);
+    scene.meshes[scene.instances[0].mesh] =
+        renderer::MakeQuad("Speck", {-0.01f, -1000.0f, 0.01f}, {0.01f, -1000.0f, 0.01f}, {0.01f, -1000.0f, -0.01f},
+                           {-0.01f, -1000.0f, -0.01f}, {0.0f, 1.0f, 0.0f});
+    scene.volumes[0].extinction = 6.0f;
+    renderer::Volume second = scene.volumes[0];
+    second.position.x += 0.4f;
+    second.position.y += 0.3f;
+    second.extinction = 10.0f;
+    second.anisotropy = -0.3f;
+    second.seed = 11;
+    scene.volumes.push_back(second);
+    scene.camera.position = {0.2f, 1.9f, 3.0f};
+    scene.camera.yaw = 0.0f;
+    scene.camera.pitch = 0.0f;
+    scene.camera.verticalFov = 1.0f;
+    pt::ReferenceSettings settings = Settings(tasks, 16, 4);
+    settings.furnace = true;
+    settings.volumeEvents = 4096;
+    settings.applyExposure = true;
+    const Image image = pt::RenderReference(scene, scene.camera, settings);
+    double lowest = 1e30;
+    double highest = 0.0;
+    for (u32 y = 0; y < image.height; ++y)
+    {
+        for (u32 x = 0; x < image.width; ++x)
+        {
+            const float* p = image.At(x, y);
+            const double l = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+            lowest = std::min(lowest, l);
+            highest = std::max(highest, l);
+        }
+    }
+    EXPECT(Near(lowest, 0.18, 1e-3, "darkest pixel"));
+    EXPECT(Near(highest, 0.18, 1e-3, "brightest pixel"));
+}
+
+// Two volumes in the same place add up: two copies of the plume at half the extinction give the
+// image of one at the full extinction (the nearest of two collisions in half as dense media is
+// distributed as the first collision in the whole, and transmittances multiply). Lit from the side
+// by the sun, so that both its own shadow and multiple scattering show.
+TEST(Integrator_TwoHalvesOfAVolumeLookLikeTheWhole)
+{
+    TaskSystem tasks(4);
+    renderer::SceneDesc scene = airtest::BuiltinScene("smoke");
+    for (renderer::Material& material : scene.materials)
+    {
+        material.emissionNits = 0.0f;
+    }
+    scene.sky.sunElevation = 25.0f;
+    scene.sky.sunAzimuth = -90.0f;
+    scene.camera.position = {0.0f, 1.6f, 2.2f};
+    scene.camera.yaw = 0.0f;
+    scene.camera.pitch = 0.03f;
+    scene.camera.verticalFov = 0.9f;
+    pt::ReferenceSettings settings = Settings(tasks, 512, 3);
+    settings.width = 16;
+    settings.height = 16;
+    const double whole = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+    scene.volumes[0].extinction *= 0.5f;
+    scene.volumes.push_back(scene.volumes[0]);
+    const double halves = MeanLuminance(pt::RenderReference(scene, scene.camera, settings));
+    EXPECT(whole > 0.0);
+    EXPECT(Near(halves, whole, 0.02, "two halves vs the whole"));
 }
 
 // In and behind a volume, lights are reached two ways: by next event estimation (their transmittance

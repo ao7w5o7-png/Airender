@@ -18,8 +18,9 @@
 //                                                     the aerial perspective tables (SkyLookup.hlsli)
 //   float         CloudBaseSample(CloudData c, float3 uvw), CloudDetailSample(...),
 //   float         CloudMajorantLoad(CloudData c, uint cell)   the clouds (CloudLookup.hlsli)
+//   VolumeData    LoadVolume(uint table, uint index)  the scene's volumes (IntegratorParams::volumeTable)
 //   float         VolumeDensitySample(VolumeData v, float3 uvw), VolumeMajorantLoad(VolumeData v, uint cell)
-//                                                     the scene's volume (VolumeLookup.hlsli)
+//                                                     a volume's voxels (VolumeLookup.hlsli)
 // and, compiled with AIR_PT_NRC (the neural radiance cache's kernels, NrcShared.h):
 //   float3        NrcPredict(NrcQuery q)              the radiance the cache predicts a vertex reflects
 //   NrcTrainingRecord NrcReadRecord(uint slot), void NrcWriteRecord(uint slot, NrcTrainingRecord r)
@@ -39,15 +40,18 @@
 // walk through them gathers the light they scatter (EscapeRadiance), and the sun's light reaching a
 // surface is dimmed by their transmittance. The clouds lie above all geometry, so the only other
 // segment that can meet them is a camera ray from above their base.
-// A volume among the surfaces (VolumeLookup.hlsli: smoke, a cloud from a file) is crossed by every
-// ray: delta tracking may stop a ray inside it, where the path scatters (Henyey-Greenstein) with next
-// event estimation of the lights and the sun weighed against phase sampling, like at a surface; NEE
-// from surfaces and from inside it multiplies the light by its transmittance (ratio tracking). Such
-// scattering events are path vertices too, but they do not count as bounces: a path takes up to
-// volumeEvents of them on top of its maxBounces surfaces (a walk through a bright medium needs
-// hundreds), and Russian roulette only ends a walk once its throughput is low, as in the clouds.
-// Compiled only with AIR_PT_VOLUME (PathTracerVolume.hlsl, the CPU reference); ReSTIR and the radiance
-// cache stay off while the scene has one (PathTracer.cpp).
+// Volumes among the surfaces (VolumeLookup.hlsli: smoke, clouds from files) are crossed by every
+// ray: delta tracking may stop a ray inside one, where the path scatters (Henyey-Greenstein) with
+// next event estimation of the lights and the sun weighed against phase sampling, like at a surface;
+// NEE from surfaces and from inside them multiplies the light by their transmittance (ratio
+// tracking). Volumes may overlap: each is tracked on its own, the nearest collision wins (the first
+// collision in a sum of media is the nearest of each medium's first collision, and the medium it is
+// in is the one that scattered), and transmittances multiply. Scattering events are path vertices
+// too, but they do not count as bounces: a path takes up to volumeEvents of them on top of its
+// maxBounces surfaces (a walk through a bright medium needs hundreds), and Russian roulette only ends
+// a walk once its throughput is low, as in the clouds. Compiled only with AIR_PT_VOLUME
+// (PathTracerVolume.hlsl, the CPU reference); ReSTIR and the radiance cache stay off while the scene
+// has volumes (PathTracer.cpp).
 // The air (aerial perspective, SkyLookup.hlsli) dims and adds to what a camera ray sees on its
 // surface (AddAerialPerspective, applied by the caller) and what any ray sees on the clouds; the sky
 // table includes it already. Segments between surfaces of the scene, metres to hundreds of metres
@@ -87,9 +91,10 @@
 
 struct IntegratorParams
 {
-    SkyData sky;       // the sky's radiance (a table or uniform) and the sun's disc
-    CloudData clouds;  // enabled == 0: none
-    VolumeData volume; // enabled == 0: none
+    SkyData sky;      // the sky's radiance (a table or uniform) and the sun's disc
+    CloudData clouds; // enabled == 0: none
+    uint volumeCount; // the scene's volumes, read with LoadVolume(volumeTable, i)
+    uint volumeTable; // bindless StructuredBuffer<VolumeData> on the GPU
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
@@ -557,11 +562,47 @@ NrcQuery NrcMakeQuery(Surface s, float3 wo)
 }
 #endif
 
-// The volume's transmittance along a shadow ray from a surface (1 in kernels without it).
+#if AIR_PT_VOLUME
+// The nearest real collision with any of the volumes along o + t d within [0, tMax], and the volume
+// it is in. Each volume is tracked only up to the nearest collision found so far.
+bool VolumesCollision(IntegratorParams params, float3 o, float3 d, float tMax, AIR_INOUT(uint) seed,
+                      AIR_OUT(float) tHit, AIR_OUT(VolumeData) hitVolume)
+{
+    tHit = tMax;
+    hitVolume = LoadVolume(params.volumeTable, 0u);
+    bool found = false;
+    for (uint i = 0u; i < params.volumeCount; ++i)
+    {
+        VolumeData v = LoadVolume(params.volumeTable, i);
+        float t;
+        if (VolumeCollision(v, o, d, tHit, seed, t))
+        {
+            tHit = t;
+            hitVolume = v;
+            found = true;
+        }
+    }
+    return found;
+}
+
+// The transmittance through every volume along o + t d over [0, tMax]: the product of each one's
+// estimate.
+float VolumesTransmittance(IntegratorParams params, float3 o, float3 d, float tMax, AIR_INOUT(uint) seed)
+{
+    float transmittance = 1.0f;
+    for (uint i = 0u; i < params.volumeCount && transmittance > 0.0f; ++i)
+    {
+        transmittance *= VolumeTransmittance(LoadVolume(params.volumeTable, i), o, d, tMax, seed);
+    }
+    return transmittance;
+}
+#endif
+
+// The volumes' transmittance along a shadow ray from a surface (1 in kernels without them).
 float ShadowTransmittance(IntegratorParams params, float3 origin, float3 direction, float tMax, AIR_INOUT(uint) seed)
 {
 #if AIR_PT_VOLUME
-    return VolumeTransmittance(params.volume, origin, direction, tMax, seed);
+    return VolumesTransmittance(params, origin, direction, tMax, seed);
 #else
     return 1.0f;
 #endif
@@ -656,7 +697,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     float3 previousPosition = origin;
     float3 previousNormal = float3(0.0f, 0.0f, 0.0f);
     bool previousTree = false;
-    uint events = 0u; // scattering events in the volume so far; `bounce` counts them as vertices
+    uint events = 0u; // scattering events in the volumes so far; `bounce` counts them as vertices
 
     for (uint bounce = 0u; bounce <= params.maxBounces + events; ++bounce)
     {
@@ -665,14 +706,15 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         bool beyondX2 = gi && bounce >= 2u; // light found here is the continuation candidate's
 
 #if AIR_PT_VOLUME
-        // The volume: a real collision before the surface (or before the ray leaves the scene)
-        // scatters the path there.
+        // The volumes: a real collision before the surface (or before the ray leaves the scene)
+        // scatters the path there, as the volume it is in does.
         float tVolume = 0.0f;
-        if (params.volume.enabled != 0u &&
-            VolumeCollision(params.volume, origin, direction, hit.hit ? hit.t : 1e30f, seed, tVolume))
+        VolumeData volume;
+        if (params.volumeCount > 0u &&
+            VolumesCollision(params, origin, direction, hit.hit ? hit.t : 1e30f, seed, tVolume, volume))
         {
             float3 p = origin + direction * tVolume;
-            float albedo = (params.flags & kFlagFurnace) != 0u ? 1.0f : params.volume.albedo;
+            float albedo = (params.flags & kFlagFurnace) != 0u ? 1.0f : volume.albedo;
             if (bounce == 0u)
             {
                 result.hit = true;
@@ -694,7 +736,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             bool lightTree = bounce < params.lightTreeBounces;
             if (useNee)
             {
-                // One point on one emissive triangle, through the volume and past the surfaces.
+                // One point on one emissive triangle, through the volumes and past the surfaces.
                 float uLight = Rand(seed);
                 float uAlias = Rand(seed);
                 float2 uPoint = Rand2(seed);
@@ -722,8 +764,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 float lightPdf = pmf > 0.0f ? LightPdf(pmf, light.area, dist, cosLight) : 0.0f;
                 if (lightPdf > 0.0f && TraceVisible(p, wi, dist * (1.0f - 1e-4f)))
                 {
-                    float phase = VolumePhase(params.volume, dot(direction, wi));
-                    float transmittance = VolumeTransmittance(params.volume, p, wi, dist, seed);
+                    float phase = VolumePhase(volume, dot(direction, wi));
+                    float transmittance = VolumesTransmittance(params, p, wi, dist, seed);
                     float3 contribution =
                         throughput * light.radiance * (phase * transmittance * PowerHeuristic(lightPdf, phase) / lightPdf);
                     result.radiance += contribution;
@@ -738,9 +780,9 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 float3 wi = SampleSunDirection(params.sky, Rand2(seed));
                 if (TraceVisible(p, wi, 1e30f))
                 {
-                    float phase = VolumePhase(params.volume, dot(direction, wi));
+                    float phase = VolumePhase(volume, dot(direction, wi));
                     // One estimate after the other: the operands of * are unsequenced in C++.
-                    float transmittance = VolumeTransmittance(params.volume, p, wi, 1e30f, seed);
+                    float transmittance = VolumesTransmittance(params, p, wi, 1e30f, seed);
                     transmittance *= CloudTransmittance(params.clouds, p, wi, 1e30f, seed);
                     float3 contribution = throughput * params.sky.sunRadiance *
                                           (phase * transmittance * PowerHeuristic(sunPdf, phase) / sunPdf);
@@ -752,8 +794,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 }
             }
             // Continue along a direction the phase function chose.
-            float3 next = SampleVolumePhase(params.volume, direction, Rand2(seed));
-            previousBsdfPdf = VolumePhase(params.volume, dot(direction, next));
+            float3 next = SampleVolumePhase(volume, direction, Rand2(seed));
+            previousBsdfPdf = VolumePhase(volume, dot(direction, next));
             previousPosition = p;
             previousNormal = float3(0.0f, 0.0f, 0.0f);
             previousTree = lightTree;

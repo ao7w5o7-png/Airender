@@ -117,7 +117,7 @@ bool EditorApp::LoadScene(const std::string& name)
     mSceneTop = renderer::HighestPoint(mScene->Desc());
     mSkyEdit.reset();
     mCloudsEdit.reset();
-    mVolumeEdit.reset();
+    mVolumesEdit.reset();
     AIR_LOG(Info, "Editor", "scene '{}': {} triangles, {} instances, {} materials", name, mScene->GetTriangleCount(),
             mScene->Desc().instances.size(), mScene->Desc().materials.size());
     return true;
@@ -963,15 +963,33 @@ void EditorApp::BuildScenePanel()
         mCloudsEdit = clouds;
     }
 
-    ImGui::SeparatorText("Volume");
-    renderer::Volume volume = mVolumeEdit.value_or(mScene->Desc().volume);
-    bool applyVolume = ImGui::Checkbox("Smoke or cloud volume", &volume.enabled);
-    ImGui::SetItemTooltip("A box of voxels among the surfaces that absorbs and scatters light, path traced "
-                          "through (docs/architecture.md, section 8.12):\na grid of an OpenVDB file, or a "
-                          "procedural plume of smoke.");
-    bool volumeEdited = applyVolume;
-    if (volume.enabled)
+    ImGui::SeparatorText("Volumes");
+    std::vector<renderer::Volume> volumes = mVolumesEdit.value_or(mScene->Desc().volumes);
+    bool applyVolume = false;
+    bool volumeEdited = false;
+    std::optional<size_t> removeVolume;
+    for (size_t i = 0; i < volumes.size(); ++i)
     {
+        renderer::Volume& volume = volumes[i];
+        ImGui::PushID(int(i));
+        const std::string name =
+            volume.file.empty() ? std::string("plume") : std::filesystem::path(volume.file).filename().string();
+        const bool open =
+            ImGui::TreeNodeEx("##volume", ImGuiTreeNodeFlags_DefaultOpen, "Volume %zu: %s", i, name.c_str());
+        if (!open)
+        {
+            ImGui::PopID();
+            continue;
+        }
+        applyVolume |= ImGui::Checkbox("Enabled##volume", &volume.enabled);
+        ImGui::SetItemTooltip("A box of voxels among the surfaces that absorbs and scatters light, path traced "
+                              "through (docs/architecture.md, section 8.12):\na grid of an OpenVDB file, or a "
+                              "procedural plume of smoke. Volumes may overlap.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove##volume"))
+        {
+            removeVolume = i;
+        }
         auto text = [&](const char* label, std::string& value)
         {
             char buffer[1024];
@@ -1022,19 +1040,36 @@ void EditorApp::BuildScenePanel()
             applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
             volume.seed = u32(std::max(seed, 0));
         }
-        if (!mVolumeEdit && !mScene->VolumeError().empty())
+        const std::string_view error = mScene->VolumeError(i);
+        if (!mVolumesEdit && !error.empty())
         {
-            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%s", mScene->VolumeError().c_str());
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%.*s", int(error.size()), error.data());
         }
+        ImGui::TreePop();
+        ImGui::PopID();
+    }
+    if (removeVolume)
+    {
+        volumes.erase(volumes.begin() + std::ptrdiff_t(*removeVolume));
+        applyVolume = true;
+    }
+    if (volumes.size() < gpu::kMaxVolumes && ImGui::Button("Add volume"))
+    {
+        // A plume of smoke 2 m tall, a few metres in front of the camera.
+        renderer::Volume added{.enabled = true, .size = 2.0f};
+        added.position = mCamera.position + mCamera.Forward() * 4.0f;
+        added.position.y -= 1.0f;
+        volumes.push_back(added);
+        applyVolume = true;
     }
     if (applyVolume)
     {
-        mScene->SetVolume(volume);
-        mVolumeEdit.reset();
+        mScene->SetVolumes(volumes);
+        mVolumesEdit.reset();
     }
     else if (volumeEdited)
     {
-        mVolumeEdit = volume;
+        mVolumesEdit = volumes;
     }
 
     ImGui::SeparatorText("Materials");

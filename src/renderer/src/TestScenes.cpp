@@ -632,12 +632,12 @@ SceneDesc MakeSmoke()
                 AddMesh(scene, MakeQuad("Embers", {-e, 0.565f, e}, {e, 0.565f, e}, {e, 0.565f, -e}, {-e, 0.565f, -e},
                                         {0.0f, 1.0f, 0.0f})),
                 embers);
-    scene.volume = {.enabled = true,
-                    .position = {0.0f, 0.58f, 0.0f},
-                    .extinction = 24.0f,
-                    .albedo = 0.85f,
-                    .anisotropy = 0.35f,
-                    .seed = 3};
+    scene.volumes = {{.enabled = true,
+                      .position = {0.0f, 0.58f, 0.0f},
+                      .extinction = 24.0f,
+                      .albedo = 0.85f,
+                      .anisotropy = 0.35f,
+                      .seed = 3}};
     AddSky(scene, 20.0f, 140.0f);
     LookAt(scene.camera, {0.5f, 1.6f, 6.0f}, {0.0f, 1.7f, 0.0f});
     scene.camera.verticalFov = 0.84f;

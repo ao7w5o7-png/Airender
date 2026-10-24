@@ -200,7 +200,8 @@ struct SceneTables
     std::span<const float> lut;
     renderer::SkyTable sky;
     renderer::CloudVolume clouds;
-    renderer::VolumeResources volume;
+    // The volumes that loaded; their VolumeData's density and majorants hold their index here.
+    std::vector<renderer::VolumeResources> volumes;
     const Bvh* bvh = nullptr;
 };
 
@@ -242,12 +243,13 @@ struct Kernel
         return renderer::SampleTexture3D(tables.clouds.detail.data(), n, n, n, uvw.x, uvw.y, uvw.z);
     }
     float CloudMajorantLoad(CloudData /*c*/, uint cell) const { return tables.clouds.majorants[cell]; }
+    VolumeData LoadVolume(uint /*table*/, uint index) const { return tables.volumes[index].data; }
     float VolumeDensitySample(VolumeData v, float3 uvw) const
     {
-        return renderer::SampleTexture3DClampedR16(tables.volume.density.data(), v.sizeX + 2, v.sizeY + 2, v.sizeZ + 2,
-                                                   uvw.x, uvw.y, uvw.z);
+        return renderer::SampleTexture3DClampedR16(tables.volumes[v.density].density.data(), v.sizeX + 2, v.sizeY + 2,
+                                                   v.sizeZ + 2, uvw.x, uvw.y, uvw.z);
     }
-    float VolumeMajorantLoad(VolumeData /*v*/, uint cell) const { return tables.volume.majorants[cell]; }
+    float VolumeMajorantLoad(VolumeData v, uint cell) const { return tables.volumes[v.majorants].majorants[cell]; }
     HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/) const
     {
         HitInfo hit{};
@@ -320,14 +322,24 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     tables.sky = renderer::BuildSkyTable(scene.sky, scene.environment);
     const renderer::SkyTable& sky = tables.sky;
     tables.clouds = renderer::BuildCloudVolume(scene.clouds);
-    tables.volume = renderer::BuildVolume(scene.volume);
+    for (const renderer::Volume& volume : scene.volumes)
+    {
+        renderer::VolumeResources built = renderer::BuildVolume(volume);
+        if (built.data.enabled != 0)
+        {
+            built.data.density = u32(tables.volumes.size());
+            built.data.majorants = u32(tables.volumes.size());
+            tables.volumes.push_back(std::move(built));
+        }
+    }
     const Bvh bvh(std::move(triangles));
     tables.bvh = &bvh;
 
     Kernel::IntegratorParams params;
     params.sky = sky.data;
     params.clouds = tables.clouds.data;
-    params.volume = tables.volume.data;
+    params.volumeCount = u32(tables.volumes.size());
+    params.volumeTable = 0;
     params.cloudEvents = settings.cloudEvents;
     params.volumeEvents = settings.volumeEvents;
     params.lightCount = lightPower > 0.0 ? u32(tables.lights.size()) : 0u;

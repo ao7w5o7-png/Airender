@@ -226,9 +226,9 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     // surface, for the lit and direct / indirect views.
     const u32 view = mSettings.debugView;
     const bool lightView = view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect;
-    // A volume in the scene: the kernel that tracks it, and paths do all the work (ReSTIR's first
+    // Volumes in the scene: the kernel that tracks them, and paths do all the work (ReSTIR's first
     // surface and the cache's queries do not know about media).
-    const bool volume = scene.volume.enabled != 0;
+    const bool volume = !scene.volumes.empty();
     if (volume && !mTracePipelineVolume.IsValid() && !mTraceVolumeDesc.library.bytecode.empty())
     {
         mTracePipelineVolume = mDevice.CreateRayTracingPipeline(mTraceVolumeDesc);
@@ -306,12 +306,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     }
     frame.cloudEvents = mSettings.cloudEvents;
     frame.volumeEvents = mSettings.volumeEvents;
-    frame.volume = scene.volume;
-    if (volume)
-    {
-        frame.volume.density = mDevice.GetBindlessSRV(scene.volumeDensity);
-        frame.volume.majorants = mDevice.GetBindlessSRV(scene.volumeMajorants);
-    }
+    frame.volumeCount = u32(scene.volumes.size());
+    frame.volumeTable = volume ? mDevice.GetBindlessSRV(scene.volumeTable) : 0u;
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;

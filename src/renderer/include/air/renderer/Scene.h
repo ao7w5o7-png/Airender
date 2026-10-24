@@ -17,6 +17,7 @@
 #include "air/renderer/shader/SceneShared.h"
 #include "air/rhi/RHIDevice.h"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -85,7 +86,7 @@ struct SceneDesc
     float3 environment = {0.0f, 0.0f, 0.0f}; // uniform environment radiance, nits (sky.physical: unused)
     Sky sky;                                 // physical sky and sun; replaces `environment`
     Clouds clouds;                           // above every instance
-    Volume volume;                           // smoke or a cloud among the instances
+    std::vector<Volume> volumes;             // smoke or clouds among the instances, up to gpu::kMaxVolumes
 };
 
 // Mesh builders. Quads are emitted so that cross(p1 - p0, p2 - p0) points along `normal`.
@@ -163,11 +164,12 @@ struct GpuScene
     rhi::TextureHandle cloudBase;
     rhi::TextureHandle cloudDetail;
     rhi::BufferHandle cloudMajorants;
-    // The volume (enabled == 0: none, and no resources), likewise: the density (R16_FLOAT Texture3D)
-    // and the majorants (StructuredBuffer<float>) as VolumeShared.h lays them out.
-    gpu::VolumeData volume{};
-    rhi::TextureHandle volumeDensity;
-    rhi::BufferHandle volumeMajorants;
+    // The volumes that are enabled and loaded, in the order of SceneDesc::volumes, with the bindless
+    // indices of their density (R16_FLOAT Texture3D) and majorants (StructuredBuffer<float>) filled
+    // in, as VolumeShared.h lays them out; `volumeTable` holds the same on the GPU
+    // (StructuredBuffer<gpu::VolumeData>; none without volumes).
+    std::vector<gpu::VolumeData> volumes;
+    rhi::BufferHandle volumeTable;
     u64 version = 0; // bumped whenever anything that changes the image changes
 };
 
@@ -188,10 +190,13 @@ public:
     void SetEnvironment(float3 radiance);
     void SetSky(const Sky& sky);          // rebuilds the sky table at the next Update() (about 0.1 s)
     void SetClouds(const Clouds& clouds); // rebakes them at the next Update() (about 0.2 s)
-    void SetVolume(const Volume& volume); // rebuilds it at the next Update() (reads its file again)
-    // Why the volume's file gave no volume at the last Update() (empty when it loaded, or without one).
-    const std::string& VolumeError() const { return mVolumeError; }
-    // Call once per frame before rendering: uploads pending edits into the next ring slot.
+    // Rebuilds the volumes that changed at the next Update(): one whose source (file, grid, resolution,
+    // seed) changed reads it again, one whose optics or placement changed reuses its voxels.
+    void SetVolumes(std::vector<Volume> volumes);
+    void SetVolume(u32 index, const Volume& volume);
+    // Why SceneDesc::volumes[index]'s file gave no volume at the last Update() (empty when it loaded,
+    // or is disabled).
+    std::string_view VolumeError(size_t index) const;
     void Update();
 
     u64 GetGeometryBytes() const { return mGeometryBytes; }
@@ -229,15 +234,25 @@ private:
     // get new ones.
     void DestroyClouds();
     void DestroyAerial();
-    void DestroyVolume();
+    void UpdateVolumes();
     Clouds mCloudsFor;
     bool mCloudsBuilt = false;
-    Volume mVolumeFor;
-    bool mVolumeBuilt = false;
-    std::string mVolumeError;
-    // The voxels mVolumeFor's file or plume gave, kept (up to 512 MiB) for edits of the optics or the
-    // placement, which then need no new read of the file.
-    std::optional<VolumeGrid> mVolumeGrid;
+    // One per SceneDesc::volumes entry, built from `desc`; they too never change once uploaded.
+    struct LoadedVolume
+    {
+        Volume desc;
+        gpu::VolumeData data{}; // enabled == 0: none (disabled, or its file could not be read)
+        rhi::TextureHandle density;
+        rhi::BufferHandle majorants;
+        std::string error;
+        // The voxels its file or plume gave, kept (up to 512 MiB over all volumes) for edits of the
+        // optics or the placement, which then need no new read of the file; shared by the volumes
+        // with the same source.
+        std::shared_ptr<const VolumeGrid> grid;
+    };
+    void DestroyVolume(LoadedVolume& volume);
+    std::vector<LoadedVolume> mVolumes;
+    bool mVolumesBuilt = false;
     u32 mRingSlot = 0;
     bool mDirty = true;
     u64 mGeometryBytes = 0;

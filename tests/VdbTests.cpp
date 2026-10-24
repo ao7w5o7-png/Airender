@@ -788,22 +788,27 @@ TEST(Vdb_SceneReadsTheFileOnlyWhenItsSourceChanges)
         VdbFile file;
         const std::filesystem::path path = WriteTemporary("scene", file.Write({{}}));
         renderer::Scene scene(*device, *renderer::MakeBuiltinScene("smoke"));
-        renderer::Volume volume = scene.Desc().volume;
+        renderer::Volume volume = scene.Desc().volumes[0];
         volume.file = path.string();
-        scene.SetVolume(volume);
+        scene.SetVolume(0, volume);
         scene.Update();
-        EXPECT(scene.Get().volume.enabled == 1u && scene.Get().volume.sizeX == 24u && scene.VolumeError().empty());
+        EXPECT(scene.Get().volumes.size() == 1 && scene.Get().volumes[0].sizeX == 24u && scene.VolumeError(0).empty());
         std::filesystem::remove(path);
         volume.extinction *= 2.0f;
         volume.position.y += 1.0f;
-        scene.SetVolume(volume);
+        scene.SetVolume(0, volume);
         scene.Update();
-        EXPECT(scene.Get().volume.enabled == 1u && scene.VolumeError().empty());
-        EXPECT(scene.Get().volume.extinction == volume.extinction);
+        EXPECT(scene.Get().volumes.size() == 1 && scene.VolumeError(0).empty());
+        EXPECT(scene.Get().volumes[0].extinction == volume.extinction);
+        // A second volume from the same file shares its voxels, which are not read again either.
+        scene.SetVolumes({volume, volume});
+        scene.Update();
+        EXPECT(scene.Get().volumes.size() == 2 && scene.VolumeError(1).empty());
         volume.maxResolution = 12; // read again: the file is gone
-        scene.SetVolume(volume);
+        scene.SetVolume(1, volume);
         scene.Update();
-        EXPECT(scene.Get().volume.enabled == 0u && scene.VolumeError().find("cannot open") != std::string::npos);
+        EXPECT(scene.Get().volumes.size() == 1 && scene.VolumeError(0).empty() &&
+               scene.VolumeError(1).find("cannot open") != std::string::npos);
     }
     device->WaitIdle();
     EXPECT(device->GetMemoryStats().liveBuffers == 0 && device->GetMemoryStats().liveTextures == 0);

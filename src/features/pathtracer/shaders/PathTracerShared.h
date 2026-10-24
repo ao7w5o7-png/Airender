@@ -87,10 +87,13 @@ struct FrameData
     uint lightTreeBounces; // NEE uses the light tree at path vertices below this, power beyond
     float exposure;        // radiance -> scene-linear, applied by Resolve
     uint cloudEvents;      // scattering events a walk through the clouds may take
-    uint volumeEvents;     // scattering events a path may take in the volume, besides its bounces
+    uint volumeEvents;     // scattering events a path may take in the volumes, besides its bounces
     uint pad2;
-    NrcData nrc;       // the neural radiance cache, with kFlagNrc
-    VolumeData volume; // the scene's volume and its resources; enabled == 0: none
+    NrcData nrc;      // the neural radiance cache, with kFlagNrc
+    uint volumeCount; // the scene's volumes (GpuScene::volumes)
+    uint volumeTable; // StructuredBuffer<VolumeData> (GpuScene::volumeTable)
+    uint pad3;
+    uint pad4;
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -126,7 +129,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 608);
+static_assert(sizeof(FrameData) == 560);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

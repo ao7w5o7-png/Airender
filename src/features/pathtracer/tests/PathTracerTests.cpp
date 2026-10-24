@@ -261,7 +261,7 @@ TEST(PathTracer_VolumeTurnsReSTIRAndTheCacheOff)
 {
     Headless h({"pathtracer", "tonemap"});
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
-    h.scene->SetVolume({.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f});
+    h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f}});
     for (int frame = 0; frame < 2; ++frame)
     {
         const auto result = h.Frame();
@@ -269,7 +269,7 @@ TEST(PathTracer_VolumeTurnsReSTIRAndTheCacheOff)
         EXPECT(CountLines(result.commands, "BeginEvent 'PathTracer.ReSTIR") == 0);
         EXPECT(CountLines(result.commands, "DispatchRays 64x32x1") == 1);
     }
-    EXPECT(h.scene->Get().volume.enabled == 1 && h.scene->Get().volumeDensity.IsValid());
+    EXPECT(h.scene->Get().volumes.size() == 1 && h.scene->Get().volumes[0].enabled == 1);
     EXPECT(h.runner->SetParameter("pathtracer.nrc", "1"));
     const auto cache = h.Frame();
     EXPECT(cache.validationErrors.empty());
@@ -277,7 +277,7 @@ TEST(PathTracer_VolumeTurnsReSTIRAndTheCacheOff)
     std::string status = h.runner->DescribeFeatures().Dump(0);
     EXPECT(status.find("\"restirDi\":false") != std::string::npos && status.find("\"nrc\":false") != std::string::npos);
 
-    h.scene->SetVolume({});
+    h.scene->SetVolumes({});
     const auto without = h.Frame();
     EXPECT(without.validationErrors.empty());
     EXPECT(CountLines(without.commands, "BeginEvent 'NRC.Train[") == 4);

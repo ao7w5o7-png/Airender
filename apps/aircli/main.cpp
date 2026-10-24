@@ -11,7 +11,7 @@
 //                   [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
 //                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
-//                   [--volume-at X,Y,Z[,SIZE]]   (smoke or a cloud of voxels among the surfaces)
+//                   [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels among the surfaces)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
@@ -76,7 +76,7 @@ int Usage()
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
                "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
-               "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]   (smoke or a cloud of voxels)\n"
+               "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
@@ -188,9 +188,10 @@ int CommandScenes()
 //   of view in degrees), --ev EV100 sets its exposure;
 //   --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] puts a volume (Volume.h) in it: a
 //   grid of an OpenVDB file (--volume-grid NAME, else "density" or its first float grid) or the
-//   procedural plume of smoke; none removes it. --volume-at X,Y,Z[,SIZE] places it: with SIZE its
-//   longest side is scaled to SIZE metres and its bottom centred on the point, else the point moves
-//   the file's own placement.
+//   procedural plume of smoke; none removes them all. The n-th --volume sets the scene's n-th volume
+//   (its other settings stay) or adds one. --volume-at X,Y,Z[,SIZE] places the last one given (before
+//   any --volume: the first): with SIZE its longest side is scaled to SIZE metres and its bottom
+//   centred on the point, else the point moves the file's own placement; --volume-grid likewise.
 struct SceneOptions
 {
     std::optional<std::pair<float, float>> sun;
@@ -199,9 +200,13 @@ struct SceneOptions
     bool cloudsExact = false;
     std::vector<std::string> camera;
     std::optional<float> ev100;
-    std::vector<std::string> volume;
-    std::optional<std::string> volumeGrid;
-    std::vector<std::string> volumeAt;
+    struct VolumeOption
+    {
+        std::vector<std::string> spec; // empty: options given before any --volume
+        std::optional<std::string> grid;
+        std::vector<std::string> at;
+    };
+    std::vector<VolumeOption> volumes;
 
     // True when `arg` was one of these options.
     bool Parse(std::string_view arg, Args& args)
@@ -241,17 +246,27 @@ struct SceneOptions
         }
         if (arg == "--volume")
         {
-            volume = Split(args.Next(), ',');
+            if (volumes.empty() || !volumes.back().spec.empty())
+            {
+                volumes.emplace_back();
+            }
+            volumes.back().spec = Split(args.Next(), ',');
             return true;
         }
-        if (arg == "--volume-grid")
+        if (arg == "--volume-grid" || arg == "--volume-at")
         {
-            volumeGrid = std::string(args.Next());
-            return true;
-        }
-        if (arg == "--volume-at")
-        {
-            volumeAt = Split(args.Next(), ',');
+            if (volumes.empty())
+            {
+                volumes.emplace_back();
+            }
+            if (arg == "--volume-grid")
+            {
+                volumes.back().grid = std::string(args.Next());
+            }
+            else
+            {
+                volumes.back().at = Split(args.Next(), ',');
+            }
             return true;
         }
         return false;
@@ -299,32 +314,53 @@ struct SceneOptions
         {
             scene.camera.ev100 = *ev100;
         }
-        if (!volume.empty())
+        size_t next = 0; // the scene volume the next --volume sets
+        for (const VolumeOption& option : volumes)
         {
-            scene.volume.enabled = volume[0] != "none";
-            scene.volume.file = volume[0] == "plume" || volume[0] == "none" ? std::string() : volume[0];
-            if (volume.size() >= 2)
+            if (!option.spec.empty() && option.spec[0] == "none")
             {
-                scene.volume.extinction = std::stof(volume[1]);
+                scene.volumes.clear();
+                next = 0;
+                continue;
             }
-            if (volume.size() >= 3)
+            if (next >= scene.volumes.size())
             {
-                scene.volume.albedo = std::stof(volume[2]);
+                if (option.spec.empty())
+                {
+                    continue; // placement for a volume the scene does not have
+                }
+                scene.volumes.emplace_back();
             }
-            if (volume.size() >= 4)
+            renderer::Volume& volume = scene.volumes[next++];
+            const std::vector<std::string>& spec = option.spec;
+            if (!spec.empty())
             {
-                scene.volume.anisotropy = std::stof(volume[3]);
+                volume.enabled = true;
+                volume.file = spec[0] == "plume" ? std::string() : spec[0];
+                if (spec.size() >= 2)
+                {
+                    volume.extinction = std::stof(spec[1]);
+                }
+                if (spec.size() >= 3)
+                {
+                    volume.albedo = std::stof(spec[2]);
+                }
+                if (spec.size() >= 4)
+                {
+                    volume.anisotropy = std::stof(spec[3]);
+                }
+            }
+            if (option.grid)
+            {
+                volume.grid = *option.grid;
+            }
+            if (option.at.size() >= 3)
+            {
+                volume.position = {std::stof(option.at[0]), std::stof(option.at[1]), std::stof(option.at[2])};
+                volume.size = option.at.size() >= 4 ? std::stof(option.at[3]) : 0.0f;
             }
         }
-        if (volumeGrid)
-        {
-            scene.volume.grid = *volumeGrid;
-        }
-        if (volumeAt.size() >= 3)
-        {
-            scene.volume.position = {std::stof(volumeAt[0]), std::stof(volumeAt[1]), std::stof(volumeAt[2])};
-            scene.volume.size = volumeAt.size() >= 4 ? std::stof(volumeAt[3]) : 0.0f;
-        }
+        scene.volumes.resize(std::min<size_t>(scene.volumes.size(), gpu::kMaxVolumes));
     }
 };
 

@@ -49,7 +49,8 @@ IntegratorParams MakeParams(FrameData f)
     IntegratorParams params;
     params.sky = f.sky;
     params.clouds = f.clouds;
-    params.volume = f.volume;
+    params.volumeCount = f.volumeCount;
+    params.volumeTable = f.volumeTable;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;

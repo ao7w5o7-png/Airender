@@ -244,7 +244,14 @@ Scene::~Scene()
         mDevice.DestroyBuffer(buffer);
     }
     DestroyClouds();
-    DestroyVolume();
+    for (LoadedVolume& volume : mVolumes)
+    {
+        DestroyVolume(volume);
+    }
+    if (mGpu.volumeTable.IsValid())
+    {
+        mDevice.DestroyBuffer(mGpu.volumeTable);
+    }
     DestroyAerial();
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
@@ -379,13 +386,30 @@ void Scene::SetClouds(const Clouds& clouds)
     }
 }
 
-void Scene::SetVolume(const Volume& volume)
+void Scene::SetVolumes(std::vector<Volume> volumes)
 {
-    if (!(mDesc.volume == volume))
+    AIR_CHECK(volumes.size() <= gpu::kMaxVolumes, "SetVolumes: {} volumes, at most {}", volumes.size(),
+              gpu::kMaxVolumes);
+    if (!(mDesc.volumes == volumes))
     {
-        mDesc.volume = volume;
+        mDesc.volumes = std::move(volumes);
         mDirty = true;
     }
+}
+
+void Scene::SetVolume(u32 index, const Volume& volume)
+{
+    AIR_CHECK(index < mDesc.volumes.size(), "SetVolume: index {} out of range", index);
+    if (!(mDesc.volumes[index] == volume))
+    {
+        mDesc.volumes[index] = volume;
+        mDirty = true;
+    }
+}
+
+std::string_view Scene::VolumeError(size_t index) const
+{
+    return index < mVolumes.size() ? std::string_view(mVolumes[index].error) : std::string_view();
 }
 
 void Scene::SetEnvironment(float3 radiance)
@@ -529,62 +553,147 @@ void Scene::WriteDynamicData()
         mCloudsBuilt = true;
     }
 
-    // The volume likewise. Its voxels are read again only when where they come from changed.
-    if (!mVolumeBuilt || !(mVolumeFor == mDesc.volume))
+    // The volumes likewise, each on its own.
+    const bool volumesChanged =
+        !mVolumesBuilt || mVolumes.size() != mDesc.volumes.size() ||
+        !std::equal(mVolumes.begin(), mVolumes.end(), mDesc.volumes.begin(),
+                    [](const LoadedVolume& loaded, const Volume& desc) { return loaded.desc == desc; });
+    if (volumesChanged)
     {
-        DestroyVolume();
-        const Volume& desc = mDesc.volume;
-        const bool sameSource = mVolumeFor.enabled && desc.file == mVolumeFor.file && desc.grid == mVolumeFor.grid &&
-                                desc.maxResolution == mVolumeFor.maxResolution && desc.seed == mVolumeFor.seed;
-        if (!desc.enabled || !sameSource)
+        UpdateVolumes();
+    }
+}
+
+void Scene::UpdateVolumes()
+{
+    AIR_PROFILE_SCOPE("Scene.UpdateVolumes");
+    // A volume that did not change keeps its resources; one that did is built again, from the voxels
+    // of an earlier volume with the same source if there is one, else from its file or plume.
+    std::vector<LoadedVolume> previous = std::move(mVolumes);
+    mVolumes.clear();
+    mVolumes.resize(mDesc.volumes.size());
+    std::vector<bool> reused(mDesc.volumes.size(), false);
+    std::vector<bool> taken(previous.size(), false);
+    for (size_t i = 0; i < mDesc.volumes.size(); ++i)
+    {
+        for (size_t j = 0; j < previous.size(); ++j)
         {
-            mVolumeGrid.reset();
-        }
-        VolumeResources volume;
-        mVolumeError.clear();
-        if (desc.enabled)
-        {
-            std::optional<VolumeGrid> grid;
-            grid.swap(mVolumeGrid); // empties the cache: refilled below if the grid is small enough
-            if (!grid)
+            if (!taken[j] && previous[j].desc == mDesc.volumes[i])
             {
-                grid = LoadVolumeGrid(desc, &mVolumeError);
-                if (!grid)
-                {
-                    AIR_LOG(Error, "Volume", "{}", mVolumeError);
-                }
-            }
-            if (grid)
-            {
-                volume = BuildVolume(desc, *grid);
-                if (grid->density.size() * sizeof(float) <= (size_t(512) << 20))
-                {
-                    mVolumeGrid = std::move(grid);
-                }
+                mVolumes[i] = std::move(previous[j]);
+                previous[j] = {}; // its handles now belong to mVolumes[i]
+                taken[j] = true;
+                reused[i] = true;
+                break;
             }
         }
-        mGpu.volume = volume.data;
+    }
+    auto sameSource = [](const Volume& a, const Volume& b)
+    { return a.file == b.file && a.grid == b.grid && a.maxResolution == b.maxResolution && a.seed == b.seed; };
+    // The voxels of a volume with this source, kept or being built.
+    auto findGrid = [&](const Volume& desc) -> std::shared_ptr<const VolumeGrid>
+    {
+        for (const std::vector<LoadedVolume>* list : {&mVolumes, &previous})
+        {
+            for (const LoadedVolume& volume : *list)
+            {
+                if (volume.grid && sameSource(volume.desc, desc))
+                {
+                    return volume.grid;
+                }
+            }
+        }
+        return nullptr;
+    };
+    auto keptBytes = [&]
+    {
+        std::vector<const VolumeGrid*> distinct;
+        size_t bytes = 0;
+        for (const LoadedVolume& volume : mVolumes)
+        {
+            if (volume.grid && std::find(distinct.begin(), distinct.end(), volume.grid.get()) == distinct.end())
+            {
+                distinct.push_back(volume.grid.get());
+                bytes += volume.grid->density.size() * sizeof(float);
+            }
+        }
+        return bytes;
+    };
+    for (size_t i = 0; i < mDesc.volumes.size(); ++i)
+    {
+        if (reused[i])
+        {
+            continue;
+        }
+        const Volume& desc = mDesc.volumes[i];
+        LoadedVolume& out = mVolumes[i];
+        out.desc = desc;
+        if (!desc.enabled)
+        {
+            continue;
+        }
+        std::shared_ptr<const VolumeGrid> grid = findGrid(desc);
+        if (!grid)
+        {
+            std::optional<VolumeGrid> loaded = LoadVolumeGrid(desc, &out.error);
+            if (!loaded)
+            {
+                AIR_LOG(Error, "Volume", "{}", out.error);
+                continue;
+            }
+            grid = std::make_shared<const VolumeGrid>(std::move(*loaded));
+        }
+        const VolumeResources built = BuildVolume(desc, *grid);
+        const gpu::VolumeData& v = built.data;
+        out.density = CreateTextureWithData(mDevice,
+                                            {.dimension = rhi::TextureDimension::Tex3D,
+                                             .format = rhi::Format::R16_FLOAT,
+                                             .width = v.sizeX + 2,
+                                             .height = v.sizeY + 2,
+                                             .depthOrArraySize = v.sizeZ + 2,
+                                             .debugName = std::format("{}.Volume{}.Density", mDesc.name, i)},
+                                            built.density.data());
+        out.majorants = CreateBufferWithData(mDevice,
+                                             {.stride = sizeof(float),
+                                              .usage = BufferUsage::ShaderResource,
+                                              .debugName = std::format("{}.Volume{}.Majorants", mDesc.name, i)},
+                                             built.majorants.data(), built.majorants.size() * sizeof(float));
+        out.data = v;
+        out.data.density = mDevice.GetBindlessSRV(out.density);
+        out.data.majorants = mDevice.GetBindlessSRV(out.majorants);
+        if (findGrid(desc) == grid || keptBytes() + grid->density.size() * sizeof(float) <= (size_t(512) << 20))
+        {
+            out.grid = std::move(grid);
+        }
+    }
+    for (LoadedVolume& old : previous)
+    {
+        DestroyVolume(old);
+    }
+
+    // The table the GPU reads: the volumes that loaded.
+    mGpu.volumes.clear();
+    for (const LoadedVolume& volume : mVolumes)
+    {
         if (volume.data.enabled != 0)
         {
-            const gpu::VolumeData& v = volume.data;
-            mGpu.volumeDensity = CreateTextureWithData(mDevice,
-                                                       {.dimension = rhi::TextureDimension::Tex3D,
-                                                        .format = rhi::Format::R16_FLOAT,
-                                                        .width = v.sizeX + 2,
-                                                        .height = v.sizeY + 2,
-                                                        .depthOrArraySize = v.sizeZ + 2,
-                                                        .debugName = std::format("{}.VolumeDensity", mDesc.name)},
-                                                       volume.density.data());
-            mGpu.volumeMajorants =
-                CreateBufferWithData(mDevice,
-                                     {.stride = sizeof(float),
-                                      .usage = BufferUsage::ShaderResource,
-                                      .debugName = std::format("{}.VolumeMajorants", mDesc.name)},
-                                     volume.majorants.data(), volume.majorants.size() * sizeof(float));
+            mGpu.volumes.push_back(volume.data);
         }
-        mVolumeFor = mDesc.volume;
-        mVolumeBuilt = true;
     }
+    if (mGpu.volumeTable.IsValid())
+    {
+        mDevice.DestroyBuffer(mGpu.volumeTable);
+        mGpu.volumeTable = {};
+    }
+    if (!mGpu.volumes.empty())
+    {
+        mGpu.volumeTable = CreateBufferWithData(mDevice,
+                                                {.stride = sizeof(gpu::VolumeData),
+                                                 .usage = BufferUsage::ShaderResource,
+                                                 .debugName = std::format("{}.Volumes", mDesc.name)},
+                                                mGpu.volumes.data(), mGpu.volumes.size() * sizeof(gpu::VolumeData));
+    }
+    mVolumesBuilt = true;
 }
 
 void Scene::DestroyAerial()
@@ -598,15 +707,18 @@ void Scene::DestroyAerial()
     mGpu.aerialTransmittance = {};
 }
 
-void Scene::DestroyVolume()
+void Scene::DestroyVolume(LoadedVolume& volume)
 {
-    if (mGpu.volumeDensity.IsValid())
+    if (volume.density.IsValid())
     {
-        mDevice.DestroyTexture(mGpu.volumeDensity);
-        mDevice.DestroyBuffer(mGpu.volumeMajorants);
+        mDevice.DestroyTexture(volume.density);
     }
-    mGpu.volumeDensity = {};
-    mGpu.volumeMajorants = {};
+    if (volume.majorants.IsValid())
+    {
+        mDevice.DestroyBuffer(volume.majorants);
+    }
+    volume.density = {};
+    volume.majorants = {};
 }
 
 void Scene::DestroyClouds()

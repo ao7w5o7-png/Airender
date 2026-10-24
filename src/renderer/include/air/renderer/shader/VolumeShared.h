@@ -1,7 +1,7 @@
 // A volume inside the scene (smoke, a cloud from a file), shared by C++ and HLSL (see HlslCompat.h):
 // a box of voxels holding a density, scattering and absorbing light. renderer::BuildVolume makes it
-// from an OpenVDB grid or a procedural plume; VolumeLookup.hlsli tracks rays through it.
-// docs/architecture.md §8.12.
+// from an OpenVDB grid or a procedural plume; VolumeLookup.hlsli tracks rays through it. A scene has
+// up to kMaxVolumes of them, which may overlap (their densities add up). docs/architecture.md §8.12.
 //
 // Layout: the density texture holds sizeX x sizeY x sizeZ voxels plus a zero voxel on every side, so
 // that sampling with clamping reads zero outside the box; texel (i + 1, j + 1, k + 1) is the voxel
@@ -18,7 +18,8 @@ namespace air::gpu
 using namespace air::hlsl;
 #endif
 
-AIR_CONST uint kVolumeCell = 8; // voxels per majorant cell and axis
+AIR_CONST uint kVolumeCell = 8;  // voxels per majorant cell and axis
+AIR_CONST uint kMaxVolumes = 16; // in a scene
 
 struct VolumeData
 {
@@ -34,8 +35,11 @@ struct VolumeData
     uint cellsX;      // majorant cells
     uint cellsY;
     uint cellsZ;
-    uint density;   // bindless Texture3D<float> (GPU only)
-    uint majorants; // bindless StructuredBuffer<float>: extinction per metre bounding each cell (GPU only)
+    // Bindless indices on the GPU (renderer::Scene fills them in): Texture3D<float> and
+    // StructuredBuffer<float> of extinctions per metre bounding each cell. The CPU renderers put the
+    // volume's index in their tables here.
+    uint density;
+    uint majorants;
 };
 
 #ifdef __cplusplus
