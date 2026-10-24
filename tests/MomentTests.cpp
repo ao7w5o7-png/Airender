@@ -25,6 +25,7 @@ struct MomentReader
 {
     float MomentMapB0Sample(MomentShadowMap /*m*/, float2 /*uv*/) const { return 0.0f; }
     float4 MomentMapBSample(MomentShadowMap /*m*/, float2 /*uv*/) const { return float4(0.0f); }
+    float MomentMapOccluderLoad(MomentShadowMap /*m*/, uint /*x*/, uint /*y*/) const { return kMomentNoOccluder; }
 
 // NOLINTBEGIN(readability-identifier-naming)
 #include "air/renderer/shader/MomentShadow.hlsli"

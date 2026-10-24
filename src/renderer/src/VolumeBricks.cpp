@@ -229,7 +229,11 @@ VolumeBricks BuildVolumeBricks(const Volume& volume, const VolumeGrid& grid, flo
 
     // The volume's own mean transmittance over all directions, from the centre of every texel of
     // kVolumeAoCell level 0 voxels: the coarsest level marched voxel by voxel along 32 directions
-    // spread over the sphere (a Fibonacci lattice).
+    // spread over the sphere (a Fibonacci lattice). It tells how much more or less light arrives at a
+    // point than at the probes around it (VolumeMarch.hlsli), light that scatters on its way in too:
+    // so its extinction is diffusion's effective one, sqrt(3 sigma_a sigma_t') = sigma_t sqrt(3 (1 -
+    // albedo) (1 - g albedo)), at most sigma_t: nothing for a medium that does not absorb, where
+    // scattering brings back all the light it takes away.
     const gpu::VolumeBrickLevel& fine = out.levels[0].data;
     d.aoCell = float(gpu::kVolumeAoCell) * voxelSize;
     d.aoCorner = fine.corner;
@@ -250,6 +254,9 @@ VolumeBricks BuildVolumeBricks(const Volume& volume, const VolumeGrid& grid, flo
         directions[i] = float3(r * std::cos(phi), r * std::sin(phi), z);
     }
     const float3 extent = float3(float(marchLevel.voxelsX), float(marchLevel.voxelsY), float(marchLevel.voxelsZ));
+    const double albedo = d.albedo;
+    const double effective =
+        volume.extinction * std::min(1.0, std::sqrt(3.0 * (1.0 - albedo) * (1.0 - double(d.anisotropy) * albedo)));
     detail::ParallelFor(
         int(d.aoZ),
         [&](int z)
@@ -276,7 +283,7 @@ VolumeBricks BuildVolumeBricks(const Volume& volume, const VolumeGrid& grid, flo
                             }
                             depth += PaddedTrilinear(march, p.x, p.y, p.z);
                         }
-                        sum += std::exp(-double(depth) * volume.extinction * marchLevel.voxelSize);
+                        sum += std::exp(-double(depth) * effective * marchLevel.voxelSize);
                     }
                     const double mean = sum / double(kDirections);
                     out.ao[(size_t(z) * d.aoY + y) * d.aoX + x] = u8(std::lround(std::clamp(mean, 0.0, 1.0) * 255.0));

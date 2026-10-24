@@ -82,11 +82,37 @@ public:
         mParameters.Add("nrcLinearAlgebra", &mSettings.nrc.linearAlgebra,
                         "Radiance cache on the GPU's matrix units (Shader Model 6.10 linear algebra) where available; "
                         "off: float32 kernels");
+        VolumeMarchSettings& march = mSettings.volumeMarch;
+        mParameters.Add("volumeMarch", &march.mode,
+                        "Real-time volumes: ray march the volumes over the surfaces, lit through moment shadow maps, "
+                        "instead of tracking them along every path (0 off, 1 when not accumulating, 2 always)",
+                        0, kVolumeMarchAlways);
+        mParameters.Add("volumeStep", &march.step, "Real-time volumes: the march's step, in voxels", 0.05f, 16.0f);
+        mParameters.Add("volumeLevel", &march.level,
+                        "Real-time volumes: the level of detail the march reads (0 the voxels, 1 and 2 averaged over "
+                        "2^3 and 4^3)",
+                        0, 2);
+        mParameters.Add("volumeShadowSize", &march.shadowSize,
+                        "Real-time volumes: texels per side of every moment shadow map", 16, 2048);
+        mParameters.Add("volumeShadowLevel", &march.shadowLevel,
+                        "Real-time volumes: the level of detail the shadow maps' marches read", 0, 2);
+        mParameters.Add("volumeShadowStep", &march.shadowStep,
+                        "Real-time volumes: the shadow maps' step, in voxels of their level", 0.05f, 16.0f);
+        mParameters.Add("volumeLights", &march.lights,
+                        "Real-time volumes: light groups (emissive instances) that light the volumes besides the sun, "
+                        "those that matter most to them",
+                        0, kMaxVolumeLights);
+        mParameters.Add("volumeAir", &march.air,
+                        "Real-time volumes: the aerial perspective dims them at the depth their light comes from");
+        mParameters.Add(
+            "volumeShadowsEveryFrame", &march.everyFrame,
+            "Real-time volumes: render the shadow maps every frame (to time them), not only when they change");
         mParameters.Add("furnace", &mSettings.furnace,
                         "White furnace: white materials, lights off; energy conservation shows as a flat grey image");
         mParameters.Add("debugView", &mSettings.debugView,
                         "0 lit, 1 normals, 2 base color, 3 roughness, 4 metallic, 5 depth, 6 intersection heatmap, "
-                        "7 bounce heatmap, 8 direct light, 9 indirect light, 10 radiance cache at the first hit",
+                        "7 bounce heatmap, 8 direct light, 9 indirect light, 10 radiance cache at the first hit, "
+                        "11 volume march steps, 12 its lighting rate, 13 volumes per ray",
                         0, gpu::kDebugViewCount - 1);
         mParameters.Add(
             "ser", &mSettings.shaderExecutionReordering,
@@ -137,6 +163,8 @@ public:
         status["nrc"] = mTracer && mTracer->UsesRadianceCache();
         status["nrcLinearAlgebra"] = mTracer && mTracer->RadianceCacheUsesLinearAlgebra();
         status["nrcSteps"] = mTracer ? mTracer->GetRadianceCacheSteps() : 0u;
+        status["volumeMarch"] = mTracer && mTracer->UsesVolumeMarch();
+        status["volumeMarchLights"] = mTracer ? mTracer->GetVolumeMarchLights() : 0u;
         return status;
     }
 

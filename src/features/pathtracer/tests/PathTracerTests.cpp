@@ -106,12 +106,12 @@ TEST(PathTracer_WritesGuidesForDenoisers)
 TEST(PathTracer_DebugViewsAndFurnaceRun)
 {
     Headless h({"pathtracer", "tonemap"});
-    for (int view = 0; view < 11; ++view)
+    for (int view = 0; view < 14; ++view)
     {
         EXPECT(h.runner->SetParameter("pathtracer.debugView", std::to_string(view)));
         EXPECT(h.Frame().validationErrors.empty());
     }
-    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "11"));
+    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "14"));
     EXPECT(h.runner->SetParameter("pathtracer.furnace", "true"));
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "false"));
     EXPECT(h.Frame().validationErrors.empty());
@@ -282,4 +282,47 @@ TEST(PathTracer_VolumeTurnsReSTIRAndTheCacheOff)
     EXPECT(without.validationErrors.empty());
     EXPECT(CountLines(without.commands, "BeginEvent 'NRC.Train[") == 4);
     EXPECT(CountLines(without.commands, "BeginEvent 'PathTracer.ReSTIRDI.") == 3);
+}
+
+// Real-time volumes (pathtracer.volumeMarch, docs/architecture.md §8.13): not accumulating, the volume
+// is ray marched over the trace's samples. The trace runs the kernel that lights the surfaces through
+// the moment shadow maps, the maps render on the compute queue when the scene changes (not every
+// frame), the probes run there beside the trace every frame (they wait for nothing on the graphics
+// queue but the frame's start), and the march adds to the accumulation. Its debug views run.
+// Accumulating, the volume is tracked again.
+TEST(PathTracer_RealTimeVolumesAreMarched)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f}});
+    const auto first = h.Frame();
+    EXPECT(first.validationErrors.empty());
+    EXPECT(CountLines(first.commands, "SetPipeline pipeline 'PathTracer.TraceVolumeShadows'") == 1);
+    EXPECT(CountLines(first.commands, "[Compute] BeginEvent 'VolumeMarch.Shadows'") == 1);
+    EXPECT(CountLines(first.commands, "[Compute] BeginEvent 'VolumeMarch.Probes'") == 1);
+    EXPECT(CountLines(first.commands, "BeginEvent 'VolumeMarch.March'") == 1);
+    const auto second = h.Frame();
+    EXPECT(second.validationErrors.empty());
+    EXPECT(CountLines(second.commands, "BeginEvent 'VolumeMarch.Shadows'") == 0);
+    EXPECT(CountLines(second.commands, "[Compute] BeginEvent 'VolumeMarch.Probes'") == 1);
+    EXPECT(second.graphText.find("Compute: [1], waits for (0)\n") != std::string::npos);
+    const std::string status = h.runner->DescribeFeatures().Dump(0);
+    EXPECT(status.find("\"volumeMarch\":true") != std::string::npos);
+    EXPECT(status.find("\"volumeMarchLights\":1") != std::string::npos); // the ceiling panel
+    for (const char* view : {"11", "12", "13", "8", "9", "1"})
+    {
+        EXPECT(h.runner->SetParameter("pathtracer.debugView", view));
+        EXPECT(h.Frame().validationErrors.empty());
+    }
+    EXPECT(h.runner->SetParameter("pathtracer.debugView", "0"));
+    // Another volume: the maps render again.
+    h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f},
+                         {.enabled = true, .position = {0.3f, 0.2f, 0.0f}, .size = 0.8f, .seed = 4}});
+    EXPECT(CountLines(h.Frame().commands, "BeginEvent 'VolumeMarch.Shadows'") == 1);
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "1"));
+    const auto tracked = h.Frame();
+    EXPECT(tracked.validationErrors.empty());
+    EXPECT(CountLines(tracked.commands, "BeginEvent 'VolumeMarch.") == 0);
+    EXPECT(h.runner->SetParameter("pathtracer.volumeMarch", "2"));
+    EXPECT(CountLines(h.Frame().commands, "BeginEvent 'VolumeMarch.March'") == 1);
 }

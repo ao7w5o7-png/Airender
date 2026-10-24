@@ -10,6 +10,7 @@
 #include "RadianceCache.h"
 #include "ReSTIR.h"
 #include "ReSTIRShared.h"
+#include "VolumeMarcher.h"
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +30,8 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
            a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
-           a.nrc == b.nrc && a.furnace == b.furnace && a.debugView == b.debugView && a.debugScale == b.debugScale;
+           a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && a.furnace == b.furnace && a.debugView == b.debugView &&
+           a.debugScale == b.debugScale;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -86,8 +88,8 @@ PathTracer::~PathTracer()
     }
     mTraceNrc.Destroy(mDevice);
     mTraceNrcPortable.Destroy(mDevice);
-    for (rhi::PipelineHandle pipeline :
-         {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mTracePipelineVolume, mResolvePipeline})
+    for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mTracePipelineVolume,
+                                         mTracePipelineVolumeShadows, mResolvePipeline})
     {
         if (pipeline.IsValid())
         {
@@ -134,6 +136,10 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     mTraceVolumeDesc = trace;
     mTraceVolumeDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerVolume.lib", "");
     mTraceVolumeDesc.debugName = "PathTracer.TraceVolume";
+    // The kernel under real-time volumes (AIR_PT_VOLUME_SHADOWS), likewise.
+    mTraceVolumeShadowsDesc = trace;
+    mTraceVolumeShadowsDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerVolumeShadows.lib", "");
+    mTraceVolumeShadowsDesc.debugName = "PathTracer.TraceVolumeShadows";
     // The kernels whose paths end in the neural radiance cache, compute shaders with inline ray
     // queries: on the matrix units (Shader Model 6.10, built with the preview compiler) and in float32.
     if (mDevice.GetCapabilities().linearAlgebra)
@@ -168,6 +174,8 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     mReSTIR->Initialize(shaderDir);
     mRadianceCache = std::make_unique<RadianceCache>(mDevice);
     mRadianceCache->Initialize(shaderDir);
+    mVolumeMarcher = std::make_unique<VolumeMarcher>(mDevice);
+    mVolumeMarcher->Initialize(shaderDir);
 
     mFrameRingSize = mDevice.GetFramesInFlight() + 1;
     mFrameRing = mDevice.CreateBuffer({.size = mFrameRingSize * sizeof(gpu::FrameData),
@@ -188,6 +196,11 @@ bool PathTracer::RadianceCacheUsesLinearAlgebra() const
 u32 PathTracer::GetRadianceCacheSteps() const
 {
     return mRadianceCache ? mRadianceCache->GetStep() : 0;
+}
+
+u32 PathTracer::GetVolumeMarchLights() const
+{
+    return mVolumeMarcher ? mVolumeMarcher->GetLightCount() : 0u;
 }
 
 void PathTracer::ResetAccumulation()
@@ -226,15 +239,23 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     // surface, for the lit and direct / indirect views.
     const u32 view = mSettings.debugView;
     const bool lightView = view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect;
-    // Volumes in the scene: the kernel that tracks them, and paths do all the work (ReSTIR's first
-    // surface and the cache's queries do not know about media).
+    // Volumes in the scene: ray marched over the surfaces (real-time volumes), or tracked by a kernel of
+    // their own. Either way paths do all the work (ReSTIR's first surface and the cache's queries do not
+    // know about media).
     const bool volume = !scene.volumes.empty();
-    if (volume && !mTracePipelineVolume.IsValid() && !mTraceVolumeDesc.library.bytecode.empty())
+    auto on = [&](u32 mode) { return mode == kReSTIRAlways || (mode == kReSTIRRealTime && !mSettings.accumulate); };
+    const bool marchWanted = volume && on(mSettings.volumeMarch.mode) && mVolumeMarcher->IsAvailable();
+    if (marchWanted && !mTracePipelineVolumeShadows.IsValid())
+    {
+        mTracePipelineVolumeShadows = mDevice.CreateRayTracingPipeline(mTraceVolumeShadowsDesc);
+        AIR_CHECK(mTracePipelineVolumeShadows.IsValid(), "PathTracer: the real-time volumes' kernel did not compile");
+    }
+    const bool march = marchWanted && mTracePipelineVolumeShadows.IsValid();
+    if (volume && !march && !mTracePipelineVolume.IsValid() && !mTraceVolumeDesc.library.bytecode.empty())
     {
         mTracePipelineVolume = mDevice.CreateRayTracingPipeline(mTraceVolumeDesc);
         AIR_CHECK(mTracePipelineVolume.IsValid(), "PathTracer: the volume kernel did not compile");
     }
-    auto on = [&](u32 mode) { return mode == kReSTIRAlways || (mode == kReSTIRRealTime && !mSettings.accumulate); };
     const bool diWanted = on(mSettings.restir.di) && mSettings.nextEventEstimation && !mSettings.furnace &&
                           scene.lightCount > 0 && lightView && !volume && mReSTIR->IsDiAvailable();
     // The neural radiance cache: its own kernel variant, which leaves the indirect light to the cache
@@ -266,6 +287,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         mUsedReSTIRDI = restirDi;
         mUsedReSTIRGI = restirGi;
         mUsedNrc = nrc;
+        mUsedVolumeMarch = march;
     }
 
     const float aspect = float(mSettings.width) / float(mSettings.height);
@@ -313,13 +335,20 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;
         frame.jitter = {Halton(phase, 2) - 0.5f, Halton(phase, 3) - 0.5f};
     }
+    else if (march)
+    {
+        // The march follows the trace's camera rays: all of a frame's samples take the frame's jitter,
+        // which runs through the Halton sequence as samples accumulate.
+        frame.jitter = {Halton(mAccumulatedSamples + 1, 2) - 0.5f, Halton(mAccumulatedSamples + 1, 3) - 0.5f};
+    }
     blackboard.SetValue(slots::kJitterX, frame.jitter.x);
     blackboard.SetValue(slots::kJitterY, frame.jitter.y);
     frame.frameIndex = mFrameIndex++;
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
                   (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restirDi ? gpu::kFlagReSTIR : 0u) |
-                  (restirGi ? gpu::kFlagReSTIRGI : 0u) | (nrc ? gpu::kFlagNrc : 0u);
+                  (restirGi ? gpu::kFlagReSTIRGI : 0u) | (nrc ? gpu::kFlagNrc : 0u) |
+                  (march ? gpu::kFlagVolumeMarch | gpu::kFlagGlobalJitter : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -332,6 +361,10 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     {
         mRadianceCache->BeginFrame(graph, scene, mSettings.nrc, nrcLinearAlgebra, mSettings.width, mSettings.height,
                                    exposure, frame.frameIndex, frame.nrc);
+    }
+    if (march && spp > 0)
+    {
+        mVolumeMarcher->BeginFrame(graph, scene, mSettings.volumeMarch, frame.volumeShadows);
     }
 
     const u32 slot = frame.frameIndex % mFrameRingSize;
@@ -401,15 +434,32 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const rhi::PipelineHandle pipeline =
             nrc        ? nrcPipeline
             : restirGi ? mTracePipelineGi
+            : march    ? mTracePipelineVolumeShadows
             : volume && mTracePipelineVolume.IsValid()
                 ? mTracePipelineVolume
                 : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
         RadianceCache* cache = nrc ? mRadianceCache.get() : nullptr;
+        // Under real-time volumes the trace writes the frame's samples here, and the march accumulates.
+        rdg::TextureRef target = accumulation;
+        if (march)
+        {
+            target =
+                graph.CreateTexture({.format = rhi::Format::RGBA32_FLOAT,
+                                     .width = width,
+                                     .height = height,
+                                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                                     .debugName = "PathTracer.FrameSamples"});
+        }
+        VolumeMarcher* marcher = march ? mVolumeMarcher.get() : nullptr;
         graph.AddPass(
             "PathTracer.Trace", nrc ? rdg::PassFlags::Compute : rdg::PassFlags::RayTracing,
             [&](rdg::PassBuilder& b)
             {
-                b.Write(accumulation, Access::UAVCompute);
+                b.Write(target, Access::UAVCompute);
+                if (marcher)
+                {
+                    marcher->DeclareShadowReads(b);
+                }
                 for (rdg::BufferRef buffer : {primaryHits, giReservoirs})
                 {
                     if (buffer.IsValid())
@@ -432,7 +482,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             },
             [=](rdg::PassContext& ctx) mutable
             {
-                constants.accumulation = ctx.UAV(accumulation);
+                constants.accumulation = ctx.UAV(target);
                 if (guides.diffuseAlbedo.IsValid())
                 {
                     constants.diffuseAlbedo = ctx.UAV(guides.diffuseAlbedo);
@@ -460,6 +510,12 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     ctx.cmd.DispatchRays(width, height, 1);
                 }
             });
+
+        if (march)
+        {
+            mVolumeMarcher->AddPasses(graph, scene, constants, target, accumulation, width, height, spp, view,
+                                      (frame.flags & gpu::kFlagReset) != 0u, mSettings.accumulate, mSettings.furnace);
+        }
 
         if (restirDi || restirGi)
         {

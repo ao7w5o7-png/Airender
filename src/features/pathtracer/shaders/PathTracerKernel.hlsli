@@ -1,9 +1,11 @@
-// GPU path tracer kernel: one pixel per thread, bindless resources. Compiled five times:
+// GPU path tracer kernel: one pixel per thread, bindless resources. Compiled seven times:
 // PathTracer.hlsl (DXR 1.1, SM 6.6, every RTX GPU), PathTracerSer.hlsl (AIR_PT_SER: DXR 1.2 shader
 // execution reordering, SM 6.9), PathTracerGi.hlsl (AIR_PT_RESTIR_GI: records ReSTIR GI's
 // candidates), PathTracerNrc.hlsl and PathTracerNrcPortable.hlsl (AIR_PT_NRC: paths end in the
-// neural radiance cache, evaluated with Shader Model 6.10 linear algebra or in float32);
-// PathTracer.cpp picks one at runtime. The estimator itself is
+// neural radiance cache, evaluated with Shader Model 6.10 linear algebra or in float32),
+// PathTracerVolume.hlsl (AIR_PT_VOLUME: tracks the scene's volumes) and PathTracerVolumeShadows.hlsl
+// (AIR_PT_VOLUME_SHADOWS: lights through the volumes the ray march renders); PathTracer.cpp picks one
+// at runtime. The estimator itself is
 // Integrator.hlsli, shared with the CPU reference renderer. This file supplies TraceClosest (an inline
 // ray query; SceneAccess.hlsli has the other hooks) and writes the accumulation buffer, denoiser
 // guides, debug views and, for ReSTIR, the primary hits and GI reservoirs.
@@ -148,6 +150,10 @@ void NrcDeferQuery(NrcQuery q, float3 throughput)
 }
 #endif
 
+#if AIR_PT_VOLUME_SHADOWS
+#include "VolumeShadowHooks.hlsli"
+#endif
+
 #include "Integrator.hlsli"
 
 // --- Debug helpers -------------------------------------------------------------------------------
@@ -218,6 +224,9 @@ void TracePixel(uint2 pixel)
     params.nrcSlot = 0u;
     params.nrcRecords = f.nrc.recordsPerPath;
     uint nrcFlags = 0u; // of the first sample: its pixel's training path, if it traces one
+#if AIR_PT_VOLUME_SHADOWS
+    gVolumeShadows = f.volumeShadows;
+#endif
 #if AIR_PT_NRC
     gNrc = f.nrc;
     if ((f.flags & kFlagNrc) != 0u)
@@ -292,8 +301,19 @@ void TracePixel(uint2 pixel)
     }
 
     RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
-    float4 previous = (f.flags & kFlagReset) != 0u ? float4(0.0f, 0.0f, 0.0f, 0.0f) : accumulation[pixel];
-    accumulation[pixel] = previous + float4(sum, float(f.samplesPerPixel));
+#if AIR_PT_VOLUME_SHADOWS
+    if ((f.flags & kFlagVolumeMarch) != 0u)
+    {
+        // The march adds the volumes in front of the first hit (every sample's: they share the
+        // frame's jitter), then accumulates (VolumeMarch.hlsl).
+        accumulation[pixel] = float4(sum, first.hit ? first.hitDistance : 1e30f);
+    }
+    else
+#endif
+    {
+        float4 previous = (f.flags & kFlagReset) != 0u ? float4(0.0f, 0.0f, 0.0f, 0.0f) : accumulation[pixel];
+        accumulation[pixel] = previous + float4(sum, float(f.samplesPerPixel));
+    }
 
     if ((f.flags & (kFlagReSTIR | kFlagReSTIRGI)) != 0u)
     {

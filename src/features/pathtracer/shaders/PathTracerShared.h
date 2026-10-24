@@ -3,6 +3,7 @@
 #define AIR_PATH_TRACER_SHARED_H
 
 #include "NrcShared.h"
+#include "VolumeMarchShared.h"
 #include "air/renderer/shader/CloudShared.h"
 #include "air/renderer/shader/HlslCompat.h"
 #include "air/renderer/shader/SkyShared.h"
@@ -29,7 +30,11 @@ AIR_CONST uint kDebugBounces = 7;       // heatmap: path length / maxBounces (Ru
 AIR_CONST uint kDebugDirect = 8;        // radiance of paths with at most one bounce (emission + direct light)
 AIR_CONST uint kDebugIndirect = 9;      // radiance of the remaining paths
 AIR_CONST uint kDebugNrcCache = 10;     // the neural radiance cache's prediction at the first hit (pathtracer.nrc)
-AIR_CONST uint kDebugViewCount = 11;
+// The real-time volumes' ray march (VolumeMarch.hlsl, pathtracer.volumeMarch), over the surfaces:
+AIR_CONST uint kDebugVolumeSteps = 11;    // heatmap: lit steps / debugScale
+AIR_CONST uint kDebugVolumeRate = 12;     // lighting rate: blue every pixel, green shared by 2 x 2, red by 4 x 4
+AIR_CONST uint kDebugVolumeSegments = 13; // heatmap: volumes the camera ray crosses (of kMarchMaxVolumes)
+AIR_CONST uint kDebugViewCount = 14;
 
 AIR_CONST uint kFlagFurnace = 1u;      // every material white, emitters off: an energy-conserving image is uniform
 AIR_CONST uint kFlagReset = 2u;        // discard the accumulated samples
@@ -47,6 +52,11 @@ AIR_CONST uint kFlagRecordGi = 128u; // set by the kernel on the sample that rec
 AIR_CONST uint kFlagNrc = 256u;
 AIR_CONST uint kFlagNrcTrain = 512u;     // set by the kernel on its pixel's training path
 AIR_CONST uint kFlagNrcUnbiased = 1024u; // that training path is never ended by the cache
+// The volumes are rendered by the ray march (VolumeMarch.hlsli): the trace kernel's paths light the
+// surfaces through their moment shadow maps, and the kernel writes this frame's samples (rgb) and
+// their first hit's distance (a) instead of adding to the accumulation.
+AIR_CONST uint kFlagVolumeMarch = 2048u;
+AIR_CONST uint kFlagProbe = 4096u; // a probe's path for the march's ambient light (VolumeProbes.hlsl)
 
 // Result of TraceClosest() in the integrator (not stored in buffers).
 struct HitInfo
@@ -94,6 +104,7 @@ struct FrameData
     uint volumeTable; // StructuredBuffer<VolumeData> (GpuScene::volumeTable)
     uint pad3;
     uint pad4;
+    VolumeShadowsData volumeShadows; // their moment shadow maps, with kFlagVolumeMarch
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -129,7 +140,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 560);
+static_assert(sizeof(FrameData) == 592);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

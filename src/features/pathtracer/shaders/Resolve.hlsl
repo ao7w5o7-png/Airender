@@ -48,7 +48,9 @@ void Main(uint3 id : SV_DispatchThreadID)
     case kDebugNrcCache: value *= f.exposure; break; // radiance -> scene-linear
     case kDebugBaseColor: break;                           // already linear reflectance
     case kDebugIntersections:
-    case kDebugBounces: value = SrgbToLinear(Turbo(value.r)); break;
+    case kDebugBounces:
+    case kDebugVolumeSteps:
+    case kDebugVolumeSegments: value = SrgbToLinear(Turbo(value.r)); break;
     default: value = SrgbToLinear(value); break; // normals and scalars are shown as raw values
     }
     output[id.xy] = float4(value, 1.0f);

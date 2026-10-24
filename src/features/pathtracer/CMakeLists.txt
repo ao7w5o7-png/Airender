@@ -6,6 +6,7 @@ air_add_feature(NAME pathtracer
         src/RadianceCache.cpp
         src/ReferenceRenderer.cpp
         src/ReSTIR.cpp
+        src/VolumeMarcher.cpp
     TESTS
         tests/BsdfTests.cpp
         tests/IntegratorTests.cpp

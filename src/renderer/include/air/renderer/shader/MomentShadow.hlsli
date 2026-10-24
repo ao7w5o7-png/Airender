@@ -3,6 +3,7 @@
 // reconstructs from them. The including code defines, before including this file:
 //   float  MomentMapB0Sample(MomentShadowMap m, float2 uv)  slice m.slice of the b0 array, bilinear
 //   float4 MomentMapBSample(MomentShadowMap m, float2 uv)   the b1..b4 array likewise
+//   float  MomentMapOccluderLoad(MomentShadowMap m, uint x, uint y)  texel (x, y) of the opaque slice
 //
 // The moments of a ray: b0 = sum of the optical depths dTau of its steps, b_k = sum of dTau z^k for
 // k = 1..4, z in [-1, 1] the step's depth along the ray. They add up in any order and mix linearly,
@@ -55,10 +56,17 @@ float3 OctahedralDirection(float2 uv)
     return normalize(float3(px, py, pz));
 }
 
-// The depth z of the distance t along a texel's ray.
+// The depth z of the distance t along a texel's ray: linear for the sun, through a square root for a
+// point, whose rays cross the volumes near it in a short stretch of distances that still decides how
+// much of its light gets through.
 float MomentDepth(MomentShadowMap m, float t)
 {
-    return (t - m.depthNear) / (m.depthFar - m.depthNear) * 2.0f - 1.0f;
+    float x = (t - m.depthNear) / (m.depthFar - m.depthNear);
+    if (m.kind != kMomentMapSun)
+    {
+        x = x > 0.0f ? sqrt(x) : x;
+    }
+    return x * 2.0f - 1.0f;
 }
 
 // The ray of the map's texel at texture coordinates uv: from o along the unit vector d; the distance
@@ -162,8 +170,31 @@ float MomentTransmittance(float b0, float4 b, float z)
     return saturate(exp(-b0 * share));
 }
 
+// The share of a light that the opaque geometry lets through to depth z at texture coordinates uv:
+// the four texels around them each let it through when z lies in front of their ray's first hit,
+// weighted as bilinear filtering weighs them (percentage-closer filtering).
+float MomentOpaqueVisibility(MomentShadowMap m, float2 uv, float z)
+{
+    float fx = uv.x * float(m.size) - 0.5f;
+    float fy = uv.y * float(m.size) - 0.5f;
+    float x0 = floor(fx);
+    float y0 = floor(fy);
+    float tx = fx - x0;
+    float ty = fy - y0;
+    float last = float(m.size - 1u);
+    uint xa = uint(clamp(x0, 0.0f, last));
+    uint xb = uint(clamp(x0 + 1.0f, 0.0f, last));
+    uint ya = uint(clamp(y0, 0.0f, last));
+    uint yb = uint(clamp(y0 + 1.0f, 0.0f, last));
+    float v00 = z < MomentMapOccluderLoad(m, xa, ya) ? 1.0f : 0.0f;
+    float v10 = z < MomentMapOccluderLoad(m, xb, ya) ? 1.0f : 0.0f;
+    float v01 = z < MomentMapOccluderLoad(m, xa, yb) ? 1.0f : 0.0f;
+    float v11 = z < MomentMapOccluderLoad(m, xb, yb) ? 1.0f : 0.0f;
+    return lerp(lerp(v00, v10, tx), lerp(v01, v11, tx), ty);
+}
+
 // How much of a light reaches world point p through the volumes of map m: one fetch of b0, and of
-// the other moments only when the texel's ray met a volume.
+// the other moments only when the texel's ray met a volume. (Surfaces trace their own visibility.)
 float MomentShadow(MomentShadowMap m, float3 p)
 {
     float2 uv;
@@ -178,6 +209,25 @@ float MomentShadow(MomentShadowMap m, float3 p)
         return 1.0f;
     }
     return MomentTransmittance(b0, MomentMapBSample(m, uv), z);
+}
+
+// How much of a light reaches world point p in a volume: through the volumes and past the opaque
+// geometry, both from map m.
+float MomentLightVisibility(MomentShadowMap m, float3 p)
+{
+    float2 uv;
+    float z;
+    if (!MomentMapLocate(m, p, uv, z))
+    {
+        return 1.0f;
+    }
+    float visibility = MomentOpaqueVisibility(m, uv, z);
+    if (visibility <= 0.0f || z <= -1.0f)
+    {
+        return visibility;
+    }
+    float b0 = MomentMapB0Sample(m, uv);
+    return b0 < kMomentEmpty ? visibility : visibility * MomentTransmittance(b0, MomentMapBSample(m, uv), z);
 }
 
 #endif

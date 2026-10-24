@@ -8,6 +8,8 @@
 //   PathTracer.ReSTIR*  Compute, with restir.di / restir.gi: the direct / indirect light at the
 //                       first surface by ReSTIR DI / GI (src/ReSTIR.h), added to the accumulation
 //   NRC.*               Compute, with nrc: the neural radiance cache's training (src/RadianceCache.h)
+//   VolumeMarch.*       Compute, with volumeMarch: the volumes ray marched over the surfaces
+//                       (src/VolumeMarcher.h)
 //   PathTracer.Resolve  Compute: average * exposure (or a debug view) into the frame output
 // The estimator (shaders/Integrator.hlsli: NEE + MIS over emissive triangles, energy-conserving
 // GGX) is shared with the CPU ReferenceRenderer. The output is scene-linear and exposed
@@ -76,6 +78,31 @@ struct RadianceCacheSettings
     bool operator==(const RadianceCacheSettings&) const = default;
 };
 
+// Real-time volumes (docs/architecture.md §8.13): the scene's volumes ray marched over the surfaces
+// and lit through moment shadow maps, instead of tracked by every path. Light is scattered once on its
+// way to the camera and the shadows are approximations: biased, but free of noise and a fraction of
+// the cost of tracking.
+inline constexpr u32 kVolumeMarchOff = 0;
+inline constexpr u32 kVolumeMarchRealTime = 1; // only with accumulate=false
+inline constexpr u32 kVolumeMarchAlways = 2;   // also when accumulating (e.g. to measure its bias)
+inline constexpr u32 kMaxVolumeLights = 8;     // light groups with moment shadow maps (VolumeMarchShared.h)
+
+struct VolumeMarchSettings
+{
+    u32 mode = kVolumeMarchRealTime;
+    float step = 1.0f;             // the march's step, in voxels of `level`
+    u32 level = 0;                 // the level of detail of the bricks it reads (0 the finest, 2 the coarsest)
+    u32 shadowSize = 256;          // texels per side of every moment shadow map
+    u32 shadowLevel = 1;           // the level their marches read
+    float shadowStep = 1.0f;       // their step, in voxels of that level
+    u32 lights = kMaxVolumeLights; // light groups that light the volumes (those that matter most to them)
+    bool air = true;               // the aerial perspective dims the volumes at the depth their light comes from
+    // Render the shadow maps every frame (to measure them) instead of when what they show changed.
+    bool everyFrame = false;
+
+    bool operator==(const VolumeMarchSettings&) const = default;
+};
+
 struct PathTracerSettings
 {
     u32 width = 1920;
@@ -102,6 +129,7 @@ struct PathTracerSettings
     u32 volumeEvents = 256;
     ReSTIRSettings restir;
     RadianceCacheSettings nrc;
+    VolumeMarchSettings volumeMarch;
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap
@@ -114,6 +142,7 @@ struct PathTracerSettings
 
 class ReSTIR;
 class RadianceCache;
+class VolumeMarcher;
 
 class PathTracer
 {
@@ -149,6 +178,10 @@ public:
     // Whether the last traced frame's paths ended in the neural radiance cache, and whether it ran
     // on the matrix units (Shader Model 6.10 linear algebra).
     bool UsesRadianceCache() const { return mUsedNrc; }
+    // Whether the last traced frame's volumes were ray marched (not tracked), and with how many light
+    // groups besides the sun.
+    bool UsesVolumeMarch() const { return mUsedVolumeMarch; }
+    u32 GetVolumeMarchLights() const;
     bool RadianceCacheUsesLinearAlgebra() const;
     u32 GetRadianceCacheSteps() const;
     const PathTracerSettings& GetSettings() const { return mSettings; }
@@ -168,6 +201,9 @@ private:
     // The kernel with the scene's volume (AIR_PT_VOLUME), created the first time a scene has one.
     rhi::RayTracingPipelineDesc mTraceVolumeDesc;
     rhi::PipelineHandle mTracePipelineVolume;
+    // The kernel under real-time volumes (AIR_PT_VOLUME_SHADOWS), created the first time they run.
+    rhi::RayTracingPipelineDesc mTraceVolumeShadowsDesc;
+    rhi::PipelineHandle mTracePipelineVolumeShadows;
     // PathTracerNrc.cs (paths end in the cache, linear algebra) and PathTracerNrcPortable.cs (float32),
     // created the first time the cache runs.
     renderer::LazyComputePipeline mTraceNrc;
@@ -180,6 +216,8 @@ private:
     u32 mFrameRingSize = 0;
     std::unique_ptr<ReSTIR> mReSTIR;
     std::unique_ptr<RadianceCache> mRadianceCache;
+    std::unique_ptr<VolumeMarcher> mVolumeMarcher;
+    bool mUsedVolumeMarch = false;
     bool mUsedReSTIRDI = false;
     bool mUsedReSTIRGI = false;
     bool mUsedNrc = false;

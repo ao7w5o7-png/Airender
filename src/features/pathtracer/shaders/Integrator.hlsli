@@ -21,6 +21,12 @@
 //   VolumeData    LoadVolume(uint table, uint index)  the scene's volumes (IntegratorParams::volumeTable)
 //   float         VolumeDensitySample(VolumeData v, float3 uvw), VolumeMajorantLoad(VolumeData v, uint cell)
 //                                                     a volume's voxels (VolumeLookup.hlsli)
+// and, compiled with AIR_PT_VOLUME_SHADOWS (the real-time volumes' kernels, VolumeMarchShared.h):
+//   float         VolumeSunShadow(float3 p), VolumeGroupShadow(uint group, float3 p)
+//                                                     what the volumes let through of the sun's / a light
+//                                                     group's light at p (their moment shadow maps)
+// and, compiled with AIR_PT_PROBE (their probes' kernel):
+//   bool          VolumeExplicitGroup(uint group)     the ray march lights the volumes with this group
 // and, compiled with AIR_PT_NRC (the neural radiance cache's kernels, NrcShared.h):
 //   float3        NrcPredict(NrcQuery q)              the radiance the cache predicts a vertex reflects
 //   NrcTrainingRecord NrcReadRecord(uint slot), void NrcWriteRecord(uint slot, NrcTrainingRecord r)
@@ -68,6 +74,7 @@
 #define AIR_PT_INTEGRATOR_HLSLI
 
 #include "Bsdf.hlsli"
+#include "Camera.hlsli"
 #include "Sampling.hlsli"
 #include "air/renderer/shader/CloudLookup.hlsli"
 #include "air/renderer/shader/SkyLookup.hlsli"
@@ -87,6 +94,18 @@
 // there, costs the plain kernel about 5%.
 #ifndef AIR_PT_VOLUME
 #define AIR_PT_VOLUME 0
+#endif
+// The real-time volumes (PathTracerVolumeShadows.hlsl, docs/architecture.md §8.13): the volumes are
+// not tracked, a ray march renders them over the surfaces (VolumeMarch.hlsli), and the light reaching
+// a surface through them comes from their moment shadow maps.
+#ifndef AIR_PT_VOLUME_SHADOWS
+#define AIR_PT_VOLUME_SHADOWS 0
+#endif
+// Their probes (VolumeProbes.hlsl, with AIR_PT_VOLUME): paths with kFlagProbe gather the light that
+// arrives at a point in a volume through the volumes, except what the march adds itself: the sunlight
+// and the light of its light groups that reach the point without scattering on the way.
+#ifndef AIR_PT_PROBE
+#define AIR_PT_PROBE 0
 #endif
 
 struct IntegratorParams
@@ -158,11 +177,6 @@ struct PathSample
     GiPath gi; // with kFlagRecordGi
 };
 
-float3 Xyz(float4 v)
-{
-    return float3(v.x, v.y, v.z);
-}
-
 float3 TransformRow3(float4 r0, float4 r1, float4 r2, float3 p, float w)
 {
     float4 h = float4(p, w);
@@ -176,29 +190,6 @@ float3 OffsetRayOrigin(float3 p, float3 n)
     return p + n * scale;
 }
 
-// --- Camera --------------------------------------------------------------------------------------
-
-// Direction through pixel position `pixel` (0 .. size, y down).
-float3 CameraRayDirection(CameraData c, float2 pixel, float2 size)
-{
-    float ndcX = pixel.x / size.x * 2.0f - 1.0f;
-    float ndcY = 1.0f - pixel.y / size.y * 2.0f;
-    float tanHalf = c.position.w;
-    float aspect = c.forward.w;
-    return normalize(Xyz(c.forward) + Xyz(c.right) * (ndcX * tanHalf * aspect) + Xyz(c.up) * (ndcY * tanHalf));
-}
-
-// Pixel position of a world point (or of a direction when w = 0), inverse of CameraRayDirection.
-float2 CameraProject(CameraData c, float3 p, float w, float2 size)
-{
-    float3 d = p - Xyz(c.position) * w;
-    float z = max(dot(d, Xyz(c.forward)), 1e-6f);
-    float tanHalf = c.position.w;
-    float aspect = c.forward.w;
-    float ndcX = dot(d, Xyz(c.right)) / (z * tanHalf * aspect);
-    float ndcY = dot(d, Xyz(c.up)) / (z * tanHalf);
-    return float2((ndcX + 1.0f) * 0.5f * size.x, (1.0f - ndcY) * 0.5f * size.y);
-}
 
 // --- Lights --------------------------------------------------------------------------------------
 
@@ -598,11 +589,26 @@ float VolumesTransmittance(IntegratorParams params, float3 o, float3 d, float tM
 }
 #endif
 
-// The volumes' transmittance along a shadow ray from a surface (1 in kernels without them).
-float ShadowTransmittance(IntegratorParams params, float3 origin, float3 direction, float tMax, AIR_INOUT(uint) seed)
+// The volumes' transmittance along a shadow ray from a surface towards a triangle light, and towards
+// the sun: tracked, from their moment shadow maps, or 1 in kernels without volumes.
+float LightTransmittance(IntegratorParams params, LightTriangle light, float3 origin, float3 direction, float tMax,
+                         AIR_INOUT(uint) seed)
 {
 #if AIR_PT_VOLUME
     return VolumesTransmittance(params, origin, direction, tMax, seed);
+#elif AIR_PT_VOLUME_SHADOWS
+    return VolumeGroupShadow(light.group, origin);
+#else
+    return 1.0f;
+#endif
+}
+
+float SunTransmittance(IntegratorParams params, float3 origin, float3 direction, AIR_INOUT(uint) seed)
+{
+#if AIR_PT_VOLUME
+    return VolumesTransmittance(params, origin, direction, 1e30f, seed);
+#elif AIR_PT_VOLUME_SHADOWS
+    return VolumeSunShadow(origin);
 #else
     return 1.0f;
 #endif
@@ -839,6 +845,12 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             else
             {
                 float sunWeight = bounce > 0u ? PowerHeuristic(previousBsdfPdf, sunPdf) : 1.0f;
+#if AIR_PT_PROBE
+                if (bounce == 0u && (params.flags & kFlagProbe) != 0u)
+                {
+                    sunWeight = 0.0f; // a probe's direct sunlight: the march's own
+                }
+#endif
                 float3 environment = sky + sun * sunWeight;
                 if (beyondX2)
                 {
@@ -879,7 +891,14 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
 
         // Emission found by the BSDF sample, weighted against NEE having found it.
-        if (any(s.emission) && !(restir && bounce == 1u))
+        bool emits = any(s.emission) && !(restir && bounce == 1u);
+#if AIR_PT_PROBE
+        if (emits && bounce == 0u && (params.flags & kFlagProbe) != 0u)
+        {
+            emits = !VolumeExplicitGroup(LoadLight(s.lightIndex).group); // the march's own light
+        }
+#endif
+        if (emits)
         {
             float weight = 1.0f;
             float lightPdf = 0.0f;
@@ -1030,7 +1049,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 if (any(e.fCos) && lightPdf > 0.0f && TraceVisible(rayOrigin, wi, dist * (1.0f - 1e-4f)))
                 {
                     float weight =
-                        PowerHeuristic(lightPdf, e.pdf) * ShadowTransmittance(params, rayOrigin, wi, dist, seed);
+                        PowerHeuristic(lightPdf, e.pdf) * LightTransmittance(params, light, rayOrigin, wi, dist, seed);
                     float3 contribution = throughput * e.fCos * light.radiance * (weight / lightPdf);
                     if (gi && bounce == 1u)
                     {
@@ -1073,7 +1092,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 {
                     // One estimate after the other: the operands of * are unsequenced in C++.
                     float transmittance = CloudTransmittance(params.clouds, rayOrigin, wi, 1e30f, seed);
-                    transmittance *= ShadowTransmittance(params, rayOrigin, wi, 1e30f, seed);
+                    transmittance *= SunTransmittance(params, rayOrigin, wi, seed);
                     float3 sunRadiance = params.sky.sunRadiance * transmittance;
                     float weight = PowerHeuristic(sunPdf, e.pdf);
                     float3 contribution = throughput * e.fCos * sunRadiance * (weight / sunPdf);

@@ -168,6 +168,8 @@ inline bool isfinite(float v)
 using std::abs;
 using std::acos;
 using std::asin;
+using std::atan2;
+using std::ceil;
 using std::cos;
 using std::exp;
 using std::floor;

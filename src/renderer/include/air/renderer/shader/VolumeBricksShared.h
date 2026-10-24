@@ -70,7 +70,8 @@ struct VolumeMarchData
     uint aoX;         // texels
     uint aoY;
     uint aoZ;
-    uint ao;     // Texture3D<float> (R8_UNORM): the volume's own mean transmittance over all directions
+    uint ao;     // Texture3D<float> (R8_UNORM): the volume's mean transmittance over all directions to
+                 // light that diffuses through it (VolumeBricks.cpp)
     uint levels; // its first entry in the level table, kVolumeLevels of them
     uint pad0;
     uint pad1;
