@@ -113,6 +113,8 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //                  linings
 //   smoke          smoke rising from a brazier against a wall at sunset (a volume, Volume.h): light
 //                  scattered in a medium from embers, the sun and the sky
+//   braziers       three plumes that overlap, lit by the dusk sun, their embers and a lantern among
+//                  them: several volumes and light groups near and inside them
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 std::vector<std::string> BuiltinSceneNames();

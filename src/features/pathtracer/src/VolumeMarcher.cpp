@@ -407,7 +407,10 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
         (reset ? gpu::kMarchReset : 0u) |
         (mSettings.air && scene.sky.aerialDistance > 0.0f && scene.aerialInscatter.IsValid() ? gpu::kMarchAir : 0u) |
         (debugView == gpu::kDebugIndirect ? gpu::kMarchNoDirect : 0u) |
-        (debugView == gpu::kDebugDirect ? gpu::kMarchNoIndirect : 0u) | (furnace ? gpu::kMarchFurnace : 0u);
+        (debugView == gpu::kDebugDirect ? gpu::kMarchNoIndirect : 0u) | (furnace ? gpu::kMarchFurnace : 0u) |
+        (mSettings.adaptive ? gpu::kMarchAdaptive : 0u);
+    c.shareBelow2 = mSettings.shareBelow2;
+    c.shareBelow4 = std::min(mSettings.shareBelow4, mSettings.shareBelow2);
     c.view = debugView;
     c.samplesPerPixel = samplesPerPixel;
     c.probeVolumes = volumes;

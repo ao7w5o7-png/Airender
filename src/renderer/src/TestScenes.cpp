@@ -645,4 +645,61 @@ SceneDesc MakeSmoke()
     return scene;
 }
 
+// Three braziers smoking side by side at dusk (Volume.h): their plumes overlap and drift into each
+// other, lit by the sun just above the horizon, by their embers from below and by a lantern hanging
+// among them. Several volumes at once (each tracked on its own, or marched by segments), light groups
+// near and inside the smoke, the shadows they cast on one another and on the yard.
+SceneDesc MakeBraziers()
+{
+    SceneDesc scene;
+    scene.name = "braziers";
+    const u32 paving = AddMaterial(scene, {.name = "Paving", .baseColor = {0.3f, 0.29f, 0.27f}, .roughness = 0.85f});
+    const u32 plaster = AddMaterial(scene, {.name = "Plaster", .baseColor = {0.68f, 0.64f, 0.58f}, .roughness = 0.8f});
+    const u32 iron =
+        AddMaterial(scene, {.name = "Iron", .baseColor = {0.35f, 0.33f, 0.3f}, .roughness = 0.55f, .metallic = 1.0f});
+    const u32 embers = AddMaterial(scene, {.name = "Embers",
+                                           .baseColor = {0.05f, 0.05f, 0.05f},
+                                           .roughness = 0.9f,
+                                           .emissionColor = {1.0f, 0.32f, 0.06f},
+                                           .emissionNits = 5000.0f});
+    const u32 lantern = AddMaterial(scene, {.name = "Lantern",
+                                            .baseColor = {0.8f, 0.8f, 0.8f},
+                                            .roughness = 0.5f,
+                                            .emissionColor = {1.0f, 0.75f, 0.45f},
+                                            .emissionNits = 20000.0f});
+    constexpr float kHalf = 20.0f;
+    AddInstance(scene, "Yard",
+                AddMesh(scene, MakeQuad("Yard", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                paving);
+    AddBox(scene, "BackWall", {0.0f, 1.6f, -3.0f}, {7.0f, 1.6f, 0.15f}, plaster);
+    AddBox(scene, "SideWall", {-5.0f, 1.9f, 0.5f}, {0.15f, 1.9f, 3.5f}, plaster);
+    const float3 braziers[] = {{-1.1f, 0.0f, 0.1f}, {0.05f, 0.0f, -0.7f}, {1.15f, 0.0f, 0.25f}};
+    const u32 seeds[] = {3, 8, 13};
+    const float e = 0.3f;
+    for (size_t i = 0; i < std::size(braziers); ++i)
+    {
+        const float3 b = braziers[i];
+        AddBox(scene, std::format("Brazier{}", i), b + float3(0.0f, 0.28f, 0.0f), {0.36f, 0.28f, 0.36f}, iron);
+        AddInstance(
+            scene, std::format("Embers{}", i),
+            AddMesh(scene, MakeQuad(std::format("Embers{}", i), b + float3(-e, 0.565f, e), b + float3(e, 0.565f, e),
+                                    b + float3(e, 0.565f, -e), b + float3(-e, 0.565f, -e), {0.0f, 1.0f, 0.0f})),
+            embers);
+        scene.volumes.push_back({.enabled = true,
+                                 .position = b + float3(0.0f, 0.58f, 0.0f),
+                                 .extinction = 18.0f + 4.0f * float(i),
+                                 .albedo = 0.88f - 0.04f * float(i),
+                                 .anisotropy = 0.3f,
+                                 .seed = seeds[i]});
+    }
+    SetTransform(AddInstance(scene, "Lantern", AddMesh(scene, MakeSphere("Lantern", 0.1f, 24)), lantern),
+                 {0.55f, 2.3f, 0.9f});
+    AddSky(scene, 4.0f, 120.0f);
+    LookAt(scene.camera, {0.3f, 1.7f, 6.5f}, {0.1f, 1.8f, 0.0f});
+    scene.camera.verticalFov = 0.9f;
+    scene.camera.ev100 = 11.0f;
+    return scene;
+}
+
 } // namespace air::renderer::detail

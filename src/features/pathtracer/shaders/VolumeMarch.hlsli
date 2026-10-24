@@ -59,7 +59,6 @@ float VolumeOcclusion(VolumeMarchData v, float3 x)
 struct MarchResult
 {
     float3 radiance;     // the light the volumes scatter towards the camera, nits
-    float3 direct;       // its part from the sun and the light groups
     float transmittance; // what is left of the light from behind them
     float depth;         // the mean depth their light comes from (transmittance-weighted), for the air
     uint steps;          // lit steps
@@ -178,38 +177,117 @@ bool MarchVolumeSegment(VolumeMarchData v, float3 o, float3 d, float tMax, AIR_O
     return BoxSegment(o, d, v.boundsMin, v.boundsMax, 0.0f, tMax, tIn, tOut);
 }
 
-// Where a tile reads the light around a volume: on the ray through its centre, half way through the
-// volume's box (or, when that ray misses it, as close to the box's centre as the ray comes, inside the box).
-float3 TileProbePoint(VolumeMarchData v, float3 o, float3 d)
+// The volumes at point x (t along the ray, before tEnd): their extinction, each one's scattering
+// (sigmaS) and phase (phaseG), the light their probes hold that they scatter towards the camera per
+// unit length (with `ambient`), and, where they are all empty around x, how far that emptiness reaches.
+struct MarchPoint
 {
-    float t0;
-    float t1;
-    if (BoxSegment(o, d, v.boundsMin, v.boundsMax, 0.0f, 1e30f, t0, t1))
+    float sigmaT;
+    float4 sigmaS;
+    float4 phaseG;
+    float3 around;
+    bool occupied;
+    float skipTo;
+};
+
+MarchPoint MarchPointAt(MarchSetup s, MarchRayVolumes rv, float3 x, float3 d, float t, float tEnd, bool ambient)
+{
+    MarchPoint p;
+    p.sigmaT = 0.0f;
+    p.sigmaS = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    p.phaseG = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    p.around = float3(0.0f, 0.0f, 0.0f);
+    p.occupied = false;
+    p.skipTo = tEnd;
+    bool furnace = (s.flags & kMarchFurnace) != 0u;
+    for (uint k = 0u; k < rv.count; ++k)
     {
-        return o + d * (0.5f * (t0 + t1));
+        if (t < Lane4(rv.tIn, k))
+        {
+            p.skipTo = min(p.skipTo, Lane4(rv.tIn, k)); // not entered yet
+            continue;
+        }
+        if (t >= Lane4(rv.tOut, k))
+        {
+            continue;
+        }
+        uint volume = (rv.indices >> (8u * k)) & 0xFFu;
+        VolumeMarchData v = LoadMarchVolume(volume);
+        VolumeBrickLevel level = LoadVolumeLevel(v.levels + s.level);
+        float3 emptyMin;
+        float3 emptyMax;
+        if (!BrickOccupied(level, x, emptyMin, emptyMax))
+        {
+            p.skipTo = min(p.skipTo, emptyMin.x == emptyMax.x ? t : t + BoxExit(x, d, emptyMin, emptyMax));
+            continue;
+        }
+        p.occupied = true;
+        float density = BrickDensity(level, x);
+        if (density <= 0.0f)
+        {
+            p.skipTo = t;
+            continue;
+        }
+        float extinction = v.extinction * density;
+        float scattering = furnace ? extinction : extinction * v.albedo;
+        p.sigmaT += extinction;
+        p.sigmaS = SetLane4(p.sigmaS, k, scattering);
+        p.phaseG = SetLane4(p.phaseG, k, v.anisotropy);
+        if (ambient)
+        {
+            // The probes' light at x, scaled by how much more or less the volume occludes x than the
+            // probes it is filtered from (the occlusion grid is finer than the probes).
+            float4 red = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 0u, x));
+            float4 green = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 1u, x));
+            float4 blue = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 2u, x));
+            float probeOcclusion = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 3u, x)).x;
+            float ratio = furnace ? 1.0f : min(VolumeOcclusion(v, x) / max(probeOcclusion, 0.05f), 4.0f);
+            p.around += ProbeInScattering(red, green, blue, d, v.anisotropy) * (ratio * scattering);
+        }
     }
-    float3 centre = (v.boundsMin + v.boundsMax) * 0.5f;
-    float3 p = o + d * max(dot(centre - o, d), 0.0f);
-    return min(max(p, v.boundsMin), v.boundsMax);
+    return p;
 }
 
-// The volumes' light along o + t d up to tSurface; jitter in [0, 1) places the samples in their steps.
-MarchResult MarchRay(MarchSetup s, MarchRayVolumes rv, float3 o, float3 d, float tSurface, float jitter)
+// The light of the sun and of the light groups that the volumes at point p scatter towards the camera
+// at x, per unit length.
+float3 MarchDirect(MarchSetup s, MarchRayVolumes rv, MarchPoint p, float3 x, float3 d)
 {
-    MarchResult result;
-    result.radiance = float3(0.0f, 0.0f, 0.0f);
-    result.direct = float3(0.0f, 0.0f, 0.0f);
-    result.transmittance = 1.0f;
-    result.depth = 0.0f;
-    result.steps = 0u;
-    if (rv.count == 0u)
+    float3 direct = float3(0.0f, 0.0f, 0.0f);
+    if ((s.flags & kMarchNoDirect) != 0u)
     {
-        return result;
+        return direct;
     }
-    // From the first box the ray enters to the last it leaves (or its surface), in steps of a fraction
-    // of the smallest voxel among its volumes.
-    float tStart = 1e30f;
-    float tEnd = 0.0f;
+    if (s.sunMap != kInvalidIndex)
+    {
+        float shadow = MomentLightVisibility(LoadMomentMap(s.sunMap), x);
+        if (shadow > 0.0f)
+        {
+            float phase = MixedPhase(p.sigmaS, p.phaseG, rv.count, dot(d, s.sky.sunDirection));
+            direct += s.sky.sunRadiance * (SunSolidAngle(s.sky) * shadow * phase);
+        }
+    }
+    if ((s.flags & kMarchFurnace) == 0u)
+    {
+        for (uint j = 0u; j < s.lightCount; ++j)
+        {
+            uint group = LoadMarchLight(j);
+            float shadow = MomentLightVisibility(LoadMomentMap(VolumeGroupMap(group)), x);
+            if (shadow > 0.0f)
+            {
+                direct += GroupInScattering(LoadLightGroup(group), x, d, p.sigmaS, p.phaseG, rv.count) * shadow;
+            }
+        }
+    }
+    return direct;
+}
+
+// Where a ray marches: from the first box it enters to the last it leaves (or its surface), in steps
+// of a fraction of the smallest voxel among its volumes.
+void MarchSpan(MarchSetup s, MarchRayVolumes rv, float tSurface, AIR_OUT(float) tStart, AIR_OUT(float) tEnd,
+               AIR_OUT(float) step)
+{
+    tStart = 1e30f;
+    tEnd = 0.0f;
     float voxel = 1e30f;
     for (uint k = 0u; k < rv.count; ++k)
     {
@@ -219,137 +297,85 @@ MarchResult MarchRay(MarchSetup s, MarchRayVolumes rv, float3 o, float3 d, float
         voxel = min(voxel, LoadVolumeLevel(v.levels + s.level).voxelSize);
     }
     tEnd = min(tEnd, tSurface);
-    float step = s.stepScale * voxel;
-    bool sun = (s.flags & kMarchNoDirect) == 0u && s.sunMap != kInvalidIndex;
-    bool lights = (s.flags & (kMarchNoDirect | kMarchFurnace)) == 0u;
-    bool furnace = (s.flags & kMarchFurnace) != 0u;
+    step = s.stepScale * voxel;
+}
+
+// One step of the march: the light scattered over [t0, t0 + segment] (`scattered` per unit length,
+// sampled at t) and the extinction there, integrated as if constant over the step (energy conserving).
+void MarchIntegrate(AIR_INOUT(MarchResult) result, AIR_INOUT(float) weightedDepth, AIR_INOUT(float) weight,
+                    float3 scattered, float sigmaT, float segment, float t)
+{
+    float stepTransmittance = exp(-sigmaT * segment);
+    float absorbed = result.transmittance * (1.0f - stepTransmittance);
+    result.radiance += scattered * (absorbed / sigmaT);
+    weightedDepth += absorbed * t;
+    weight += absorbed;
+    result.transmittance *= stepTransmittance;
+    ++result.steps;
+}
+
+MarchResult NoMarch()
+{
+    MarchResult result;
+    result.radiance = float3(0.0f, 0.0f, 0.0f);
+    result.transmittance = 1.0f;
+    result.depth = 0.0f;
+    result.steps = 0u;
+    return result;
+}
+
+// Step i of the march along o + t d (i moves on past emptiness): false once the ray is done.
+bool MarchStep(MarchSetup s, MarchRayVolumes rv, float3 o, float3 d, float tStart, float tEnd, float step,
+               float jitter, bool ambient, AIR_INOUT(uint) i, AIR_INOUT(MarchResult) result,
+               AIR_INOUT(float) weightedDepth, AIR_INOUT(float) weight)
+{
+    float t0 = tStart + float(i) * step;
+    if (t0 >= tEnd)
+    {
+        return false;
+    }
+    float segment = min(step, tEnd - t0);
+    float t = t0 + jitter * segment;
+    float3 x = o + d * t;
+    MarchPoint p = MarchPointAt(s, rv, x, d, t, tEnd, ambient);
+    ++i;
+    if (!p.occupied)
+    {
+        // On to the step that holds the end of the emptiness.
+        if (p.skipTo > t0 + step)
+        {
+            i = uint(floor((p.skipTo - tStart) / step));
+        }
+        return true;
+    }
+    if (p.sigmaT <= 0.0f)
+    {
+        return true;
+    }
+    MarchIntegrate(result, weightedDepth, weight, MarchDirect(s, rv, p, x, d) + p.around, p.sigmaT, segment, t);
+    return result.transmittance >= kMarchOpaque;
+}
+
+// The volumes' light along o + t d up to tSurface, every step lit on its own; jitter in [0, 1) places
+// the samples in their steps.
+MarchResult MarchRay(MarchSetup s, MarchRayVolumes rv, float3 o, float3 d, float tSurface, float jitter)
+{
+    MarchResult result = NoMarch();
+    if (rv.count == 0u)
+    {
+        return result;
+    }
+    float tStart;
+    float tEnd;
+    float step;
+    MarchSpan(s, rv, tSurface, tStart, tEnd, step);
     bool ambient = (s.flags & kMarchNoIndirect) == 0u;
-    float sunScale = sun ? SunSolidAngle(s.sky) : 0.0f;
-    float sunCosine = dot(d, s.sky.sunDirection);
     float weightedDepth = 0.0f;
     float weight = 0.0f;
-    for (uint i = 0u; i < kMarchMaxSteps; ++i)
+    uint i = 0u;
+    for (uint n = 0u; n < kMarchMaxSteps; ++n)
     {
-        float t0 = tStart + float(i) * step;
-        if (t0 >= tEnd)
-        {
-            break;
-        }
-        float segment = min(step, tEnd - t0);
-        float t = t0 + jitter * segment;
-        float3 x = o + d * t;
-        // The volumes the step is in, their extinction and scattering; where all of them are empty
-        // around x, how far that emptiness reaches along the ray.
-        float sigmaT = 0.0f;
-        float4 sigmaS = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        float4 phaseG = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        float4 ambientR = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        float4 ambientG = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        float4 ambientB = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        bool occupied = false;
-        float skipTo = tEnd;
-        for (uint k = 0u; k < rv.count; ++k)
-        {
-            if (t < Lane4(rv.tIn, k))
-            {
-                skipTo = min(skipTo, Lane4(rv.tIn, k)); // not entered yet
-                continue;
-            }
-            if (t >= Lane4(rv.tOut, k))
-            {
-                continue;
-            }
-            VolumeMarchData v = LoadMarchVolume((rv.indices >> (8u * k)) & 0xFFu);
-            VolumeBrickLevel level = LoadVolumeLevel(v.levels + s.level);
-            float3 emptyMin;
-            float3 emptyMax;
-            if (!BrickOccupied(level, x, emptyMin, emptyMax))
-            {
-                skipTo = min(skipTo, emptyMin.x == emptyMax.x ? t : t + BoxExit(x, d, emptyMin, emptyMax));
-                continue;
-            }
-            occupied = true;
-            float density = BrickDensity(level, x);
-            if (density <= 0.0f)
-            {
-                skipTo = t;
-                continue;
-            }
-            float extinction = v.extinction * density;
-            sigmaT += extinction;
-            sigmaS = SetLane4(sigmaS, k, furnace ? extinction : extinction * v.albedo);
-            phaseG = SetLane4(phaseG, k, v.anisotropy);
-            if (ambient)
-            {
-                // The probes' light at x, scaled by how much more or less the volume occludes x than
-                // the probes it is filtered from (the occlusion grid is finer than the probes).
-                uint volume = (rv.indices >> (8u * k)) & 0xFFu;
-                float4 red = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 0u, x));
-                float4 green = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 1u, x));
-                float4 blue = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 2u, x));
-                float probeOcclusion = ProbeFieldSample(ProbeFieldUvw(v, volume, s.probeVolumes, 3u, x)).x;
-                float ratio = furnace ? 1.0f : min(VolumeOcclusion(v, x) / max(probeOcclusion, 0.05f), 4.0f);
-                float3 around = ProbeInScattering(red, green, blue, d, v.anisotropy) * ratio;
-                ambientR = SetLane4(ambientR, k, around.x);
-                ambientG = SetLane4(ambientG, k, around.y);
-                ambientB = SetLane4(ambientB, k, around.z);
-            }
-        }
-        if (!occupied)
-        {
-            // Jump to the step that holds the end of the emptiness.
-            if (skipTo > t0 + step)
-            {
-                i = uint(floor((skipTo - tStart) / step)) - 1u;
-            }
-            continue;
-        }
-        if (sigmaT <= 0.0f)
-        {
-            continue;
-        }
-
-        // The light scattered towards the camera at x per unit length: sigma_s * phase * incident light.
-        float3 direct = float3(0.0f, 0.0f, 0.0f);
-        if (sun)
-        {
-            float shadow = MomentLightVisibility(LoadMomentMap(s.sunMap), x);
-            if (shadow > 0.0f)
-            {
-                direct += s.sky.sunRadiance * (sunScale * shadow * MixedPhase(sigmaS, phaseG, rv.count, sunCosine));
-            }
-        }
-        if (lights)
-        {
-            for (uint j = 0u; j < s.lightCount; ++j)
-            {
-                uint group = LoadMarchLight(j);
-                float shadow = MomentLightVisibility(LoadMomentMap(VolumeGroupMap(group)), x);
-                if (shadow > 0.0f)
-                {
-                    direct += GroupInScattering(LoadLightGroup(group), x, d, sigmaS, phaseG, rv.count) * shadow;
-                }
-            }
-        }
-        float3 scattered = direct;
-        if (ambient)
-        {
-            for (uint k = 0u; k < rv.count; ++k)
-            {
-                scattered += float3(Lane4(ambientR, k), Lane4(ambientG, k), Lane4(ambientB, k)) * Lane4(sigmaS, k);
-            }
-        }
-        // Energy-conserving integration over the step (constant extinction and light along it).
-        float stepTransmittance = exp(-sigmaT * segment);
-        float integral = result.transmittance * (1.0f - stepTransmittance) / sigmaT;
-        result.radiance += scattered * integral;
-        result.direct += direct * integral;
-        float absorbed = result.transmittance * (1.0f - stepTransmittance);
-        weightedDepth += absorbed * t;
-        weight += absorbed;
-        result.transmittance *= stepTransmittance;
-        ++result.steps;
-        if (result.transmittance < kMarchOpaque)
+        if (!MarchStep(s, rv, o, d, tStart, tEnd, step, jitter, ambient, i, result, weightedDepth, weight))
         {
             break;
         }

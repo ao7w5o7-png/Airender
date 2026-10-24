@@ -78,6 +78,8 @@ TEST(Scene_TestScenesContainWhatTheyTest)
         EXPECT(sky.physical && sky.sunElevation > 0.0f); // daylight from the physical sky
     }
     EXPECT(renderer::MakeBuiltinScene("cumulus")->clouds.enabled);
+    const renderer::SceneDesc braziers = *renderer::MakeBuiltinScene("braziers");
+    EXPECT(braziers.volumes.size() == 3 && EmissiveInstances(braziers) == 4); // 3 embers and the lantern
     // Generated with a fixed seed: building twice gives the same scene.
     const renderer::SceneDesc again = *renderer::MakeBuiltinScene("sphere_field");
     EXPECT(again.instances.size() == field.instances.size());

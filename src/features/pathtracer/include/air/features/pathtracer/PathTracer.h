@@ -97,6 +97,11 @@ struct VolumeMarchSettings
     float shadowStep = 1.0f;       // their step, in voxels of that level
     u32 lights = kMaxVolumeLights; // light groups that light the volumes (those that matter most to them)
     bool air = true;               // the aerial perspective dims the volumes at the depth their light comes from
+    // Adaptive sampling groups: a wave of pixels whose transmittance is below shareBelow2 lights each
+    // step once per 2 x 2 pixels, below shareBelow4 once per 4 x 4 (VolumeMarch.hlsl).
+    bool adaptive = true;
+    float shareBelow2 = 0.3f;
+    float shareBelow4 = 0.1f;
     // Render the shadow maps every frame (to measure them) instead of when what they show changed.
     bool everyFrame = false;
 
