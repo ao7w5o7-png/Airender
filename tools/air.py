@@ -70,7 +70,31 @@ def run_step(name: str, cmd: list[str], env: dict | None = None, cwd: Path = ROO
     if not ok:
         lines = proc.stdout.splitlines()
         print("\n".join(lines[-tail:]))
+        annotate(name, lines)
     return ok
+
+
+# Lines that explain a failure: compiler errors, failed expectations and checks, sanitizer reports.
+DIAGNOSTIC_RE = re.compile(r"\berror\b|FAILED|EXPECT failed|\[ FAIL \]|check failed|Sanitizer|runtime error")
+
+
+def annotate(name: str, lines: list[str]) -> None:
+    """On GitHub Actions, a failed step's diagnostics (each with the lines after it, e.g. a stack)
+    and its last lines become an error annotation: the pull request's checks show it without the
+    job log."""
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    picked: list[str] = []
+    end = 0
+    for i, line in enumerate(lines):
+        if i >= end and len(picked) < 200 and DIAGNOSTIC_RE.search(line):
+            picked += ["..."] if picked else []
+            end = i + 20
+            picked += lines[i:end]
+    picked += ["...", *lines[-30:]]
+    message = "\n".join(picked)[-20000:].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    title = f"air {name} failed".replace("%", "%25").replace(":", "%3A").replace(",", "%2C")
+    print(f"::error title={title}::{message}", flush=True)
 
 
 def record(name: str, ok: bool, detail: str = "") -> bool:

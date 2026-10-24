@@ -3,6 +3,7 @@
 // the lights add up to one, and sampling chooses each light with exactly that probability.
 
 #include "TestFramework.h"
+#include "TestHelpers.h"
 
 #include "air/features/pathtracer/ReferenceRenderer.h"
 
@@ -36,7 +37,7 @@ std::vector<Probe> HallProbes(const renderer::SceneDesc& scene)
 
 TEST(LightTree_HasALeafPerLight)
 {
-    const renderer::SceneDesc scene = *renderer::MakeBuiltinScene("many_lights");
+    const renderer::SceneDesc scene = airtest::BuiltinScene("many_lights");
     const pt::LightTreeProbe tree(scene);
     EXPECT(tree.GetLightCount() > 100);
     EXPECT(tree.GetNodeCount() == 2 * tree.GetLightCount() - 1); // a binary tree with one light per leaf
@@ -48,7 +49,7 @@ TEST(LightTree_HasALeafPerLight)
 
 TEST(LightTree_SamplingMatchesThePmf)
 {
-    const renderer::SceneDesc scene = *renderer::MakeBuiltinScene("many_lights");
+    const renderer::SceneDesc scene = airtest::BuiltinScene("many_lights");
     const pt::LightTreeProbe tree(scene);
     const u32 count = tree.GetLightCount();
     for (const Probe& probe : HallProbes(scene))

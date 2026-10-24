@@ -22,26 +22,26 @@ namespace
 {
 
 // GPU pipeline stages in pipeline order. Units are generic: shader cores are SMs / CUs.
-enum Stage : u32
+enum class Stage : u32
 {
-    kFrontEnd,
-    kWait,
-    kSync,
-    kCopy,
-    kClear,
-    kInputAssembly,
-    kVertex,
-    kRaster,
-    kPixel,
-    kOutputMerger,
-    kComputeShader,
-    kRayGen,
-    kTraversal,
-    kHitMiss,
-    kAccelBuild,
-    kPresent,
-    kHost,
-    kStageCount
+    FrontEnd,
+    Wait,
+    Sync,
+    Copy,
+    Clear,
+    InputAssembly,
+    Vertex,
+    Raster,
+    Pixel,
+    OutputMerger,
+    ComputeShader,
+    RayGen,
+    Traversal,
+    HitMiss,
+    AccelBuild,
+    Present,
+    Host,
+    Count
 };
 
 struct StageInfo
@@ -53,7 +53,7 @@ struct StageInfo
     std::string_view note;
 };
 
-constexpr StageInfo kStages[kStageCount] = {
+constexpr StageInfo kStages[u32(Stage::Count)] = {
     {"frontend", "Front end", "Command processor", "Command processor",
      "Reads the command stream: pipeline and root constant changes, markers, indirect arguments."},
     {"wait", "Queue wait", "Command processor", "Command processor",
@@ -79,13 +79,13 @@ constexpr StageInfo kStages[kStageCount] = {
 
 constexpr u32 Bit(Stage stage)
 {
-    return 1u << stage;
+    return 1u << u32(stage);
 }
 
 std::vector<std::string_view> StageIds(u32 mask)
 {
     std::vector<std::string_view> ids;
-    for (u32 s = 0; s < kStageCount; ++s)
+    for (u32 s = 0; s < u32(Stage::Count); ++s)
     {
         if (mask & (1u << s))
         {
@@ -217,63 +217,64 @@ std::vector<std::string_view> CommandStages(std::string_view op)
 {
     if (op == "Dispatch")
     {
-        return StageIds(Bit(kComputeShader));
+        return StageIds(Bit(Stage::ComputeShader));
     }
     if (op == "DispatchRays")
     {
-        return StageIds(Bit(kRayGen) | Bit(kTraversal) | Bit(kHitMiss));
+        return StageIds(Bit(Stage::RayGen) | Bit(Stage::Traversal) | Bit(Stage::HitMiss));
     }
     if (op == "BuildBlas" || op == "BuildTlas")
     {
-        return StageIds(Bit(kAccelBuild));
+        return StageIds(Bit(Stage::AccelBuild));
     }
     if (op.starts_with("Copy"))
     {
-        return StageIds(Bit(kCopy));
+        return StageIds(Bit(Stage::Copy));
     }
     if (op == "ClearTexture")
     {
-        return StageIds(Bit(kClear));
+        return StageIds(Bit(Stage::Clear));
     }
     if (op == "Barrier")
     {
-        return StageIds(Bit(kSync));
+        return StageIds(Bit(Stage::Sync));
     }
     if (op == "Wait")
     {
-        return StageIds(Bit(kWait));
+        return StageIds(Bit(Stage::Wait));
     }
     if (op == "BeginRenderPass")
     {
         // Its draws are recorded on the native command list (the editor's UI), not captured.
-        return StageIds(Bit(kInputAssembly) | Bit(kVertex) | Bit(kRaster) | Bit(kPixel) | Bit(kOutputMerger));
+        return StageIds(Bit(Stage::InputAssembly) | Bit(Stage::Vertex) | Bit(Stage::Raster) | Bit(Stage::Pixel) |
+                        Bit(Stage::OutputMerger));
     }
     if (op == "EndRenderPass")
     {
-        return StageIds(Bit(kOutputMerger));
+        return StageIds(Bit(Stage::OutputMerger));
     }
-    return StageIds(Bit(kFrontEnd));
+    return StageIds(Bit(Stage::FrontEnd));
 }
 
 std::vector<std::string_view> AccessStages(rhi::Access access)
 {
     using rhi::Access;
-    constexpr u32 kNonPixelShaders = Bit(kComputeShader) | Bit(kRayGen) | Bit(kHitMiss);
-    constexpr u32 kAllShaders = kNonPixelShaders | Bit(kVertex) | Bit(kPixel);
+    constexpr u32 kNonPixelShaders = Bit(Stage::ComputeShader) | Bit(Stage::RayGen) | Bit(Stage::HitMiss);
+    constexpr u32 kAllShaders = kNonPixelShaders | Bit(Stage::Vertex) | Bit(Stage::Pixel);
     u32 mask = 0;
     auto add = [&](Access states, u32 stages) { mask |= Any(access & states) ? stages : 0u; };
-    add(Access::CopySrc | Access::CopyDst, Bit(kCopy));
-    add(Access::VertexOrIndex, Bit(kInputAssembly));
+    add(Access::CopySrc | Access::CopyDst, Bit(Stage::Copy));
+    add(Access::VertexOrIndex, Bit(Stage::InputAssembly));
     add(Access::Constant, kAllShaders);
-    add(Access::SRVGraphics, Bit(kVertex) | Bit(kPixel));
+    add(Access::SRVGraphics, Bit(Stage::Vertex) | Bit(Stage::Pixel));
     add(Access::SRVCompute | Access::UAVCompute, kNonPixelShaders);
-    add(Access::UAVGraphics, Bit(kPixel));
-    add(Access::RenderTarget | Access::DepthRead | Access::DepthWrite, Bit(kOutputMerger));
-    add(Access::IndirectArgs, Bit(kFrontEnd));
-    add(Access::AccelStructRead, Bit(kTraversal));
-    add(Access::AccelStructWrite, Bit(kAccelBuild));
-    add(Access::Present, Bit(kPresent));
-    add(Access::HostRead, Bit(kHost));
+    add(Access::UAVGraphics, Bit(Stage::Pixel));
+    add(Access::RenderTarget | Access::DepthRead | Access::DepthWrite, Bit(Stage::OutputMerger));
+    add(Access::IndirectArgs, Bit(Stage::FrontEnd));
+    add(Access::AccelStructRead, Bit(Stage::Traversal));
+    add(Access::AccelStructWrite, Bit(Stage::AccelBuild));
+    add(Access::Present, Bit(Stage::Present));
+    add(Access::HostRead, Bit(Stage::Host));
     return StageIds(mask);
 }
 
@@ -339,9 +340,13 @@ json::Value SplitCommandsByPass(const std::vector<std::string>& lines, const jso
         }
         if (op == "EndEvent")
         {
-            if (state.depth > 0 && --state.depth == 0)
+            if (state.depth > 0)
             {
-                state.pass = -1;
+                --state.depth;
+                if (state.depth == 0)
+                {
+                    state.pass = -1;
+                }
             }
             continue;
         }

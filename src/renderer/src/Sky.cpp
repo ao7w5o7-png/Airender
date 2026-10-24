@@ -298,8 +298,10 @@ Spectrum ComputeMultipleScattering(const Tables& tables, double r, double muSun)
     std::array<double, kBins> fms{};
     for (int i = 0; i < kDirections * kDirections; ++i)
     {
-        const double cosTheta = 1.0 - 2.0 * ((double(i / kDirections) + 0.5) / kDirections);
-        const double phi = 2.0 * kPi * ((double(i % kDirections) + 0.5) / kDirections);
+        const int row = i / kDirections;
+        const int column = i % kDirections;
+        const double cosTheta = 1.0 - 2.0 * ((double(row) + 0.5) / kDirections);
+        const double phi = 2.0 * kPi * ((double(column) + 0.5) / kDirections);
         const double sinTheta = std::sqrt(std::max(0.0, 1.0 - cosTheta * cosTheta));
         // Point at (0, r, 0), sun in the xy plane, direction w.
         const double wx = sinTheta * std::cos(phi);

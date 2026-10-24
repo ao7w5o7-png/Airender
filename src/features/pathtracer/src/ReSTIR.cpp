@@ -170,8 +170,9 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
 
     // A compute pass over the image that reads `reads`, writes `writes` (and the accumulation when
     // `shades`), with `bind` filling the pass's own buffer indices.
-    auto addPass = [&](const char* name, rhi::PipelineHandle pipeline, u32 flags, std::vector<rdg::BufferRef> reads,
-                       std::vector<rdg::BufferRef> writes, bool shades, auto bind)
+    auto addPass = [&](const char* name, rhi::PipelineHandle pipeline, u32 flags,
+                       const std::vector<rdg::BufferRef>& reads, const std::vector<rdg::BufferRef>& writes, bool shades,
+                       auto bind)
     {
         gpu::ReSTIRConstants constants = base;
         constants.flags = flags;

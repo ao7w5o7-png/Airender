@@ -1,6 +1,7 @@
 // The path tracer's estimator (Integrator.hlsli) run on the CPU against analytic answers.
 
 #include "TestFramework.h"
+#include "TestHelpers.h"
 
 #include "air/features/pathtracer/ReferenceRenderer.h"
 
@@ -155,7 +156,7 @@ TEST(Integrator_WhiteFurnaceSpheresMatchEnvironment)
 TEST(Integrator_VeachMisNeeAndBsdfSamplingAgree)
 {
     TaskSystem tasks(4);
-    const renderer::SceneDesc scene = *renderer::MakeBuiltinScene("veach_mis");
+    const renderer::SceneDesc scene = airtest::BuiltinScene("veach_mis");
     pt::ReferenceSettings settings = Settings(tasks, 128, 4);
     settings.width = 48;
     settings.height = 27;
@@ -187,7 +188,7 @@ TEST(Integrator_VeachMisNeeAndBsdfSamplingAgree)
 TEST(Integrator_SunNeeAndBsdfSamplingAgree)
 {
     TaskSystem tasks(4);
-    renderer::SceneDesc scene = *renderer::MakeBuiltinScene("sunset");
+    renderer::SceneDesc scene = airtest::BuiltinScene("sunset");
     scene.sky.sunElevation = 40.0f;
     scene.sky.sunAngularRadius = 12.0f;
     pt::ReferenceSettings settings = Settings(tasks, 256, 3);
@@ -205,7 +206,7 @@ TEST(Integrator_SunNeeAndBsdfSamplingAgree)
 TEST(Integrator_CloudsVanishInAWhiteFurnace)
 {
     TaskSystem tasks(4);
-    renderer::SceneDesc scene = *renderer::MakeBuiltinScene("cumulus");
+    renderer::SceneDesc scene = airtest::BuiltinScene("cumulus");
     scene.camera.pitch = 0.75f; // only sky and clouds in view
     pt::ReferenceSettings settings = Settings(tasks, 16, 4);
     settings.furnace = true;
@@ -234,7 +235,7 @@ TEST(Integrator_CloudsVanishInAWhiteFurnace)
 TEST(Integrator_CloudSunNeeAndPhaseSamplingAgree)
 {
     TaskSystem tasks(4);
-    renderer::SceneDesc scene = *renderer::MakeBuiltinScene("cumulus");
+    renderer::SceneDesc scene = airtest::BuiltinScene("cumulus");
     scene.camera.pitch = 0.6f;
     scene.sky.sunElevation = 50.0f;
     scene.sky.sunAngularRadius = 12.0f;

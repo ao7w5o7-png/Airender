@@ -19,6 +19,7 @@
 //
 // `render` fails (exit 1) if any frame produced a validation error.
 
+#include "air/core/Assert.h"
 #include "air/core/Image.h"
 #include "air/core/Json.h"
 #include "air/core/Log.h"
@@ -141,7 +142,9 @@ int CommandScenes()
     json::Value out = json::Value::MakeArray();
     for (const std::string& name : renderer::BuiltinSceneNames())
     {
-        const renderer::SceneDesc desc = *renderer::MakeBuiltinScene(name);
+        const std::optional<renderer::SceneDesc> found = renderer::MakeBuiltinScene(name);
+        AIR_CHECK(found.has_value(), "scene '{}' is listed but cannot be made", name);
+        const renderer::SceneDesc& desc = *found;
         u64 triangles = 0;
         u32 emissive = 0;
         for (const renderer::Instance& instance : desc.instances)

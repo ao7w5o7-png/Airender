@@ -5,6 +5,8 @@
 
 #include "air/renderer/Scene.h"
 
+#include "air/core/Assert.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -239,6 +241,7 @@ struct Builder
         {
             mid = items.size() / 2; // no useful split (one bucket, coincident lights): halve
         }
+        AIR_CHECK(depth < kMaxDepth, "light tree: {} lights are too many for its 64-bit trails", lights.size());
         const Bounds first = Build(items.subspan(0, mid), trail, depth + 1);
         const u32 second = u32(nodes.size());
         const Bounds last = Build(items.subspan(mid), trail | (u64(1) << depth), depth + 1);

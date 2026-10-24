@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 
 using namespace air;
 using namespace airtest;
@@ -82,8 +81,9 @@ TEST(Scene_TestScenesContainWhatTheyTest)
     // Generated with a fixed seed: building twice gives the same scene.
     const renderer::SceneDesc again = *renderer::MakeBuiltinScene("sphere_field");
     EXPECT(again.instances.size() == field.instances.size());
-    EXPECT(std::memcmp(again.instances.back().transform, field.instances.back().transform,
-                       sizeof(field.instances.back().transform)) == 0);
+    const auto& a = again.instances.back().transform;
+    const auto& b = field.instances.back().transform;
+    EXPECT(std::equal(&a[0][0], &a[0][0] + 12, &b[0][0]));
 }
 
 // Only emissive instances are in the light list, and FirstLightIndices() indexes it consistently;

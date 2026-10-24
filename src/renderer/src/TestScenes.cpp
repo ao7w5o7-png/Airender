@@ -31,7 +31,8 @@ void AddSky(SceneDesc& scene, float elevationDegrees, float azimuthDegrees, floa
 }
 
 // Axis-aligned box centred at `center`.
-Instance& AddBox(SceneDesc& scene, std::string name, float3 center, float3 halfExtent, u32 material, float yaw = 0.0f)
+Instance& AddBox(SceneDesc& scene, const std::string& name, float3 center, float3 halfExtent, u32 material,
+                 float yaw = 0.0f)
 {
     Instance& instance = AddInstance(scene, name, AddMesh(scene, MakeBox(name, halfExtent)), material);
     SetTransform(instance, center, yaw);
@@ -223,7 +224,12 @@ SceneDesc MakeSphereField()
     for (u32 i = 0; i < 28; ++i)
     {
         const float kind = rng.Next();
-        const float3 tint(rng.Range(0.2f, 1.0f), rng.Range(0.2f, 1.0f), rng.Range(0.2f, 1.0f));
+        // One draw per statement: arguments are unsequenced, and compilers evaluate them in different
+        // orders (these are in the order MSVC and GCC drew them).
+        const float blue = rng.Range(0.2f, 1.0f);
+        const float green = rng.Range(0.2f, 1.0f);
+        const float red = rng.Range(0.2f, 1.0f);
+        const float3 tint(red, green, blue);
         Material m{.name = std::format("Surface{}", i)};
         if (kind < 0.45f)
         {
@@ -377,8 +383,10 @@ SceneDesc MakeManyLights()
     }
     for (u32 i = 0; i < 300; ++i)
     {
-        SetTransform(AddInstance(scene, std::format("Led{}", i), led, ledMaterials[rng.NextU32() % 12]),
-                     {rng.Range(x0 + 0.5f, x1 - 0.5f), 0.04f, rng.Range(z0 + 1.0f, z1 - 1.0f)});
+        const float x = rng.Range(x0 + 0.5f, x1 - 0.5f); // one draw per statement, as in MakeSphereField
+        const float z = rng.Range(z0 + 1.0f, z1 - 1.0f);
+        const u32 material = ledMaterials[rng.NextU32() % 12];
+        SetTransform(AddInstance(scene, std::format("Led{}", i), led, material), {x, 0.04f, z});
     }
     LookAt(scene.camera, {0.0f, 1.7f, 2.5f}, {0.0f, 1.4f, -20.0f});
     scene.camera.verticalFov = 0.9f;
