@@ -32,7 +32,7 @@ struct BrickReader
 
     const renderer::VolumeBricks::Level& Level(VolumeBrickLevel l) const { return volume.bricks.levels[l.indirection]; }
     uint VolumeIndirectionLoad(VolumeBrickLevel l, uint index) const { return Level(l).indirection[index]; }
-    uint VolumeOccupancyLoad(VolumeBrickLevel l, uint index) const { return Level(l).occupancy[index]; }
+    uint VolumeDistanceLoad(VolumeBrickLevel l, uint index) const { return Level(l).distance[index]; }
     uint VolumeBrickWordLoad(VolumeBrickLevel l, uint index) const { return Level(l).bricks[index]; }
     uint VolumeRangeLoad(VolumeBrickLevel l, uint brick) const { return Level(l).ranges[brick]; }
     float VolumeDensitySample(VolumeData v, float3 uvw) const

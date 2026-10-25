@@ -1171,9 +1171,10 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
 - *Bricks* (`renderer::BuildVolumeBricks`, `shader/VolumeBricks.hlsli`): each volume at three levels of
   detail (2^l voxels averaged), cut into bricks of 4^3 voxels stored as 5^3 4-bit codes (the apron
   voxel makes trilinear filtering local to a brick) scaled between the brick's half-float minimum and
-  maximum, an indirection table (empty bricks hold none) and occupancy words of 4 x 4 x 2 bricks, so
-  a march skips an empty brick, or a whole empty word, at once. The plume keeps 2177 of 9537 bricks;
-  its densities read back within 0.0003 on average of the path tracer's texture.
+  maximum, an indirection table (empty bricks hold none) and per brick position its Chebyshev
+  distance to the nearest allocated brick (8 bits, counted up to 15), so that a march leaves all the
+  empty bricks closer than that at once. The plume keeps 2177 of 9537 bricks; its densities read back
+  within 0.0003 on average of the path tracer's texture.
 - *Occlusion grid*: per 8^3 voxels the volume's own mean transmittance over 32 directions, marched at
   the coarsest level with diffusion's effective extinction, sigma_t sqrt(3 (1 - albedo)(1 - g
   albedo)): light that scatters on its way in reaches deeper than Beer's law says.
@@ -1224,8 +1225,12 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
   covers 8 x 8 pixels, its lanes in Morton order; it gathers the volumes its rays cross in front of
   their surfaces and marches the first four. A ray steps from the first box it enters to its surface,
   `volumeStep` (1) voxels of `volumeLevel` (0) of the smallest voxel among its volumes, from a jitter
-  in [0, 1) (its blue-noise rank moved on by the golden ratio every frame), and skips what the
-  occupancy says is empty. Each step: the volumes' extinction and scattering, the sun's light
+  in [0, 1) (its blue-noise rank moved on by the golden ratio every frame), and jumps over what the
+  bricks' distances say is empty. The thread group reads its volumes and their level into groupshared
+  memory once (`LoadRayVolume`, `LoadRayLevel`), and a step walks a volume's tables once
+  (`BrickSample`: the indirection, then the brick or, where it is empty, the distance); a ray chooses
+  each light group's map once (`MarchChooseMaps`), and volumes of one anisotropy share their phase
+  function's evaluation. Each step: the volumes' extinction and scattering, the sun's light
   through its map, each light group's (exactly per triangle for up to 8 triangles, by their solid
   angle, Van Oosterom and Strackee, and the phase function at their centre; else a sphere or a disc of
   its area) through its maps, and the probes' light (the harmonics convolved with Henyey-Greenstein,
@@ -1234,11 +1239,24 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
   (energy conserving); the ray ends where the transmittance falls below 1e-3. Over the surface: the
   volumes' light plus the surface's samples times their transmittance, the air (aerial perspective)
   fused at the depth the volumes' light comes from (its transmittance-weighted mean).
-- **Adaptive sampling groups** (`volumeAdaptive`): once every pixel of a wave has less than
-  `volumeShareBelow2` (0.3) of the light from behind left, each 2 x 2 block lights a block of 4 steps
-  with one step per pixel and every pixel takes the light of its step's lane (mixed with the next
-  one's by its jitter); below `volumeShareBelow4` (0.1), 4 x 4 blocks and 16 steps. Densities, depths
-  and transmittances stay every pixel's own. The wave decides, so all its lanes stay in the loop.
+- **Adaptive sampling groups** (`volumeAdaptive`, `MarchRayShared`): lighting is most of a step's cost
+  (70-85% here, 80-85% in Mueller's measurements), so a wave lights its steps together where
+  neighbouring pixels would light them alike. It marches one grid of steps (from its rays'
+  nearest entry, at their smallest step, so that a block's steps lie at the same depths on all its
+  rays) and decides per block of steps. Once every ray it still marches has less than
+  `volumeShareBelow2` (0.3) of the light from behind left (Mueller's criterion), or where a voxel at
+  the block's depth covers `volumeShareFootprint2` (2) pixels or more (volumes close to the camera,
+  whose pixels are many and lie within a voxel of each other), each 2 x 2 block of pixels lights 4
+  steps, one per pixel at its own ray's depth, and every pixel's step takes the light of the pixel
+  that lit it; below `volumeShareBelow4` (0.1) or from `volumeShareFootprint4` (4) pixels per voxel,
+  4 x 4 blocks and 16 steps. A pixel lights per unit of scattering (`MarchLightAt`, valid in the empty
+  parts of a box too), and only once a step of the block scatters, so empty space costs no light.
+  Which pixel lights which step turns with a hash of the block, its first step and the frame: with a
+  fixed order the front of the smoke, which shows most, took its light from one side, and wherever the
+  light changes across the image it was biased (-5% over the embers at night). The tiles move by an R2
+  offset every frame, so that blocks do not stay in place (else the converged light stepped every 4
+  pixels). Densities, depths and transmittances stay every pixel's own; the wave skips emptiness where
+  all its rays are empty, and all its lanes stay in the loop.
 - **Debug views** 11 (march steps per pixel, `debugScale` steps to the top of the Turbo colormap),
   12 (sampling rate: blue every pixel, green 2 x 2, red 4 x 4) and 13 (volumes per ray). Direct-only
   (8) and indirect-only (9) leave the probes' and the lights' light out of the march respectively.
@@ -1247,8 +1265,8 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
 
 Parameters: `volumeMarch`, `volumeStep`, `volumeLevel`, `volumeShadowSize` (256), `volumeShadowLevel`,
 `volumeShadowStep`, `volumeLights`, `volumeLightOrigins`, `volumeAdaptive`, `volumeShareBelow2`,
-`volumeShareBelow4`, `volumeAir`, `volumeShadowsEveryFrame` (render the maps every frame, to time
-them). Status: `volumeMarch` (whether it runs), `volumeMarchLights` (light groups with maps).
+`volumeShareBelow4`, `volumeShareFootprint2`, `volumeShareFootprint4`, `volumeAir`,
+`volumeShadowsEveryFrame` (render the maps every frame, to time them). Status: `volumeMarch` (whether it runs), `volumeMarchLights` (light groups with maps).
 
 **CPU twin** (`pt::RenderVolumeMarchReference`, `VolumeMarchReference.cpp`; `aircli reference
 --volume-march [--frames N] [--probe-frames N] [--volume-step S] [--volume-shadow-size N]
@@ -1273,6 +1291,9 @@ Validation (`src/features/pathtracer/tests/VolumeMarchTests.cpp`, `tests/MomentT
   the reconstruction's own error.
 - The embers' four maps against the transmittance towards their four points: 0.027 on average; above
   1.6 m they let through 0.39 of the light, the embers' centre alone 0.025.
+- Under adaptive sampling, the light a pixel lights for its neighbours times the scattering of their
+  step is that step's own light where it is in smoke: within 3e-7 over 370 points of the `braziers`
+  (three plumes of one anisotropy, the sun and four light groups).
 - White furnace: the plume vanishes, 0.18000 at every pixel.
 - Against tracked volumes on the CPU (24 x 24, the plume close up): in the sun from its side -2.9%, at
   night over its embers +0.9% (above the embers). With the probes on a lattice of 4^3 the first was
@@ -1284,17 +1305,25 @@ Validation (`src/features/pathtracer/tests/VolumeMarchTests.cpp`, `tests/MomentT
 - GPU (`volumeMarch=2`, accumulating 512 frames of 4 spp, 160 x 90) against the tracked CPU reference
   (512 spp): `smoke` -0.01% (the plume +0.55%, relative MSE 0.006), `braziers` +1.1% (the plumes
   +1.4%); the GPU and the CPU twin agree within 0.3% in the plume.
+- Adaptive sampling against the full rate (`volumeAdaptive=0`; GPU, 1920 x 1080, 256 frames
+  accumulated, where a voxel covers about 5 pixels): the image means within 0.04% in the sun and at
+  night; per 8 x 8 pixels at most 2.1%, 99% of them within 0.6-1.5%, where hard shadow edges on the
+  smoke (a wall's) soften by up to 3 pixels. From 24 m away, where nothing shares by footprint, within
+  0.25% everywhere.
 
 Cost (RTX 5070, 1920 x 1080, 1 spp, `accumulate=0`):
 
 | Scene | Tracked | Trace | March | Probes (async) | Busy |
 |---|---|---|---|---|---|
-| `smoke` | 5.3 ms | 2.0 ms | 0.92 ms | 0.41 ms | 3.0 ms |
-| `braziers` | 10.1 ms | 2.4 ms | 3.5 ms | 0.94 ms | 6.0 ms |
+| `smoke` | 5.3 ms | 1.9 ms | 0.48 ms | 0.44 ms | 2.4 ms |
+| `braziers` | 10.1 ms | 2.4 ms | 1.19 ms | 0.92 ms | 3.6 ms |
 
-Adaptive sampling saves a sixth of the march in `smoke` (1.11 ms without) for an image within 0.04%
-of the full rate. Four maps per ember bed cost the `braziers` march 0.14 ms over one map;
-reading all four at every step instead of one per frame cost 1.8 ms.
+Without adaptive sampling the march takes 0.86 ms (`smoke`) and 3.4 ms (`braziers`), 0.83 and 2.7 ms
+sharing by transmittance alone: in these close-ups (a voxel covers about 5 pixels) the footprint does
+most of it. Without any lighting it takes 0.30 and 0.61 ms. The brick distances, the volumes in
+groupshared memory and one walk of the tables per step took a tenth off. Four maps per ember bed
+cost the `braziers` march 0.03 ms over one map. Mueller reports 0.63-1.82 ms for the main view of
+three production scenes at 1080p on an RTX 5060 Ti (the shadows on async compute aside).
 
 Not modelled: the light the volumes scatter onto surfaces (a wall next to the glowing plume at night
 is 8-11% darker than tracked), volumes seen in reflections and refractions (BSDF-sampled rays from

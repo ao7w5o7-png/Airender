@@ -107,14 +107,20 @@ public:
                         "(1: its centre only)",
                         1, kMaxLightOrigins);
         mParameters.Add("volumeAdaptive", &march.adaptive,
-                        "Real-time volumes: adaptive sampling groups, waves deep in smoke share their lighting over "
-                        "2 x 2 or 4 x 4 pixels");
+                        "Real-time volumes: adaptive sampling groups, waves deep in smoke or close to the camera share "
+                        "their lighting over 2 x 2 or 4 x 4 pixels");
         mParameters.Add("volumeShareBelow2", &march.shareBelow2,
                         "Real-time volumes: a wave's transmittance below which its 2 x 2 pixels share lighting", 0.0f,
                         1.0f);
         mParameters.Add("volumeShareBelow4", &march.shareBelow4,
                         "Real-time volumes: a wave's transmittance below which its 4 x 4 pixels share lighting", 0.0f,
                         1.0f);
+        mParameters.Add("volumeShareFootprint2", &march.shareFootprint2,
+                        "Real-time volumes: pixels a voxel covers from which 2 x 2 pixels share lighting", 0.5f,
+                        1000.0f);
+        mParameters.Add("volumeShareFootprint4", &march.shareFootprint4,
+                        "Real-time volumes: pixels a voxel covers from which 4 x 4 pixels share lighting", 0.5f,
+                        1000.0f);
         mParameters.Add("volumeAir", &march.air,
                         "Real-time volumes: the aerial perspective dims them at the depth their light comes from");
         mParameters.Add(

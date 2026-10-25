@@ -756,7 +756,7 @@ void Scene::UpdateVolumes()
             l = source.data;
             const std::string name = std::format("{}.Volume{}.Level{}", mDesc.name, i, level);
             l.indirection = upload(source.indirection, name + ".Indirection");
-            l.occupancy = upload(source.occupancy, name + ".Occupancy");
+            l.distance = upload(source.distance, name + ".Distance");
             l.bricks = upload(source.bricks, name + ".Bricks");
             l.ranges = upload(source.ranges, name + ".Ranges");
         }

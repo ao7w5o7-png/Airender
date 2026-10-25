@@ -81,6 +81,71 @@ Encoded EncodeBrick(const VolumeGrid& grid, u32 bx, u32 by, u32 bz)
     return out;
 }
 
+// The Chebyshev distance in bricks from every brick position to the nearest allocated brick, up to
+// kBrickReach (VolumeBrickLevel::distance), packed 4 to a word: the distance along x within each row,
+// then along y the smallest max(|dy|, that) within each column, then the same along z.
+std::vector<u32> BrickDistances(const std::vector<u32>& indirection, u32 sizeX, u32 sizeY, u32 sizeZ)
+{
+    constexpr u32 kFar = gpu::kBrickReach;
+    std::vector<u8> d(indirection.size());
+    detail::ParallelFor(int(sizeY * sizeZ),
+                        [&](int row)
+                        {
+                            const size_t first = size_t(row) * sizeX;
+                            u32 run = kFar;
+                            for (u32 x = 0; x < sizeX; ++x)
+                            {
+                                run = indirection[first + x] != gpu::kNoBrick ? 0 : std::min(run + 1, kFar);
+                                d[first + x] = u8(run);
+                            }
+                            run = kFar;
+                            for (u32 x = sizeX; x-- > 0;)
+                            {
+                                run = indirection[first + x] != gpu::kNoBrick ? 0 : std::min(run + 1, kFar);
+                                d[first + x] = u8(std::min<u32>(d[first + x], run));
+                            }
+                        });
+    // Along one axis of `size` positions `stride` apart, for the lines starting at start(line).
+    auto pass = [&](u32 size, size_t stride, int lines, auto start)
+    {
+        detail::ParallelFor(lines,
+                            [&](int line)
+                            {
+                                const size_t first = start(line);
+                                std::vector<u8> in(size);
+                                for (u32 i = 0; i < size; ++i)
+                                {
+                                    in[i] = d[first + i * stride];
+                                }
+                                for (u32 i = 0; i < size; ++i)
+                                {
+                                    u32 best = in[i];
+                                    for (u32 r = 1; r < best; ++r)
+                                    {
+                                        if (i >= r)
+                                        {
+                                            best = std::min(best, std::max<u32>(r, in[i - r]));
+                                        }
+                                        if (i + r < size)
+                                        {
+                                            best = std::min(best, std::max<u32>(r, in[i + r]));
+                                        }
+                                    }
+                                    d[first + i * stride] = u8(best);
+                                }
+                            });
+    };
+    pass(sizeY, sizeX, int(sizeX * sizeZ),
+         [&](int line) { return size_t(line / int(sizeX)) * sizeY * sizeX + size_t(line % int(sizeX)); });
+    pass(sizeZ, size_t(sizeX) * sizeY, int(sizeX * sizeY), [](int line) { return size_t(line); });
+    std::vector<u32> words((d.size() + 3) / 4, 0u);
+    for (size_t i = 0; i < d.size(); ++i)
+    {
+        words[i >> 2] |= u32(d[i]) << ((i & 3) * 8);
+    }
+    return words;
+}
+
 VolumeBricks::Level BuildLevel(const VolumeGrid& grid, float3 origin, float voxelSize)
 {
     VolumeBricks::Level out;
@@ -93,9 +158,6 @@ VolumeBricks::Level BuildLevel(const VolumeGrid& grid, float3 origin, float voxe
     l.bricksX = (l.voxelsX + gpu::kBrickVoxels - 1) / gpu::kBrickVoxels;
     l.bricksY = (l.voxelsY + gpu::kBrickVoxels - 1) / gpu::kBrickVoxels;
     l.bricksZ = (l.voxelsZ + gpu::kBrickVoxels - 1) / gpu::kBrickVoxels;
-    l.wordsX = (l.bricksX + gpu::kOccupancyX - 1) / gpu::kOccupancyX;
-    l.wordsY = (l.bricksY + gpu::kOccupancyY - 1) / gpu::kOccupancyY;
-    l.wordsZ = (l.bricksZ + gpu::kOccupancyZ - 1) / gpu::kOccupancyZ;
     const size_t positions = size_t(l.bricksX) * l.bricksY * l.bricksZ;
     std::vector<Encoded> encoded(positions);
     detail::ParallelFor(int(l.bricksZ),
@@ -112,7 +174,6 @@ VolumeBricks::Level BuildLevel(const VolumeGrid& grid, float3 origin, float voxe
                         });
     // Bricks in the order of their positions, so the layout does not depend on the threads.
     out.indirection.assign(positions, gpu::kNoBrick);
-    out.occupancy.assign(size_t(l.wordsX) * l.wordsY * l.wordsZ, 0u);
     for (u32 bz = 0; bz < l.bricksZ; ++bz)
     {
         for (u32 by = 0; by < l.bricksY; ++by)
@@ -128,14 +189,11 @@ VolumeBricks::Level BuildLevel(const VolumeGrid& grid, float3 origin, float voxe
                 out.indirection[position] = u32(out.ranges.size());
                 out.ranges.push_back(e.range);
                 out.bricks.insert(out.bricks.end(), std::begin(e.words), std::end(e.words));
-                const size_t word = (size_t(bz / gpu::kOccupancyZ) * l.wordsY + by / gpu::kOccupancyY) * l.wordsX +
-                                    bx / gpu::kOccupancyX;
-                out.occupancy[word] |= 1u << ((bx % gpu::kOccupancyX) + gpu::kOccupancyX * (by % gpu::kOccupancyY) +
-                                              gpu::kOccupancyX * gpu::kOccupancyY * (bz % gpu::kOccupancyZ));
             }
         }
     }
     l.brickCount = u32(out.ranges.size());
+    out.distance = BrickDistances(out.indirection, l.bricksX, l.bricksY, l.bricksZ);
     return out;
 }
 

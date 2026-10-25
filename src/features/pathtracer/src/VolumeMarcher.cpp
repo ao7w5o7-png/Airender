@@ -311,6 +311,8 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
         (mSettings.adaptive ? gpu::kMarchAdaptive : 0u);
     c.shareBelow2 = mSettings.shareBelow2;
     c.shareBelow4 = std::min(mSettings.shareBelow4, mSettings.shareBelow2);
+    c.shareFootprint2 = mSettings.shareFootprint2;
+    c.shareFootprint4 = std::max(mSettings.shareFootprint4, mSettings.shareFootprint2);
     c.view = debugView;
     c.samplesPerPixel = samplesPerPixel;
     c.probeVolumes = volumes;
@@ -332,8 +334,9 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
             c.probes = ctx.SRV(probes);
             ctx.cmd.SetPipeline(pipeline);
             ctx.cmd.PushConstants(&c, sizeof(c));
-            ctx.cmd.Dispatch((width + gpu::kMarchTile - 1) / gpu::kMarchTile,
-                             (height + gpu::kMarchTile - 1) / gpu::kMarchTile, 1);
+            // Tiles over the image moved by up to kMarchTile - 1 pixels (VolumeMarch.hlsl moves them every frame).
+            constexpr u32 kReach = 2 * gpu::kMarchTile - 2;
+            ctx.cmd.Dispatch((width + kReach) / gpu::kMarchTile, (height + kReach) / gpu::kMarchTile, 1);
         });
 }
 

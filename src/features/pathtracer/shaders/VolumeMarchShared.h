@@ -116,9 +116,12 @@ struct VolumeMarchConstants
     float viewScale;
     uint samplesPerPixel; // of the frame's trace, which the march's light is counted for
     uint probeVolumes;
+    float shareFootprint2; // adaptive sampling: lighting shared over 2 x 2 where a voxel covers this many pixels
+    float shareFootprint4; // ... over 4 x 4
 };
 
 #ifdef __cplusplus
+static_assert(1 + kMaxVolumeLights * kMaxLightOrigins <= 256, "the march keeps map indices in 8 bits");
 static_assert(sizeof(VolumeShadowsData) == 32);
 static_assert(kVolumeProbes % kProbesPerGroup == 0 && kProbesPerGroup * kVolumeProbeRays == 64);
 static_assert(sizeof(VolumeShadowConstants) <= 128, "push constants are limited to 128 bytes");

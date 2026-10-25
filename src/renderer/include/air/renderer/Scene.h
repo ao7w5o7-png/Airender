@@ -264,7 +264,7 @@ private:
         gpu::VolumeData data{}; // enabled == 0: none (disabled, or its file could not be read)
         rhi::TextureHandle density;
         rhi::BufferHandle majorants;
-        // The bricks: per level its indirection, occupancy, bricks and ranges, and the occlusion
+        // The bricks: per level its indirection, distances, bricks and ranges, and the occlusion
         // texture; `march` and `levels` with their bindless indices (march.levels is set with the table).
         std::vector<rhi::BufferHandle> brickBuffers;
         rhi::TextureHandle ao;

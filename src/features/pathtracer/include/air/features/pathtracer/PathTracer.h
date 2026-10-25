@@ -101,10 +101,13 @@ struct VolumeMarchSettings
     u32 lightOrigins = kMaxLightOrigins;
     bool air = true; // the aerial perspective dims the volumes at the depth their light comes from
     // Adaptive sampling groups: a wave of pixels whose transmittance is below shareBelow2 lights each
-    // step once per 2 x 2 pixels, below shareBelow4 once per 4 x 4 (VolumeMarch.hlsl).
+    // step once per 2 x 2 pixels, below shareBelow4 once per 4 x 4 (VolumeMarch.hlsl); so does one
+    // whose steps lie where a voxel covers shareFootprint2 (shareFootprint4) pixels or more.
     bool adaptive = true;
     float shareBelow2 = 0.3f;
     float shareBelow4 = 0.1f;
+    float shareFootprint2 = 2.0f;
+    float shareFootprint4 = 4.0f;
     // Render the shadow maps every frame (to measure them) instead of when what they show changed.
     bool everyFrame = false;
 

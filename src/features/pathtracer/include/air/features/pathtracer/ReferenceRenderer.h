@@ -79,6 +79,13 @@ public:
     // scatters along direction d, per unit scattering coefficient, with a Henyey-Greenstein phase
     // function of `anisotropy`, before shadows (VolumeMarch.hlsli's GroupInScattering).
     renderer::float3 GroupInScattering(u32 group, renderer::float3 x, renderer::float3 d, float anisotropy) const;
+    // The direct light (the sun's and the light groups', through map `sample` of each) that the volumes
+    // at x scatter along direction d per unit length: as a step of the march lights itself
+    // (MarchDirect), and as a pixel lights it for its neighbours under adaptive sampling, per unit of
+    // scattering (MarchLightAt) times the scattering at x; and that scattering.
+    renderer::float3 StepLight(renderer::float3 x, renderer::float3 d, u32 sample) const;
+    renderer::float3 SharedStepLight(renderer::float3 x, renderer::float3 d, u32 sample) const;
+    float Scattering(renderer::float3 x) const;
 
 private:
     struct State;

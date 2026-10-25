@@ -55,7 +55,10 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   measure the method against tracked volumes with its CPU twin, `aircli reference --volume-march`
   (the same shader code; `--frames` frames of `--spp` paths), and the GPU against both with
   `--set pathtracer.accumulate=1 --set pathtracer.volumeMarch=2`. Debug views 11 / 12 / 13 show the
-  march's steps, adaptive sampling rate and volumes per ray.
+  march's steps, adaptive sampling rate and volumes per ray. Adaptive sampling (lighting shared over
+  2 x 2 / 4 x 4 pixels) has no CPU twin: compare the GPU's accumulated image at the full output size
+  (it shares by the pixels a voxel covers) with `--set pathtracer.volumeAdaptive=0`, per 8 x 8 block.
+  Time with `--set pathtracer.spp=1` and enough frames that the GPU's clocks have risen.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.

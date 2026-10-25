@@ -67,7 +67,7 @@ struct VolumeBricks
     {
         gpu::VolumeBrickLevel data{};
         std::vector<u32> indirection; // bricksX * bricksY * bricksZ
-        std::vector<u32> occupancy;   // wordsX * wordsY * wordsZ
+        std::vector<u32> distance;    // per brick position, 4 per word (VolumeBrickLevel::distance)
         std::vector<u32> bricks;      // kBrickWords per brick
         std::vector<u32> ranges;      // one per brick
     };

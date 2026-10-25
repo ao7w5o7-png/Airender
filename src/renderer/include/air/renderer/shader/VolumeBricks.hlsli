@@ -1,7 +1,7 @@
 // Lookups in a volume's bricks (VolumeBricksShared.h), shared by C++ and HLSL: the density at a
 // point, and whether the bricks around a point are empty (and how far that emptiness reaches) so a
 // ray march can skip it. The including code defines, before including this file:
-//   uint VolumeIndirectionLoad(VolumeBrickLevel l, uint index), VolumeOccupancyLoad(...),
+//   uint VolumeIndirectionLoad(VolumeBrickLevel l, uint index), VolumeDistanceLoad(...),
 //   uint VolumeBrickWordLoad(VolumeBrickLevel l, uint index), VolumeRangeLoad(VolumeBrickLevel l, uint brick)
 // (StructuredBuffer reads on the GPU, the tables of renderer::VolumeBricks on the CPU).
 #ifndef AIR_RENDERER_VOLUME_BRICKS_HLSLI
@@ -16,8 +16,21 @@ float BrickCode(VolumeBrickLevel l, uint brick, uint voxel)
     return float((word >> ((voxel & 7u) * 4u)) & 15u);
 }
 
-// The density at world point p: trilinear over the level's voxels, zero outside them.
-float BrickDensity(VolumeBrickLevel l, float3 p)
+// Where a lookup at a point reads a level: the voxel of the lowest of the 8 it reads and the weights
+// of the next ones.
+struct BrickCell
+{
+    uint ix;
+    uint iy;
+    uint iz;
+    float tx;
+    float ty;
+    float tz;
+};
+
+// The cell of world point p; false where the lookup reaches outside the voxels (the padded grid's
+// outer voxels are zero: lookups that reach no further in read zero).
+bool BrickLocate(VolumeBrickLevel l, float3 p, AIR_OUT(BrickCell) c)
 {
     float qx = (p.x - l.corner.x) / l.voxelSize - 0.5f; // voxel centres at whole numbers
     float qy = (p.y - l.corner.y) / l.voxelSize - 0.5f;
@@ -25,92 +38,111 @@ float BrickDensity(VolumeBrickLevel l, float3 p)
     float fx = floor(qx);
     float fy = floor(qy);
     float fz = floor(qz);
-    // The padded grid's outer voxels are zero: lookups that reach no further in read zero.
-    if (fx < 0.0f || fy < 0.0f || fz < 0.0f || fx >= float(l.voxelsX - 1u) || fy >= float(l.voxelsY - 1u) ||
-        fz >= float(l.voxelsZ - 1u))
-    {
-        return 0.0f;
-    }
-    uint ix = uint(fx);
-    uint iy = uint(fy);
-    uint iz = uint(fz);
-    uint brick = VolumeIndirectionLoad(l, ((iz >> 2u) * l.bricksY + (iy >> 2u)) * l.bricksX + (ix >> 2u));
-    if (brick == kNoBrick)
-    {
-        return 0.0f;
-    }
+    bool inside = fx >= 0.0f && fy >= 0.0f && fz >= 0.0f && fx < float(l.voxelsX - 1u) && fy < float(l.voxelsY - 1u) &&
+                  fz < float(l.voxelsZ - 1u);
+    c.ix = inside ? uint(fx) : 0u;
+    c.iy = inside ? uint(fy) : 0u;
+    c.iz = inside ? uint(fz) : 0u;
+    c.tx = qx - fx;
+    c.ty = qy - fy;
+    c.tz = qz - fz;
+    return inside;
+}
+
+uint BrickPosition(VolumeBrickLevel l, BrickCell c)
+{
+    return ((c.iz >> 2u) * l.bricksY + (c.iy >> 2u)) * l.bricksX + (c.ix >> 2u);
+}
+
+// The density of allocated brick `brick` at cell c: trilinear over its codes, between its range.
+float BrickRead(VolumeBrickLevel l, uint brick, BrickCell c)
+{
     uint row = kBrickStored;
     uint slice = kBrickStored * kBrickStored;
-    uint v = (ix & 3u) + row * (iy & 3u) + slice * (iz & 3u);
-    float tx = qx - fx;
-    float ty = qy - fy;
-    float tz = qz - fz;
-    float c00 = lerp(BrickCode(l, brick, v), BrickCode(l, brick, v + 1u), tx);
-    float c10 = lerp(BrickCode(l, brick, v + row), BrickCode(l, brick, v + row + 1u), tx);
-    float c01 = lerp(BrickCode(l, brick, v + slice), BrickCode(l, brick, v + slice + 1u), tx);
-    float c11 = lerp(BrickCode(l, brick, v + slice + row), BrickCode(l, brick, v + slice + row + 1u), tx);
-    float code = lerp(lerp(c00, c10, ty), lerp(c01, c11, ty), tz);
+    uint v = (c.ix & 3u) + row * (c.iy & 3u) + slice * (c.iz & 3u);
+    float c00 = lerp(BrickCode(l, brick, v), BrickCode(l, brick, v + 1u), c.tx);
+    float c10 = lerp(BrickCode(l, brick, v + row), BrickCode(l, brick, v + row + 1u), c.tx);
+    float c01 = lerp(BrickCode(l, brick, v + slice), BrickCode(l, brick, v + slice + 1u), c.tx);
+    float c11 = lerp(BrickCode(l, brick, v + slice + row), BrickCode(l, brick, v + slice + row + 1u), c.tx);
+    float code = lerp(lerp(c00, c10, c.ty), lerp(c01, c11, c.ty), c.tz);
     uint range = VolumeRangeLoad(l, brick);
     float lowest = f16tof32(range & 0xFFFFu);
     float highest = f16tof32(range >> 16u);
     return lowest + (highest - lowest) * (code * (1.0f / 15.0f));
 }
 
-// Whether a lookup at p may read a density above zero. When it cannot, emptyMin and emptyMax bound
-// the region around p whose lookups cannot either (the lookups of p's brick, or of the 4 x 4 x 2
-// bricks of its occupancy word when they are all empty), so a march can jump to where its ray leaves
-// it. Outside the voxels the region is p itself.
+// The region around the lookups of empty brick position c whose lookups read zero too: those of the
+// bricks closer to it than the nearest allocated one. Lookups whose lowest voxel lies in brick b sit
+// in [4 b + 0.5, 4 b + 4.5) voxels from the corner.
+void BrickEmptyRegion(VolumeBrickLevel l, BrickCell c, AIR_OUT(float3) emptyMin, AIR_OUT(float3) emptyMax)
+{
+    uint bx = c.ix >> 2u;
+    uint by = c.iy >> 2u;
+    uint bz = c.iz >> 2u;
+    uint position = (bz * l.bricksY + by) * l.bricksX + bx;
+    uint reach = ((VolumeDistanceLoad(l, position >> 2u) >> ((position & 3u) * 8u)) & 0xFFu) - 1u;
+    uint x0 = bx > reach ? bx - reach : 0u;
+    uint y0 = by > reach ? by - reach : 0u;
+    uint z0 = bz > reach ? bz - reach : 0u;
+    float3 bricks = float3(float(min(bx + reach, l.bricksX - 1u) - x0 + 1u), float(min(by + reach, l.bricksY - 1u) - y0 + 1u),
+                           float(min(bz + reach, l.bricksZ - 1u) - z0 + 1u));
+    emptyMin = l.corner + (float3(float(x0), float(y0), float(z0)) * float(kBrickVoxels) + 0.5f) * l.voxelSize;
+    emptyMax = emptyMin + bricks * (float(kBrickVoxels) * l.voxelSize);
+}
+
+// The density at world point p: trilinear over the level's voxels, zero outside them.
+float BrickDensity(VolumeBrickLevel l, float3 p)
+{
+    BrickCell c;
+    if (!BrickLocate(l, p, c))
+    {
+        return 0.0f;
+    }
+    uint brick = VolumeIndirectionLoad(l, BrickPosition(l, c));
+    return brick == kNoBrick ? 0.0f : BrickRead(l, brick, c);
+}
+
+// The density at p (as BrickDensity) and whether a lookup there may read one above zero: where it
+// cannot, emptyMin and emptyMax bound the region around p whose lookups cannot either
+// (BrickEmptyRegion), so a march can jump to where its ray leaves it. Outside the voxels the region
+// is p itself.
+float BrickSample(VolumeBrickLevel l, float3 p, AIR_OUT(bool) occupied, AIR_OUT(float3) emptyMin,
+                  AIR_OUT(float3) emptyMax)
+{
+    occupied = false;
+    emptyMin = p;
+    emptyMax = p;
+    BrickCell c;
+    if (!BrickLocate(l, p, c))
+    {
+        return 0.0f;
+    }
+    uint brick = VolumeIndirectionLoad(l, BrickPosition(l, c));
+    if (brick == kNoBrick)
+    {
+        BrickEmptyRegion(l, c, emptyMin, emptyMax);
+        return 0.0f;
+    }
+    occupied = true;
+    return BrickRead(l, brick, c);
+}
+
+// Whether a lookup at p may read a density above zero, and the empty region around it where it
+// cannot (BrickSample without the density).
 bool BrickOccupied(VolumeBrickLevel l, float3 p, AIR_OUT(float3) emptyMin, AIR_OUT(float3) emptyMax)
 {
     emptyMin = p;
     emptyMax = p;
-    float fx = floor((p.x - l.corner.x) / l.voxelSize - 0.5f);
-    float fy = floor((p.y - l.corner.y) / l.voxelSize - 0.5f);
-    float fz = floor((p.z - l.corner.z) / l.voxelSize - 0.5f);
-    if (fx < 0.0f || fy < 0.0f || fz < 0.0f || fx >= float(l.voxelsX - 1u) || fy >= float(l.voxelsY - 1u) ||
-        fz >= float(l.voxelsZ - 1u))
+    BrickCell c;
+    if (!BrickLocate(l, p, c))
     {
         return false;
     }
-    uint bx = uint(fx) >> 2u;
-    uint by = uint(fy) >> 2u;
-    uint bz = uint(fz) >> 2u;
-    uint wx = bx / kOccupancyX;
-    uint wy = by / kOccupancyY;
-    uint wz = bz / kOccupancyZ;
-    uint word = VolumeOccupancyLoad(l, (wz * l.wordsY + wy) * l.wordsX + wx);
-    uint bit = (bx % kOccupancyX) + kOccupancyX * (by % kOccupancyY) + kOccupancyX * kOccupancyY * (bz % kOccupancyZ);
-    if (((word >> bit) & 1u) != 0u)
+    if (VolumeIndirectionLoad(l, BrickPosition(l, c)) != kNoBrick)
     {
         return true;
     }
-    // Lookups whose lowest voxel lies in brick b sit in [4 b + 0.5, 4 b + 4.5) voxels from the corner.
-    float lo0;
-    float lo1;
-    float lo2;
-    float size0;
-    float size1;
-    float size2;
-    if (word == 0u)
-    {
-        lo0 = float(wx * kOccupancyX * kBrickVoxels);
-        lo1 = float(wy * kOccupancyY * kBrickVoxels);
-        lo2 = float(wz * kOccupancyZ * kBrickVoxels);
-        size0 = float(kOccupancyX * kBrickVoxels);
-        size1 = float(kOccupancyY * kBrickVoxels);
-        size2 = float(kOccupancyZ * kBrickVoxels);
-    }
-    else
-    {
-        lo0 = float(bx * kBrickVoxels);
-        lo1 = float(by * kBrickVoxels);
-        lo2 = float(bz * kBrickVoxels);
-        size0 = float(kBrickVoxels);
-        size1 = size0;
-        size2 = size0;
-    }
-    emptyMin = l.corner + float3(lo0 + 0.5f, lo1 + 0.5f, lo2 + 0.5f) * l.voxelSize;
-    emptyMax = emptyMin + float3(size0, size1, size2) * l.voxelSize;
+    BrickEmptyRegion(l, c, emptyMin, emptyMax);
     return false;
 }
 

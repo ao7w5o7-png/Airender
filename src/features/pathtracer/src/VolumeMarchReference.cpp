@@ -98,9 +98,9 @@ struct MarchKernel : SceneHooks
     {
         return march.levelData[l.indirection]->indirection[index];
     }
-    uint VolumeOccupancyLoad(VolumeBrickLevel l, uint index) const
+    uint VolumeDistanceLoad(VolumeBrickLevel l, uint index) const
     {
-        return march.levelData[l.occupancy]->occupancy[index];
+        return march.levelData[l.distance]->distance[index];
     }
     uint VolumeBrickWordLoad(VolumeBrickLevel l, uint index) const { return march.levelData[l.bricks]->bricks[index]; }
     uint VolumeRangeLoad(VolumeBrickLevel l, uint brick) const { return march.levelData[l.ranges]->ranges[brick]; }
@@ -108,6 +108,11 @@ struct MarchKernel : SceneHooks
     // VolumeMarch.hlsli's.
     VolumeMarchData LoadMarchVolume(uint index) const { return march.volumes[index]; }
     VolumeBrickLevel LoadVolumeLevel(uint index) const { return march.levels[index]; }
+    VolumeMarchData LoadRayVolume(uint volume, uint /*slot*/) const { return march.volumes[volume]; }
+    VolumeBrickLevel LoadRayLevel(uint volume, uint /*slot*/, uint level) const
+    {
+        return march.levels[march.volumes[volume].levels + level];
+    }
     float VolumeAoSample(VolumeMarchData v, float3 uvw) const
     {
         return renderer::SampleTexture3DClampedR8(march.bricks[v.ao]->ao.data(), v.aoX, v.aoY, v.aoZ, uvw.x, uvw.y,
@@ -196,9 +201,9 @@ MarchTables BuildMarchTables(const SceneTables& tables, const VolumeMarchSetting
             VolumeBrickLevel l = level.data;
             const u32 self = u32(march.levels.size());
             l.indirection = self;
-            l.occupancy = self;
             l.bricks = self;
             l.ranges = self;
+            l.distance = self;
             march.levels.push_back(l);
             march.levelData.push_back(&level);
         }
@@ -425,6 +430,7 @@ Image RenderVolumeMarchReference(const renderer::SceneDesc& scene, const rendere
                                                       t1))
                         {
                             rv.indices |= index << (8 * rv.count);
+                            rv.slots |= k << (8 * rv.count);
                             rv.tIn = kernel.SetLane4(rv.tIn, rv.count, t0);
                             rv.tOut = kernel.SetLane4(rv.tOut, rv.count, t1);
                             ++rv.count;
@@ -433,6 +439,7 @@ Image RenderVolumeMarchReference(const renderer::SceneDesc& scene, const rendere
                     const uint rank = marchTables.blueNoise[(y % kNoise) * kNoise + x % kNoise];
                     Kernel::MarchSetup ray = setup;
                     ray.lightSample = kernel.MarchLightSample(rank, frame);
+                    kernel.MarchChooseMaps(ray);
                     const Kernel::MarchResult r =
                         kernel.MarchRay(ray, rv, camera.position, d, depths[i], kernel.MarchJitter(rank, frame));
                     float3 value = r.radiance * float(spp) + surfaces[i] * r.transmittance;
@@ -521,6 +528,63 @@ renderer::float3 VolumeMarchProbe::GroupInScattering(u32 group, renderer::float3
     MarchKernel kernel{{mState->tables}, mState->march};
     return kernel.GroupInScattering(mState->tables.lightGroups[group], x, d, float4(1.0f, 0.0f, 0.0f, 0.0f),
                                     float4(anisotropy, 0.0f, 0.0f, 0.0f), 1u);
+}
+
+namespace
+{
+
+// A march at x along d through every volume, lit by the sun and the light groups through map `sample`
+// of each (without the probes, which a probe does not fill).
+struct ProbeStep
+{
+    MarchKernel kernel;
+    MarchKernel::MarchSetup setup{};
+    MarchKernel::MarchRayVolumes rv{};
+
+    ProbeStep(const SceneTables& tables, const MarchTables& march, u32 sample) : kernel{{tables}, march}
+    {
+        setup.sky = tables.sky.data;
+        setup.sunMap = march.shadows.sunMap;
+        setup.lightCount = u32(march.shadows.lights.size());
+        setup.probeVolumes = u32(march.volumes.size());
+        setup.stepScale = 1.0f;
+        setup.flags = kMarchNoIndirect;
+        setup.lightSample = sample;
+        kernel.MarchChooseMaps(setup);
+        for (u32 v = 0; v < march.volumes.size() && v < kMarchMaxVolumes; ++v)
+        {
+            rv.indices |= v << (8 * v);
+            rv.slots |= v << (8 * v);
+            rv.tIn = kernel.SetLane4(rv.tIn, v, 0.0f);
+            rv.tOut = kernel.SetLane4(rv.tOut, v, 1e30f);
+            ++rv.count;
+        }
+    }
+};
+
+} // namespace
+
+renderer::float3 VolumeMarchProbe::StepLight(renderer::float3 x, renderer::float3 d, u32 sample) const
+{
+    ProbeStep step(mState->tables, mState->march, sample);
+    const MarchKernel::MarchPoint p = step.kernel.MarchPointAt(step.setup, step.rv, x, d, 1.0f, 1e30f, false);
+    return step.kernel.MarchDirect(step.setup, step.rv, p, x, d);
+}
+
+renderer::float3 VolumeMarchProbe::SharedStepLight(renderer::float3 x, renderer::float3 d, u32 sample) const
+{
+    ProbeStep step(mState->tables, mState->march, sample);
+    bool valid = false;
+    const float3 light = step.kernel.MarchLightAt(step.setup, step.rv, x, d, 1.0f, false, valid);
+    return valid ? light * Scattering(x) : float3(0.0f);
+}
+
+float VolumeMarchProbe::Scattering(renderer::float3 x) const
+{
+    ProbeStep step(mState->tables, mState->march, 0);
+    const MarchKernel::MarchPoint p =
+        step.kernel.MarchPointAt(step.setup, step.rv, x, float3(0.0f, 0.0f, 1.0f), 1.0f, 1e30f, false);
+    return p.sigmaS.x + p.sigmaS.y + p.sigmaS.z + p.sigmaS.w;
 }
 
 float VolumeMarchProbe::SunTransmittance(renderer::float3 p) const

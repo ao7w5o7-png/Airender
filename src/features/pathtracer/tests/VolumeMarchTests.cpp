@@ -281,6 +281,46 @@ TEST(VolumeMarch_LargeEmittersLookFromSeveralPoints)
     EXPECT(spread > 3.0 * point);
 }
 
+// Under adaptive sampling a pixel lights a step for its neighbours per unit of the volumes' scattering
+// there (MarchLightAt), which their steps multiply by their own: where the pixel's step is in smoke,
+// that is the light the step gives itself (MarchDirect). The braziers: three overlapping plumes of one
+// anisotropy (their phase function evaluated once for all), the sun and four light groups, each read
+// through one of its maps.
+TEST(VolumeMarch_SharedLightIsTheStepsOwn)
+{
+    TaskSystem tasks(4);
+    const renderer::SceneDesc scene = airtest::BuiltinScene("braziers");
+    const pt::VolumeMarchProbe probe(scene, {}, &tasks);
+    EXPECT(probe.HasSunMap() && probe.GetLightCount() == 4);
+    u32 count = 0;
+    double worst = 0.0;
+    for (u32 i = 0; i < 16; ++i)
+    {
+        for (u32 j = 0; j < 24; ++j)
+        {
+            for (u32 k = 0; k < 8; ++k)
+            {
+                const float3 p(-1.8f + 0.24f * float(i), 0.62f + 0.1f * float(j), -1.2f + 0.25f * float(k));
+                if (probe.Scattering(p) < 0.05f)
+                {
+                    continue;
+                }
+                const float3 d = hlsl::normalize(float3(float(i) - 7.5f, float(j) - 12.0f, -12.0f));
+                const u32 sample = i + j + k;
+                const float3 own = probe.StepLight(p, d, sample);
+                const float3 shared = probe.SharedStepLight(p, d, sample);
+                const double scale = std::max({double(own.x), double(own.y), double(own.z), 1e-6});
+                worst = std::max({worst, std::abs(shared.x - own.x) / scale, std::abs(shared.y - own.y) / scale,
+                                  std::abs(shared.z - own.z) / scale});
+                ++count;
+            }
+        }
+    }
+    std::fprintf(stderr, "  %u points in smoke: worst relative difference %.2e\n", count, worst);
+    EXPECT(count > 200);
+    EXPECT(worst < 1e-4);
+}
+
 // In the white furnace (a uniform sky, albedo 1, no lights) the volume vanishes: what the march takes
 // out of the light from behind it, its probes' light scattered at every step gives back.
 TEST(VolumeMarch_VolumeVanishesInAWhiteFurnace)

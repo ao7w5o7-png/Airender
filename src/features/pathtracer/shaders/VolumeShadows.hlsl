@@ -14,9 +14,9 @@ uint VolumeIndirectionLoad(VolumeBrickLevel l, uint index)
     return buffer[index];
 }
 
-uint VolumeOccupancyLoad(VolumeBrickLevel l, uint index)
+uint VolumeDistanceLoad(VolumeBrickLevel l, uint index)
 {
-    StructuredBuffer<uint> buffer = ResourceDescriptorHeap[NonUniformResourceIndex(l.occupancy)];
+    StructuredBuffer<uint> buffer = ResourceDescriptorHeap[NonUniformResourceIndex(l.distance)];
     return buffer[index];
 }
 
