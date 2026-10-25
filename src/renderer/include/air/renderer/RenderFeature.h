@@ -73,6 +73,8 @@ inline constexpr std::string_view kSpecularAlbedo = "guide.specularAlbedo";   //
 inline constexpr std::string_view kNormalRoughness = "guide.normalRoughness"; // RGBA16F, world normal, a = roughness
 inline constexpr std::string_view kViewDepth = "guide.viewDepth";             // R32F, metres along the view axis
 inline constexpr std::string_view kMotionVectors = "guide.motionVectors";     // RG16F, previous - current, pixels
+// RGBA16F, like sceneColor: the frame before transparent media (real-time volumes) were laid over it.
+inline constexpr std::string_view kColorBeforeTransparency = "guide.colorBeforeTransparency";
 // Values.
 inline constexpr std::string_view kJitterX = "camera.jitterX"; // sub-pixel offset of the frame's samples, pixels
 inline constexpr std::string_view kJitterY = "camera.jitterY";

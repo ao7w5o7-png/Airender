@@ -391,15 +391,16 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     constants.bsdfLut = mDevice.GetBindlessSRV(mBsdfLut);
     constants.skyTable = mDevice.GetBindlessSRV(scene.skyTable);
 
+    // Under real-time volumes with a denoiser: the trace's samples and the frame resolved without the
+    // volumes (slots::kColorBeforeTransparency).
+    rdg::TextureRef frameSamples;
+    rdg::TextureRef colorBefore;
     if (spp > 0)
     {
         mResetPending = false;
         mAccumulatedSamples += spp;
 
-        struct Guides
-        {
-            rdg::TextureRef diffuseAlbedo, specularAlbedo, normalRoughness, viewDepth, motionVectors;
-        } guides;
+        DenoiserGuides guides;
         if (mSettings.guides)
         {
             auto make = [&](rhi::Format format, const char* name)
@@ -449,6 +450,17 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                                      .height = height,
                                      .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
                                      .debugName = "PathTracer.FrameSamples"});
+            if (mSettings.guides && !mSettings.accumulate)
+            {
+                frameSamples = target;
+                colorBefore = graph.CreateTexture(
+                    {.format = rhi::Format::RGBA16_FLOAT, // as sceneColor: the denoiser compares the two
+                     .width = width,
+                     .height = height,
+                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                     .debugName = "PathTracer.ColorBeforeVolumes"});
+                blackboard.SetTexture(slots::kColorBeforeTransparency, colorBefore);
+            }
         }
         VolumeMarcher* marcher = march ? mVolumeMarcher.get() : nullptr;
         graph.AddPass(
@@ -513,7 +525,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
 
         if (march)
         {
-            mVolumeMarcher->AddPasses(graph, scene, constants, target, accumulation, width, height, spp, view,
+            mVolumeMarcher->AddPasses(graph, scene, constants, target, accumulation, guides, width, height, spp, view,
                                       (frame.flags & gpu::kFlagReset) != 0u, mSettings.accumulate, mSettings.furnace);
         }
 
@@ -549,6 +561,11 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         {
             b.Read(accumulation, Access::SRVCompute);
             b.Write(output, Access::UAVCompute);
+            if (colorBefore.IsValid())
+            {
+                b.Read(frameSamples, Access::SRVCompute);
+                b.Write(colorBefore, Access::UAVCompute);
+            }
         },
         [=](rdg::PassContext& ctx)
         {
@@ -557,6 +574,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             resolve.frameSlot = slot;
             resolve.accumulation = ctx.SRV(accumulation);
             resolve.output = ctx.UAV(output);
+            resolve.surface = colorBefore.IsValid() ? ctx.SRV(frameSamples) : air::gpu::kInvalidIndex;
+            resolve.before = colorBefore.IsValid() ? ctx.UAV(colorBefore) : air::gpu::kInvalidIndex;
             ctx.cmd.SetPipeline(resolvePipeline);
             ctx.cmd.PushConstants(&resolve, sizeof(resolve));
             ctx.cmd.Dispatch((width + 7) / 8, (height + 7) / 8, 1);

@@ -1,6 +1,7 @@
 // Accumulation buffer -> frame output: average and exposure (radiance views), or the display
 // encoding of a debug view. Tonemapping is the separate `tonemap` feature.
 
+#include "air/renderer/shader/SceneShared.h"
 #include "PathTracerShared.h"
 
 [[vk::push_constant]] ConstantBuffer<ResolveConstants> g : register(b0);
@@ -54,4 +55,13 @@ void Main(uint3 id : SV_DispatchThreadID)
     default: value = SrgbToLinear(value); break; // normals and scalars are shown as raw values
     }
     output[id.xy] = float4(value, 1.0f);
+    if (g.before != kInvalidIndex)
+    {
+        // The surfaces the march laid the volumes over, resolved as above (in real time, so sum.a is
+        // also their sample count): equal to the output wherever no volume is in front.
+        Texture2D<float4> surface = ResourceDescriptorHeap[g.surface];
+        RWTexture2D<float4> before = ResourceDescriptorHeap[g.before];
+        float3 alone = sum.a > 0.0f ? surface[id.xy].rgb / sum.a : 0.0f;
+        before[id.xy] = float4(alone * f.exposure, 1.0f);
+    }
 }

@@ -7,6 +7,8 @@
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
 //                   [--no-async-compute] [--no-transient-pool] [--html profile.html]   (report of the last frame)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
+//                   [--output-frames N]   (also the N - 1 frames before the last: image.<frame>.pfm)
+//                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
 //                   [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
@@ -73,7 +75,8 @@ int Usage()
                "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
                "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
-               "                [--scene NAME] [--output image.pfm|image.ppm]\n"
+               "                [--scene NAME] [--output image.pfm|image.ppm] [--output-frames N]\n"
+               "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
@@ -740,6 +743,8 @@ int CommandRender(Args& args)
     std::string htmlPath;
     std::string sceneName = "cornell_box";
     std::string outputPath;
+    u32 outputFrames = 0;
+    std::vector<float> cameraMotion; // per frame: metres right, up, forward; degrees of yaw, pitch
     SceneOptions sceneOptions;
     bool dumpCommands = false;
 
@@ -750,6 +755,19 @@ int CommandRender(Args& args)
         {
             const std::string_view b = args.Next();
             backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
+        }
+        else if (arg == "--camera-motion")
+        {
+            cameraMotion.clear();
+            for (const std::string& value : Split(args.Next(), ','))
+            {
+                cameraMotion.push_back(std::stof(value));
+            }
+            cameraMotion.resize(5, 0.0f);
+        }
+        else if (arg == "--output-frames")
+        {
+            outputFrames = u32(std::stoul(std::string(args.Next())));
         }
         else if (arg == "--features")
         {
@@ -867,7 +885,7 @@ int CommandRender(Args& args)
         }
         sceneOptions.Apply(*sceneDesc);
         renderer::Scene scene(*device, std::move(*sceneDesc));
-        const renderer::Camera camera = scene.Desc().camera;
+        renderer::Camera camera = scene.Desc().camera;
         report["scene"] = sceneName;
 
         for (const std::string& name : featureNames)
@@ -900,6 +918,23 @@ int CommandRender(Args& args)
             return kExitUsage;
         }
 
+        // Writes the frame's output; the frame output is left in SRVCompute by FrameRunner.
+        auto writeOutput = [&](const std::string& path)
+        {
+            const std::optional<Image> image =
+                renderer::ReadbackTexture(*device, runner.GetOutput(), rhi::Access::SRVCompute);
+            const bool ppm = path.ends_with(".ppm");
+            if (!image || !(ppm ? WritePpm(path, *image) : WritePfm(path, *image)))
+            {
+                AIR_LOG(Error, "aircli", "could not write '{}'", path);
+                errors.Push("could not write " + path);
+                failed = true;
+                return false;
+            }
+            AIR_LOG(Info, "aircli", "wrote {}", path);
+            return true;
+        };
+
         json::Value frameReports = json::Value::MakeArray();
         json::Value commands = json::Value::MakeArray();
         std::shared_ptr<const renderer::FrameCapture> capture; // the last frame's, for --html
@@ -909,10 +944,26 @@ int CommandRender(Args& args)
             {
                 runner.RequestCapture();
             }
+            if (frame > 0 && !cameraMotion.empty())
+            {
+                // Along the camera's own axes, then turned.
+                camera.position += camera.Right() * cameraMotion[0] + camera.Up() * cameraMotion[1] +
+                                   camera.Forward() * cameraMotion[2];
+                camera.yaw += cameraMotion[3] * 3.14159265f / 180.0f;
+                camera.pitch += cameraMotion[4] * 3.14159265f / 180.0f;
+            }
             Profiler::Get().BeginFrame();
             scene.Update();
             renderer::FrameResult result = runner.RenderFrame(scene.Get(), camera);
             Profiler::Get().EndFrame();
+            if (!outputPath.empty() && frame + outputFrames >= frames && frame + 1 < frames)
+            {
+                // The frames before the last: name.<frame>.ext next to --output.
+                const std::filesystem::path path(outputPath);
+                writeOutput((path.parent_path() /
+                             std::format("{}.{:04}{}", path.stem().string(), frame, path.extension().string()))
+                                .string());
+            }
             if (result.capture)
             {
                 capture = result.capture;
@@ -940,23 +991,9 @@ int CommandRender(Args& args)
             frameReports.Push(result.ToJson());
         }
         report["frames"] = std::move(frameReports);
-        if (!outputPath.empty())
+        if (!outputPath.empty() && writeOutput(outputPath))
         {
-            // The frame output is left in SRVCompute by FrameRunner.
-            const std::optional<Image> image =
-                renderer::ReadbackTexture(*device, runner.GetOutput(), rhi::Access::SRVCompute);
-            const bool ppm = outputPath.ends_with(".ppm");
-            if (!image || !(ppm ? WritePpm(outputPath, *image) : WritePfm(outputPath, *image)))
-            {
-                AIR_LOG(Error, "aircli", "could not write '{}'", outputPath);
-                errors.Push("could not write " + outputPath);
-                failed = true;
-            }
-            else
-            {
-                AIR_LOG(Info, "aircli", "wrote {}", outputPath);
-                report["output"] = outputPath;
-            }
+            report["output"] = outputPath;
         }
         report["features"] = runner.DescribeFeatures();
         if (desc.profile)

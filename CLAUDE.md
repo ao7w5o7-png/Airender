@@ -62,6 +62,12 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.
+- Real time is judged over frames, and a static camera hides trails: `--camera-motion
+  RIGHT,UP,FORWARD[,YAW[,PITCH]]` moves the camera every frame and `--output-frames N` writes the last
+  N frames. Compare a moving camera's last frame with a static camera's at the same place (trails,
+  e.g. a denoiser reprojecting with the wrong motion), and a static camera's consecutive frames
+  (flicker). Anything laid over the surfaces must keep the denoiser's guides consistent with it
+  (docs/architecture.md §8.13, "Under a denoiser").
 - Before trusting GPU timings, check the report's `vramBudgetBytes`: other processes holding VRAM
   (graphics debuggers, IDEs) make WDDM page resources to system memory and inflate every pass.
 - Debug a frame with `--set pathtracer.debugView=N` (normals, albedo, depth, heatmaps, direct /

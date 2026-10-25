@@ -41,6 +41,7 @@ AIR_CONST uint kMarchAir = 4u;         // the aerial perspective dims the volume
 AIR_CONST uint kMarchNoDirect = 8u;    // leave the sun's and the lights' light out (indirect view)
 AIR_CONST uint kMarchNoIndirect = 16u; // leave the probes' light out (direct view)
 AIR_CONST uint kMarchFurnace = 32u;    // the white furnace (kFlagFurnace): albedo 1, the light groups off
+AIR_CONST uint kMarchGuides = 64u;     // describe the volumes in the denoiser's guides where they hide the surfaces
 
 // How the trace kernel and the march read the volumes' shadows.
 struct VolumeShadowsData
@@ -118,6 +119,13 @@ struct VolumeMarchConstants
     uint probeVolumes;
     float shareFootprint2; // adaptive sampling: lighting shared over 2 x 2 where a voxel covers this many pixels
     float shareFootprint4; // ... over 4 x 4
+    // kMarchGuides: the trace's denoiser guides (renderer::slots), RWTexture2D<float4> but for viewDepth
+    // (<float>) and motionVectors (<float2>).
+    uint diffuseAlbedo;
+    uint specularAlbedo;
+    uint normalRoughness;
+    uint viewDepth;
+    uint motionVectors;
 };
 
 #ifdef __cplusplus

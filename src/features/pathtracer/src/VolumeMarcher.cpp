@@ -218,8 +218,8 @@ void VolumeMarcher::DeclareShadowReads(rdg::PassBuilder& builder) const
 
 void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& scene,
                               const gpu::TraceConstants& trace, rdg::TextureRef surface, rdg::TextureRef accumulation,
-                              u32 width, u32 height, u32 samplesPerPixel, u32 debugView, bool reset, bool accumulating,
-                              bool furnace)
+                              const DenoiserGuides& guides, u32 width, u32 height, u32 samplesPerPixel, u32 debugView,
+                              bool reset, bool accumulating, bool furnace)
 {
     const u32 volumes = u32(scene.volumeMarch.size());
     AIR_CHECK(volumes > 0 && volumes <= air::gpu::kMaxVolumes, "VolumeMarch: {} volumes", volumes);
@@ -308,7 +308,7 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
         (mSettings.air && scene.sky.aerialDistance > 0.0f && scene.aerialInscatter.IsValid() ? gpu::kMarchAir : 0u) |
         (debugView == gpu::kDebugIndirect ? gpu::kMarchNoDirect : 0u) |
         (debugView == gpu::kDebugDirect ? gpu::kMarchNoIndirect : 0u) | (furnace ? gpu::kMarchFurnace : 0u) |
-        (mSettings.adaptive ? gpu::kMarchAdaptive : 0u);
+        (mSettings.adaptive ? gpu::kMarchAdaptive : 0u) | (guides.diffuseAlbedo.IsValid() ? gpu::kMarchGuides : 0u);
     c.shareBelow2 = mSettings.shareBelow2;
     c.shareBelow4 = std::min(mSettings.shareBelow4, mSettings.shareBelow2);
     c.shareFootprint2 = mSettings.shareFootprint2;
@@ -326,12 +326,28 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
             b.Read(occluders, kRest);
             b.Read(probes, kRest);
             b.Write(accumulation, Access::UAVCompute);
+            if (guides.diffuseAlbedo.IsValid())
+            {
+                for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
+                                          guides.viewDepth, guides.motionVectors})
+                {
+                    b.Write(t, Access::UAVCompute);
+                }
+            }
         },
         [=](rdg::PassContext& ctx) mutable
         {
             c.surface = ctx.SRV(surface);
             c.accumulation = ctx.UAV(accumulation);
             c.probes = ctx.SRV(probes);
+            if (guides.diffuseAlbedo.IsValid())
+            {
+                c.diffuseAlbedo = ctx.UAV(guides.diffuseAlbedo);
+                c.specularAlbedo = ctx.UAV(guides.specularAlbedo);
+                c.normalRoughness = ctx.UAV(guides.normalRoughness);
+                c.viewDepth = ctx.UAV(guides.viewDepth);
+                c.motionVectors = ctx.UAV(guides.motionVectors);
+            }
             ctx.cmd.SetPipeline(pipeline);
             ctx.cmd.PushConstants(&c, sizeof(c));
             // Tiles over the image moved by up to kMarchTile - 1 pixels (VolumeMarch.hlsl moves them every frame).

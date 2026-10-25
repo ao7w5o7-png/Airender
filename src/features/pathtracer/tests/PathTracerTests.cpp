@@ -326,3 +326,35 @@ TEST(PathTracer_RealTimeVolumesAreMarched)
     EXPECT(h.runner->SetParameter("pathtracer.volumeMarch", "2"));
     EXPECT(CountLines(h.Frame().commands, "BeginEvent 'VolumeMarch.March'") == 1);
 }
+
+// Under a denoiser the real-time volumes keep it from reprojecting them with what lies behind them: the
+// march describes them in its guides where they hide the surfaces, and the resolve also writes the
+// frame without them (slots::kColorBeforeTransparency). Accumulating there is no such frame.
+TEST(PathTracer_RealTimeVolumesGuideDenoisers)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f}});
+    EXPECT(h.Frame().graphText.find("PathTracer.ColorBeforeVolumes") == std::string::npos); // nobody reads it
+    EXPECT(h.runner->AddFeature("denoiser", std::make_unique<GuideReader>()));
+    const auto result = h.Frame();
+    EXPECT(result.validationErrors.empty());
+    // The graph's passes in order, each with its accesses.
+    const std::string& graph = result.graphText;
+    const size_t march = graph.find("VolumeMarch.March (Compute)");
+    const size_t resolve = graph.find("PathTracer.Resolve (Compute)");
+    EXPECT(march != std::string::npos && resolve != std::string::npos && march < resolve);
+    for (const char* guide : {"DiffuseAlbedo", "SpecularAlbedo", "NormalRoughness", "ViewDepth", "MotionVectors"})
+    {
+        const size_t write = graph.find(std::string("write PathTracer.") + guide + " as UAVCompute", march);
+        EXPECT(write != std::string::npos && write < resolve);
+    }
+    EXPECT(graph.find("read  PathTracer.FrameSamples as SRVCompute", resolve) != std::string::npos);
+    EXPECT(graph.find("write PathTracer.ColorBeforeVolumes as UAVCompute", resolve) != std::string::npos);
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "1"));
+    EXPECT(h.runner->SetParameter("pathtracer.volumeMarch", "2"));
+    const auto accumulating = h.Frame();
+    EXPECT(accumulating.validationErrors.empty());
+    EXPECT(CountLines(accumulating.commands, "BeginEvent 'VolumeMarch.March'") == 1);
+    EXPECT(accumulating.graphText.find("PathTracer.ColorBeforeVolumes") == std::string::npos);
+}

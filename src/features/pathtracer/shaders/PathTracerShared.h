@@ -136,6 +136,10 @@ struct ResolveConstants
     uint frameSlot;
     uint accumulation; // Texture2D<float4>
     uint output;       // RWTexture2D<float4>
+    // Under real-time volumes, for a denoiser (kInvalidIndex: none): the frame's surfaces alone
+    // (Texture2D<float4>, the march's input) resolved into `before` (RWTexture2D<float4>, like output).
+    uint surface;
+    uint before;
 };
 
 #ifdef __cplusplus

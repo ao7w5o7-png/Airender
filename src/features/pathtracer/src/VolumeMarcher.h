@@ -27,6 +27,12 @@
 namespace air::pt
 {
 
+// The denoiser's guides (renderer::slots), which the trace writes; invalid without a denoiser.
+struct DenoiserGuides
+{
+    rdg::TextureRef diffuseAlbedo, specularAlbedo, normalRoughness, viewDepth, motionVectors;
+};
+
 class VolumeMarcher
 {
 public:
@@ -49,10 +55,10 @@ public:
     // What a pass that reads the maps (the trace) declares.
     void DeclareShadowReads(rdg::PassBuilder& builder) const;
     // The probes (with the trace's scene bindings), then the march of the trace's samples (`surface`)
-    // into `accumulation`.
+    // into `accumulation`; it describes the volumes in the guides where they hide the surfaces.
     void AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& scene, const gpu::TraceConstants& trace,
-                   rdg::TextureRef surface, rdg::TextureRef accumulation, u32 width, u32 height, u32 samplesPerPixel,
-                   u32 debugView, bool reset, bool accumulating, bool furnace);
+                   rdg::TextureRef surface, rdg::TextureRef accumulation, const DenoiserGuides& guides, u32 width,
+                   u32 height, u32 samplesPerPixel, u32 debugView, bool reset, bool accumulating, bool furnace);
 
     u32 GetLightCount() const { return u32(mLights.size()); }
     u32 GetShadowRenders() const { return mShadowRenders; } // times the maps were rendered

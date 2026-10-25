@@ -274,6 +274,33 @@ MarchResult MarchRayShared(MarchSetup s, MarchRayVolumes rv, float3 o, float3 d,
 
 // --- Pass ----------------------------------------------------------------------------------------
 
+// A denoiser that reprojects its history (DLSS Ray Reconstruction) follows the guides. Where the volumes
+// hide most of the surface, theirs describe the volumes instead: depth, motion and normal together
+// (at the depth their light comes from, facing the camera), the albedos and roughness blended by their
+// opacity, as its integration guide asks for transparent layers. Else smoke over the sky would move
+// with the sky and leave trails behind when the camera moves.
+void DescribeVolumesInGuides(FrameData f, uint2 pixel, float3 o, float3 d, float2 size, MarchResult r, float albedo)
+{
+    float opacity = 1.0f - r.transmittance;
+    RWTexture2D<float4> diffuseAlbedo = ResourceDescriptorHeap[g.diffuseAlbedo];
+    RWTexture2D<float4> specularAlbedo = ResourceDescriptorHeap[g.specularAlbedo];
+    RWTexture2D<float4> normalRoughness = ResourceDescriptorHeap[g.normalRoughness];
+    diffuseAlbedo[pixel] = lerp(diffuseAlbedo[pixel], float4(albedo, albedo, albedo, 1.0f), opacity);
+    specularAlbedo[pixel] = lerp(specularAlbedo[pixel], float4(0.0f, 0.0f, 0.0f, 1.0f), opacity);
+    float4 normal = normalRoughness[pixel];
+    normal.w = lerp(normal.w, 1.0f, opacity);
+    if (opacity >= 0.5f)
+    {
+        RWTexture2D<float> viewDepth = ResourceDescriptorHeap[g.viewDepth];
+        RWTexture2D<float2> motionVectors = ResourceDescriptorHeap[g.motionVectors];
+        normal.xyz = -d;
+        viewDepth[pixel] = r.depth * dot(d, Xyz(f.camera.forward));
+        float2 at = float2(pixel) + f.jitter + 0.5f;
+        motionVectors[pixel] = CameraProject(f.previousCamera, o + d * r.depth, 1.0f, size) - at;
+    }
+    normalRoughness[pixel] = normal;
+}
+
 groupshared uint gTileVolumes;
 
 [numthreads(kMarchTile * kMarchTile, 1, 1)]
@@ -385,6 +412,11 @@ void Main(uint3 groupId : SV_GroupID, uint index : SV_GroupIndex)
     {
         return;
     }
+    bool lit = g.view == kDebugNone || g.view == kDebugDirect || g.view == kDebugIndirect;
+    if ((g.flags & kMarchGuides) != 0u && lit && rv.count > 0u)
+    {
+        DescribeVolumesInGuides(f, pixel, o, d, size, r, gTileVolume[rv.slots & 0xFFu].albedo);
+    }
 
     // Over the surface: the volumes' light and what they let through, the air in front of them taken
     // out of the surface's light at the depth their light comes from and laid over both (the fusion
@@ -406,7 +438,7 @@ void Main(uint3 groupId : SV_GroupID, uint index : SV_GroupIndex)
                                                                                : float3(0.0f, 0.0f, 1.0f));
         value = rv.count > 0u ? rate * samples : sum;
     }
-    else if (g.view != kDebugNone && g.view != kDebugDirect && g.view != kDebugIndirect)
+    else if (!lit)
     {
         value = sum; // the surfaces' own views
     }

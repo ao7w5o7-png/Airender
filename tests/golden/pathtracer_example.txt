@@ -39,7 +39,7 @@ Resources:
 [Graphics] Barrier [tex 'PathTracer.Accumulation' UAVCompute -> SRVCompute] [tex 'FrameOutput' None -> UAVCompute]
 [Graphics] BeginEvent 'PathTracer.Resolve'
 [Graphics] SetPipeline pipeline 'PathTracer.Resolve'
-[Graphics] PushConstants 16 bytes
+[Graphics] PushConstants 24 bytes
 [Graphics] Dispatch 8x4x1
 [Graphics] EndEvent
 [Compute] Wait Graphics fence 3

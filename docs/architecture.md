@@ -430,7 +430,11 @@ Principles:
 
 Image tests: `Image` reads and writes PFM (linear HDR, exact) and PPM (8-bit preview).
 `render --output` reads the final frame back; `aircli compare` measures rmse / psnr against a
-reference (see §8.3).
+reference (see §8.3). For what happens over time in real time (temporal filters, denoisers):
+`--output-frames N` also writes the N - 1 frames before the last (`image.<frame>.pfm`), and
+`--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]` moves the camera every frame (metres along its own
+axes, degrees). Flicker is the change between a static camera's frames; trails are the difference
+between a moving camera's frame and a static camera's at the same place (§8.13).
 
 ---
 
@@ -597,6 +601,7 @@ including each other. Slots live in `renderer::slots`:
 | `kNormalRoughness` | pathtracer | World normal + roughness |
 | `kViewDepth` | pathtracer | Distance along the view axis in metres |
 | `kMotionVectors` | pathtracer | Previous minus current position, in pixels |
+| `kColorBeforeTransparency` | pathtracer (real-time volumes, §8.13) | The frame resolved without the volumes over it |
 | `kJitterX/Y`, `kHistoryReset` | pathtracer | Sub-pixel jitter; history is invalid this frame |
 | `kOutputIsDisplay` | pathtracer | Output is a display-referred debug view: do not tonemap or denoise |
 
@@ -610,7 +615,9 @@ including each other. Slots live in `renderer::slots`:
   phases (at least 32). The jitter is passed negated (NGX takes the image shift, the opposite of
   the sample offset); a static camera must give a steady image (`dlss.flipJitter=1` shows the
   wrong sign for comparison). The NGX feature is created in `Initialize()`; if NGX rejects the
-  size it passes the frame through. It refuses to run on other backends.
+  size it passes the frame through. It refuses to run on other backends. When a producer publishes
+  `kColorBeforeTransparency` it passes it as RR's color-before-transparency guide, from which RR
+  tells transparent layers from the surfaces behind them (§8.13).
 - GPU timings are only meaningful when the GPU has VRAM to spare: with other processes (graphics
   debuggers, IDEs) holding most of it, WDDM pages resources to system memory and every pass slows
   down by an order of magnitude. Check `vramUsageBytes` / `vramBudgetBytes` in the report and the
@@ -1188,7 +1195,8 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
 | `VolumeMarch.Shadows` | compute, async | the moment shadow maps, again only when the scene's version or the shadow settings change |
 | `PathTracer.Trace` | graphics | `PathTracerVolumeShadows.hlsl` (`AIR_PT_VOLUME_SHADOWS`): paths that light surfaces through the maps; writes the frame's samples and their first hit's distance (`PathTracer.FrameSamples`) |
 | `VolumeMarch.Probes` | compute, async, beside the trace | 512 probes per volume, 16 paths each |
-| `VolumeMarch.March` | graphics | every pixel's ray through the volumes in front of its hit, over its samples, into the accumulation |
+| `VolumeMarch.March` | graphics | every pixel's ray through the volumes in front of its hit, over its samples, into the accumulation; under a denoiser it also rewrites the guides where the volumes hide the surfaces |
+| `PathTracer.Resolve` | graphics | under a denoiser, also the frame without the volumes (`PathTracer.ColorBeforeVolumes`) |
 
 - **Moment shadow maps** (`MomentShadow.hlsli`, `VolumeShadowLayout.cpp`): up to
   `pathtracer.volumeLights` (8) light groups, ranked by power over (distance to the volumes' box^2 +
@@ -1257,6 +1265,22 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
   offset every frame, so that blocks do not stay in place (else the converged light stepped every 4
   pixels). Densities, depths and transmittances stay every pixel's own; the wave skips emptiness where
   all its rays are empty, and all its lanes stay in the loop.
+- **Under a denoiser** (DLSS Ray Reconstruction, §8.5): it reprojects its history with the guides,
+  which describe the surfaces. Smoke over the sky moved with the sky, and smoke over a far wall with
+  the wall, so moving the camera left trails of smoke behind and the smoke's light flickered as the
+  history failed to match. As RR's integration guide asks for transparent layers, the march rewrites
+  the guides where the volumes hide most of the surface (`DescribeVolumesInGuides`): from an opacity
+  of 0.5, depth, motion and normal together describe the volumes (at the depth their light comes from,
+  facing the camera), and the albedos (towards the volume's albedo, no specular) and roughness (towards
+  1) blend by their opacity. The resolve also writes the frame without the volumes (the trace's samples
+  resolved alike, equal to the frame where no volume is in front), `slots::kColorBeforeTransparency`,
+  which RR takes as its color-before-transparency guide. Strafing past the `braziers` plumes up close
+  at 0.015 m a frame (1920 x 1080, Quality), the last frame against a static camera's at its place
+  (display luminance after x / (1 + x)): mean difference 0.0145 -> 0.0010, 99th percentile 0.158 ->
+  0.0065 (the guides alone 0.0069, the frame without the volumes alone 0.0085); moving forwards at
+  0.02 m a frame 0.152 -> 0.017. Over the last four frames the difference's own change from frame to
+  frame (flicker) fell from 0.0126 to 0.0045 (99th percentile). Turning in place had no trails (no
+  parallax), and a static camera's image is unchanged (within 0.0005).
 - **Debug views** 11 (march steps per pixel, `debugScale` steps to the top of the Turbo colormap),
   12 (sampling rate: blue every pixel, green 2 x 2, red 4 x 4) and 13 (volumes per ray). Direct-only
   (8) and indirect-only (9) leave the probes' and the lights' light out of the march respectively.
@@ -1302,6 +1326,8 @@ Validation (`src/features/pathtracer/tests/VolumeMarchTests.cpp`, `tests/MomentT
 - `PathTracer_RealTimeVolumesAreMarched` (Null backend): the passes and pipelines, the maps rendered
   once, the probes on the compute queue beside the trace, the status, the debug views, the maps
   rendered again after a change, tracking while accumulating and the march with `volumeMarch=2`.
+  `PathTracer_RealTimeVolumesGuideDenoisers`: with a feature that reads the guides, the march writes
+  them and the resolve writes the frame without the volumes, not when accumulating.
 - GPU (`volumeMarch=2`, accumulating 512 frames of 4 spp, 160 x 90) against the tracked CPU reference
   (512 spp): `smoke` -0.01% (the plume +0.55%, relative MSE 0.006), `braziers` +1.1% (the plumes
   +1.4%); the GPU and the CPU twin agree within 0.3% in the plume.
