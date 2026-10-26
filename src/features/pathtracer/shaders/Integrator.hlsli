@@ -85,8 +85,8 @@
 #include "Bsdf.hlsli"
 #include "Camera.hlsli"
 #include "Sampling.hlsli"
-#include "CloudMaps.hlsli"
 #include "air/renderer/shader/CloudLookup.hlsli"
+#include "CloudMaps.hlsli"
 #include "air/renderer/shader/SkyLookup.hlsli"
 #include "air/renderer/shader/VolumeLookup.hlsli"
 

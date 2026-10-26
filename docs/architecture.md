@@ -965,7 +965,9 @@ whose sun lights the clouds), and the editor's Scene panel edits it.
     over coordinates warped by about 700 m, makes clouds of many sizes with uneven outlines. Bases are
     flat at the condensation level; above, a cloud narrows into a dome, billowy cellular noise in
     cells of 640 to 160 m carves its flanks and top (barely its base) and liquid water grows with
-    height above the base.
+    height above the base. Most clouds stay shallow (fair-weather cumulus: their tops at
+    0.12 + 0.88 strength^1.6 of the layer), the strongest grow tall; tall ones everywhere made a wall
+    of clouds along the horizon.
   - the detail, 128^3 texels of cellular noise repeating every 1.024 km (25 to the tile), which
     erodes the base's fringe a little at render time (strength 0.4); the eroded density is then
     sharpened (times 5, clamped to 1): crisp outlines, even interiors. The earlier generator (a
@@ -974,6 +976,13 @@ whose sun lights the clouds), and the editor's Scene panel edits it.
   - majorants, one per 8 x 4 x 8 base texels plus the texels around them that trilinear filtering
     reaches. They bound the density everywhere because the erosion only lowers it and the
     sharpening is monotonic.
+- **The planet's curvature**: the layer's heights are altitudes above a sphere of 6371 km under the
+  scene's origin, `a(p) = p.y + (p.x^2 + p.z^2) / 2R` (exact to a metre within the 100 km a ray goes):
+  100 km away the layer is 785 m lower, so it sinks towards the horizon instead of a flat sheet whose
+  edge-on view fills it. In (x, altitude, z) the grid stays flat and a ray is a parabola: the DDA
+  crosses its altitude boundaries at the parabola's roots (`CloudCrossing`), its x and z boundaries
+  as before. The shadow map (§8.19) starts at the base's altitude and its lookup follows the sun's
+  ray to it.
 - **One lookup, two renderers**: `shader/CloudLookup.hlsli` (the density, a 3D DDA over the
   majorant cells that skips empty ones, delta and ratio tracking, the phase function) is shared
   like the integrator. The GPU samples the textures with hardware trilinear filtering (the root
@@ -1023,8 +1032,8 @@ Validation:
 - `Scene_CloudsStayAboveTheGeometry`, `Scene_CloudResourcesFollowEdits`.
 - GPU against the CPU reference on `cumulus` (160x90, `--sun 38,-20`, 8192 against 2048 spp): the
   means differ by 0.014%; sky, horizon and ground separately by at most 0.2%.
-  With the 25.6 km generator (240x135, 1024 frames against 64 spp on the CPU): -0.08%, 15 x 15 blocks
-  within -1.3% .. +0.8% (the CPU's noise).
+  With the 25.6 km generator and the curved layer (240x135, 1024 frames against 64 spp on the CPU):
+  0.00%, 15 x 15 blocks within -1.2% .. +0.9% (the CPU's noise).
 - Cost (RTX 5070, 960x540, 4 spp per frame, front-lit `cumulus`): 78 ms per frame. Multiple
   scattering in thick media is the most expensive transport here, and noisy: a cloud pixel's
   samples have a relative standard deviation of about 0.8, so clouds need hundreds of samples (or
@@ -1032,9 +1041,8 @@ Validation:
   In real time the clouds are ray marched into maps instead (§8.19).
 - The air between a ray's origin and its first collision with the clouds dims and adds to their
   light (§8.9's aerial perspective), so distant clouds fade into the haze.
-- Not modelled: the planet's curvature (the layer is flat and ends 100 km along a ray), wind, the
-  scene's own geometry lighting the clouds, the clouds' shadows in the air between them and the
-  viewer.
+- Not modelled: wind, the scene's own geometry lighting the clouds, the clouds' shadows in the air
+  between them and the viewer; a ray ends 100 km out.
 
 ### 8.11 Neural radiance cache
 
@@ -1811,9 +1819,9 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   extinction (Hillaire 2016). The air in front dims the clouds' light and adds its own where they hide
   the sky, as a path's walk sees it.
 - **Matched** to the path traced clouds (`cloudMarch=0`, accumulated) on `cumulus` at 640 x 360, the
-  march accumulated with `cloudMarch=2`: the image's mean -2.5% (8 x 8 blocks: 5th percentile -9.7%,
-  95th +9.5%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.4%
-  with the sun at 25 degrees, azimuth 160 (-7.1%, +17.5%). The half-size layer alone would account
+  march accumulated with `cloudMarch=2`: the image's mean -1.0% (8 x 8 blocks: 5th percentile -3.2%,
+  95th +11.8%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.5%
+  with the sun at 25 degrees, azimuth 160 (-2.3%, +19.4%). The half-size layer alone would account
   for 1% of those blocks.
 - A yawing camera (0.5 degrees a frame) shows no trails.
 - Not done: the clouds in the real-time volumes' shadow maps (with `volumeMarch` the paths walk

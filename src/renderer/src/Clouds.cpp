@@ -302,7 +302,8 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
                             continue;
                         }
                         const float strength = Saturate(excess / std::max(highest - threshold, 1e-6f));
-                        const float cloudTop = std::pow(strength, 0.7f); // of the layer
+                        // Of the layer: most clouds stay shallow (fair-weather cumulus), the strongest grow tall.
+                        const float cloudTop = 0.12f + 0.88f * std::pow(strength, 1.6f);
                         const float r = h / cloudTop;
                         if (r >= 1.0f)
                         {

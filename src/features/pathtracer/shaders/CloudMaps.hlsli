@@ -5,8 +5,9 @@
 //   float4 CloudSkySample(CloudData c, float2 uv)     CloudData::skyMap, bilinear, clamping
 //
 // The shadow map holds, over one tile of the clouds (which repeat), the optical depth along the sun
-// from a point of the cloud base up through the layer: below the base (all geometry is) the sun's
-// transmittance is that of the point where the sun's ray crosses the base. The sky map holds what the
+// from a point of the cloud base (at its altitude: the base curves with the planet, CloudLookup.hlsli)
+// up through the layer: below the base (all geometry is) the sun's transmittance is that of the point
+// where the sun's ray crosses the base. The lookups need CloudLookup.hlsli included before. The sky map holds what the
 // clouds add to (rgb, nits) and leave of (a) the sky behind them towards each direction of the upper
 // hemisphere, seen from the camera: the clouds are kilometres away, so it serves every ray that leaves
 // the scene upwards.
@@ -41,11 +42,16 @@ float3 CloudSkyMapDirection(float2 uv)
 // The sun's transmittance through the clouds from `p` (below their base) towards `wi`.
 float CloudShadowMapTransmittance(CloudData c, float3 p, float3 wi)
 {
-    if (c.enabled == 0u || wi.y <= 0.0f || p.y >= c.bottom)
+    if (c.enabled == 0u || wi.y <= 0.0f || CloudAltitude(p) >= c.bottom)
     {
         return 1.0f;
     }
-    float2 q = float2(p.x, p.z) + float2(wi.x, wi.z) * ((c.bottom - p.y) / wi.y);
+    float s = CloudCrossing(MakeCloudCurve(p, wi), c.bottom, 0.0f);
+    if (s > kCloudMaxDistance)
+    {
+        return 1.0f;
+    }
+    float2 q = float2(p.x, p.z) + float2(wi.x, wi.z) * s;
     return exp(-max(CloudShadowSample(c, q / c.tileSize), 0.0f));
 }
 

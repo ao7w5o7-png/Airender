@@ -5,17 +5,72 @@
 //   float CloudDetailSample(CloudData c, float3 uvw)  the detail texture, likewise
 //   float CloudMajorantLoad(CloudData c, uint cell)   extinction per metre bounding the cell
 //
+// The layer follows the planet's curvature: its heights are altitudes above a sphere of radius
+// kCloudPlanetRadius under the scene's origin, a(p) = p.y + (p.x^2 + p.z^2) / 2R (exact to a metre
+// within kCloudMaxDistance). Far away the layer sinks towards the horizon, as clouds 100 km off do
+// (785 m lower), instead of a flat sheet whose edge-on view fills the horizon with clouds. In
+// (x, altitude, z) the grid stays flat and a ray is a parabola.
+//
 // Tracking walks the majorant cells along the ray (a 3D DDA over the periodic grid, which skips
-// empty cells whole) and samples tentative collisions in each at the rate of its majorant: delta
-// tracking finds the first real collision, ratio tracking estimates transmittance. Both are
-// unbiased because no density exceeds its cell's majorant.
+// empty cells whole: its x and z boundaries are crossed where the line crosses them, its altitude
+// boundaries where the parabola does) and samples tentative collisions in each at the rate of its
+// majorant: delta tracking finds the first real collision, ratio tracking estimates transmittance.
+// Both are unbiased because no density exceeds its cell's majorant.
 #ifndef AIR_RENDERER_CLOUD_LOOKUP_HLSLI
 #define AIR_RENDERER_CLOUD_LOOKUP_HLSLI
 
 #include "air/renderer/shader/CloudShared.h"
 
 AIR_CONST float kCloudPi = 3.14159265358979f;
-AIR_CONST float kCloudMaxDistance = 100000.0f; // metres along a ray; the layer is flat, not curved
+AIR_CONST float kCloudMaxDistance = 100000.0f; // metres along a ray
+AIR_CONST float kCloudPlanetRadius = 6371000.0f;
+
+// A point's altitude, the height the layer's grid is indexed by.
+float CloudAltitude(float3 p)
+{
+    return p.y + (p.x * p.x + p.z * p.z) * (0.5f / kCloudPlanetRadius);
+}
+
+// The altitude along o + t d: a t^2 + b t + c.
+struct CloudCurve
+{
+    float a;
+    float b;
+    float c;
+};
+
+CloudCurve MakeCloudCurve(float3 o, float3 d)
+{
+    CloudCurve q;
+    q.a = (d.x * d.x + d.z * d.z) * (0.5f / kCloudPlanetRadius);
+    q.b = d.y + (o.x * d.x + o.z * d.z) / kCloudPlanetRadius;
+    q.c = CloudAltitude(o);
+    return q;
+}
+
+// The first t > tFrom where the altitude along the curve is `level`; 3e38 if none.
+float CloudCrossing(CloudCurve q, float level, float tFrom)
+{
+    float c = q.c - level;
+    if (q.a < 1e-14f)
+    {
+        float t = abs(q.b) > 1e-20f ? -c / q.b : -1.0f;
+        return t > tFrom ? t : 3.0e38f;
+    }
+    float discriminant = q.b * q.b - 4.0f * q.a * c;
+    if (discriminant < 0.0f)
+    {
+        return 3.0e38f;
+    }
+    // The numerically stable pair of roots.
+    float s = sqrt(discriminant);
+    float h = -0.5f * (q.b + (q.b >= 0.0f ? s : -s));
+    float r0 = h / q.a;
+    float r1 = h != 0.0f ? c / h : r0;
+    float lo = min(r0, r1);
+    float hi = max(r0, r1);
+    return lo > tFrom ? lo : (hi > tFrom ? hi : 3.0e38f);
+}
 
 uint CloudWrap(int i, uint n)
 {
@@ -28,7 +83,8 @@ uint CloudWrap(int i, uint n)
 // sharpened base texture bound it.
 float CloudDensity(CloudData c, float3 p)
 {
-    float h = (p.y - c.bottom) / (c.top - c.bottom);
+    float altitude = CloudAltitude(p);
+    float h = (altitude - c.bottom) / (c.top - c.bottom);
     if (h < 0.0f || h > 1.0f)
     {
         return 0.0f;
@@ -41,7 +97,7 @@ float CloudDensity(CloudData c, float3 p)
         return saturate(base * c.sharpness);
     }
     float detail = CloudDetailSample(
-        c, float3(frac(p.x / c.detailPeriod), frac(p.z / c.detailPeriod), frac(p.y / c.detailPeriod)));
+        c, float3(frac(p.x / c.detailPeriod), frac(p.z / c.detailPeriod), frac(altitude / c.detailPeriod)));
     float erosion = detail * c.detailStrength * (1.0f - base);
     return saturate((base - erosion) / (1.0f - erosion) * c.sharpness);
 }
@@ -52,19 +108,30 @@ struct CloudMarch
 {
     float t;    // start of the next segment
     float tEnd; // where the ray leaves the layer (or stops)
-    int cellX;  // current cell, not wrapped
+    int cellX;  // current cell, not wrapped (y: of altitude)
     int cellY;
     int cellZ;
     int stepX;
-    int stepY;
+    int stepY; // the altitude boundary at nextY: +1 the upper, -1 the lower
     int stepZ;
     float nextX; // ray distance to the next cell boundary on each axis
     float nextY;
     float nextZ;
-    float deltaX; // ray distance between two boundaries on each axis
-    float deltaY;
+    float deltaX; // ray distance between two boundaries along x and z
     float deltaZ;
+    float cellHeight;
+    CloudCurve curve;
 };
+
+// The next altitude boundary of cell y after tFrom, and which one it is.
+void CloudNextAltitudeBoundary(CloudData c, AIR_INOUT(CloudMarch) m, float tFrom)
+{
+    float lower = c.bottom + float(m.cellY) * m.cellHeight;
+    float up = CloudCrossing(m.curve, lower + m.cellHeight, tFrom);
+    float down = CloudCrossing(m.curve, lower, tFrom);
+    m.stepY = up <= down ? 1 : -1;
+    m.nextY = min(up, down);
+}
 
 // The DDA along one axis from the point at distance `start`: its cell, the step, the distance to
 // the cell's far boundary and between boundaries.
@@ -95,44 +162,47 @@ void CloudAxis(float origin, float direction, float cellSize, float start, AIR_O
 // Starts the march along o + t d over [0, tMax]; false when that misses the layer.
 bool BeginCloudMarch(CloudData c, float3 o, float3 d, float tMax, AIR_OUT(CloudMarch) m)
 {
+    m.curve = MakeCloudCurve(o, d);
+    float altitude = m.curve.c;
+    // The first stretch of the ray in the layer (the altitude is convex along it: it may dip into the
+    // layer from above and leave it below, but rises for good once it rises).
     float t0 = 0.0f;
-    float t1 = min(tMax, kCloudMaxDistance);
-    if (abs(d.y) < 1e-9f)
+    if (altitude < c.bottom)
     {
-        if (o.y < c.bottom || o.y > c.top)
-        {
-            t1 = 0.0f;
-        }
+        t0 = CloudCrossing(m.curve, c.bottom, 0.0f);
     }
-    else
+    else if (altitude > c.top)
     {
-        float ta = (c.bottom - o.y) / d.y;
-        float tb = (c.top - o.y) / d.y;
-        t0 = max(t0, min(ta, tb));
-        t1 = min(t1, max(ta, tb));
+        t0 = CloudCrossing(m.curve, c.top, 0.0f);
     }
+    float after = t0 + max(1e-3f, t0 * 1e-6f);
+    float t1 = min(min(CloudCrossing(m.curve, c.bottom, after), CloudCrossing(m.curve, c.top, after)),
+                   min(tMax, kCloudMaxDistance));
     m.t = t0;
     m.tEnd = t1;
-    if (c.enabled == 0u || t0 >= t1)
+    m.cellHeight = (c.top - c.bottom) / float(c.cellsY);
+    m.cellX = 0;
+    m.cellY = 0;
+    m.cellZ = 0;
+    m.stepX = 0;
+    m.stepY = 0;
+    m.stepZ = 0;
+    m.nextX = 0.0f;
+    m.nextY = 0.0f;
+    m.nextZ = 0.0f;
+    m.deltaX = 0.0f;
+    m.deltaZ = 0.0f;
+    if (c.enabled == 0u || !(t0 < t1))
     {
-        m.cellX = 0;
-        m.cellY = 0;
-        m.cellZ = 0;
-        m.stepX = 0;
-        m.stepY = 0;
-        m.stepZ = 0;
-        m.nextX = 0.0f;
-        m.nextY = 0.0f;
-        m.nextZ = 0.0f;
-        m.deltaX = 0.0f;
-        m.deltaY = 0.0f;
-        m.deltaZ = 0.0f;
+        m.tEnd = m.t;
         return false;
     }
-    // Cells are anchored at (0, bottom, 0).
+    // Cells are anchored at (0, bottom, 0); the altitude's cell at the middle of the first step.
     CloudAxis(o.x, d.x, c.tileSize / float(c.cellsX), t0, m.cellX, m.stepX, m.nextX, m.deltaX);
-    CloudAxis(o.y - c.bottom, d.y, (c.top - c.bottom) / float(c.cellsY), t0, m.cellY, m.stepY, m.nextY, m.deltaY);
     CloudAxis(o.z, d.z, c.tileSize / float(c.cellsZ), t0, m.cellZ, m.stepZ, m.nextZ, m.deltaZ);
+    float start = CloudAltitude(o + d * min(after, 0.5f * (t0 + t1)));
+    m.cellY = min(max(int(floor((start - c.bottom) / m.cellHeight)), 0), int(c.cellsY) - 1);
+    CloudNextAltitudeBoundary(c, m, after);
     return true;
 }
 
@@ -160,8 +230,9 @@ bool NextCloudSegment(CloudData c, AIR_INOUT(CloudMarch) m, AIR_OUT(float) t0, A
     }
     else if (m.nextY <= m.nextZ)
     {
+        float crossed = m.nextY;
         m.cellY += m.stepY;
-        m.nextY += m.deltaY;
+        CloudNextAltitudeBoundary(c, m, crossed + max(1e-3f, crossed * 1e-6f));
     }
     else
     {

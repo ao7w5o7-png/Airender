@@ -138,8 +138,7 @@ CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, 
     CloudRay ray;
     ray.light = float3(0.0f, 0.0f, 0.0f);
     ray.transmittance = 1.0f;
-    float middle = abs(d.y) > 1e-6f ? (0.5f * (c.bottom + c.top) - o.y) / d.y : -1.0f;
-    ray.depth = middle > 0.0f ? min(middle, kCloudMaxDistance) : kCloudMaxDistance;
+    ray.depth = min(CloudCrossing(MakeCloudCurve(o, d), 0.5f * (c.bottom + c.top), 0.0f), kCloudMaxDistance);
     CloudMarch m;
     if (!BeginCloudMarch(c, o, d, tMax, m))
     {

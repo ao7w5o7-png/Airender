@@ -8,9 +8,9 @@
 
 [[vk::push_constant]] ConstantBuffer<CloudMarchConstants> g : register(b0);
 
+#include "CloudMarch.hlsli"
 #define AIR_PT_CLOUD_MAPS_MAPPING_ONLY 1 // the mapping, not the lookups
 #include "CloudMaps.hlsli"
-#include "CloudMarch.hlsli"
 
 [numthreads(8, 8, 1)]
 void Main(uint3 id : SV_DispatchThreadID)

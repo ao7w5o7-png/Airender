@@ -226,16 +226,21 @@ TEST(Clouds_VolumeCoversTheRequestedSkyAndMajorantsBoundIt)
     }
     EXPECT(checked > 10000);
 
-    // The density repeats with the tile horizontally (up to the filter's 8-bit weights: rounding
-    // the shifted coordinate may move a weight by 1/256).
+    // The density repeats with the tile horizontally at the same altitude (the layer curves with the
+    // planet; up to the filter's 8-bit weights: rounding the shifted coordinate may move a weight by
+    // 1/256).
     for (int i = 0; i < 200; ++i)
     {
         const float3 u = CloudReader::Rand3(seed);
         const float3 p(u.x * c.tileSize, c.bottom + u.y * (c.top - c.bottom), u.z * c.tileSize);
+        float3 q = p + float3(c.tileSize, 0.0f, -2.0f * c.tileSize);
+        q.y += reader.CloudAltitude(p) - reader.CloudAltitude(q);
         const float a = reader.CloudDensity(c, p);
-        const float b = reader.CloudDensity(c, p + float3(c.tileSize, 0.0f, -2.0f * c.tileSize));
+        const float b = reader.CloudDensity(c, q);
         EXPECT(std::abs(a - b) < 1.2e-2f);
     }
+    // 100 km away the layer is 785 m lower.
+    EXPECT(std::abs(reader.CloudAltitude(float3(100000.0f, 0.0f, 0.0f)) - 784.8f) < 1.0f);
 }
 
 // Ratio tracking's mean and delta tracking's chance to pass are both exp(-optical depth), which a
@@ -255,11 +260,10 @@ TEST(Clouds_TrackingMatchesARayMarch)
         const float azimuth = CloudReader::Rand(seed) * 6.2831853f;
         const float3 d(std::cos(elevation) * std::cos(azimuth), std::sin(elevation),
                        std::cos(elevation) * std::sin(azimuth));
-        const double tIn = c.bottom / d.y;
-        const double tOut = c.top / d.y;
+        // Through the whole layer, which curves with the planet (its altitude, not y).
         constexpr double kStep = 0.5;
         double depth = 0.0;
-        for (double t = tIn + 0.5 * kStep; t < tOut; t += kStep)
+        for (double t = 0.5 * kStep; reader.CloudAltitude(o + d * float(t)) <= c.top + 1.0f; t += kStep)
         {
             depth += c.extinction * reader.CloudDensity(c, o + d * float(t)) * kStep;
         }
