@@ -19,7 +19,7 @@ struct ReferenceSettings
     u32 width = 64;
     u32 height = 64;
     u32 samplesPerPixel = 64;
-    u32 maxBounces = 8;
+    u32 maxBounces = 32; // as pathtracer.maxBounces
     bool nextEventEstimation = true;
     u32 lightTreeBounces = 0; // as pathtracer.lightTreeBounces
     u32 cloudEvents = 256;    // as pathtracer.cloudEvents

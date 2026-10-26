@@ -20,7 +20,8 @@ public:
     PathTracerFeature()
     {
         mParameters.Add("spp", &mSettings.samplesPerPixelPerFrame, "Samples per pixel traced each frame", 1, 4096);
-        mParameters.Add("maxBounces", &mSettings.maxBounces, "Maximum path length (0 = emitters only)", 0, 64);
+        mParameters.Add("maxBounces", &mSettings.maxBounces,
+                        "Maximum path length (0 = emitters only); Russian roulette ends most paths before it", 0, 64);
         mParameters.Add("targetSamples", &mSettings.targetSamples,
                         "Samples per pixel at which the image is final and tracing stops", 1, 1u << 20);
         mParameters.Add("accumulate", &mSettings.accumulate,

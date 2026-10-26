@@ -540,7 +540,9 @@ differ.
   The light list is also a Walker/Vose alias table, so choosing a light is O(1) (one or two loads)
   whatever the light count; the alias decision uses its own random number, so the selection
   probability is exactly `probability`, as MIS assumes. A light tree can choose instead (§8.6).
-  Russian roulette from the third bounce.
+  Russian roulette from the third bounce ends paths without bias; `maxBounces` (32) is a cap only.
+  At 8 (the earlier default) `door`, lit through a door ajar, lacked 13% of its indirect light
+  (`cornell_box` 1%, `sponza` and `picapica` under 0.05%); 32 costs 1-7% of a real-time frame.
 - **Hardware ray tracing**: a DXR ray generation shader runs the whole path (bounce loop in raygen);
   primary, bounce and shadow rays are inline `RayQuery`s. `TraceRay` into a closest-hit shader (20
   byte payload) measured 19-29% slower on every test scene at 1080p (cornell_box 2.00 -> 1.53 ms,
@@ -1090,7 +1092,7 @@ Validation:
 - White furnace (`furnace=1`): the `furnace` scene's spheres vanish (accumulated, -0.01%). Inside
   the Cornell box, where albedo 1 keeps nearly all light and a self-trained cache feeds on its own
   predictions, it reads +1.4% (1 in 1 paths unbiased) to +2.6% (1 in 16) over the true 0.18, which
-  the box's 8 bounces of plain path tracing miss by 14%.
+  8 bounces of plain path tracing (then the default) miss by 14%.
 - Against a same-jitter reference (2048 spp), 480 x 270, 4 spp per frame after 62 frames, relative
   MSE (bias of the mean):
 
@@ -1732,10 +1734,14 @@ FILE[,X,Y,Z[,HEIGHT[,YAW]]]` adds any model file to any scene, and the editor's 
   machines' `Plastic_Decals` have none and are left out, as are the blue display stands each model was
   shown on (the diorama's is its floor). Scales differ by file and the mug's unit is wrong, so they are
   given per file. One robot is imported and six more instance its meshes.
+- **sponza**: every material of the file scales its texture by 0.588 (a constant diffuse factor the
+  original export carried), which leaves its stone reflecting 10-20% where limestone reflects 40-60%;
+  as most of the arcades' light arrives by bouncing, that darkened them by the factor per bounce. The
+  scene keeps the textures alone (stone 25-36%), at EV100 11 for the shade that fills the view.
 - **Measured** (RTX 5070): loading takes 3.9 s (`picapica`), 1.8 s (`sponza`), 1.9 s (`helmets`), most
   of it decoding textures; a real-time frame at 1920 x 1080 with `pathtracer,nrd,taa,tonemap`: `sponza`
   21 ms (`Trace` 8.2 ms), `picapica` 18 ms (5.3 ms). The D3D12 debug layer reports no errors for the
-  three in real time.
+  three in real time. GPU accumulation against the CPU reference: `sponza` -0.08%, `picapica` -0.04%.
 - **Limits**: emissive textures, transmission and texture transforms are not read; textures are
   sampled at level 0 (§8.15).
 - **Validation**: `SceneFiles_*` (texture packing and the normal's flip, a glTF and an OBJ written by the

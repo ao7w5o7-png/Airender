@@ -331,10 +331,21 @@ SceneDesc MakeSponza(const std::filesystem::path& root, std::string* error)
     {
         return scene;
     }
+    // Every material of the file scales its texture by 0.588 (a constant diffuse factor the original
+    // export carried): its stone then reflects 10-20%, where limestone reflects 40-60%, and the light
+    // that reaches the arcades only by bouncing (most of it) falls by that factor per bounce. The
+    // textures alone (stone 25-36%) are kept.
+    for (Material& m : scene.materials)
+    {
+        if (m.textures != kNoTextures)
+        {
+            m.baseColor = float3(1.0f);
+        }
+    }
     AddSun(scene, 62.0f, 110.0f);
     LookAt(scene.camera, {-10.5f, 1.7f, -0.4f}, {4.0f, 3.2f, 0.6f});
     scene.camera.verticalFov = 1.0f;
-    scene.camera.ev100 = 12.0f;
+    scene.camera.ev100 = 11.0f; // the arcades' shade fills the view
     return scene;
 }
 
@@ -375,7 +386,7 @@ SceneDesc MakeHelmets(const std::filesystem::path& root, std::string* error)
             AddInstance(scene, "Plinth", AddMesh(scene, MakeBox("Plinth", {0.16f, 0.125f, 0.16f})), stone);
         SetTransform(plinth, {x, 0.125f, x == 0.0f ? 0.1f : 0.0f});
     }
-    const u32 floor = AddMaterial(scene, {.name = "Floor", .baseColor = Srgb(0.32f, 0.3f, 0.28f), .roughness = 0.5f});
+    const u32 floor = AddMaterial(scene, {.name = "Floor", .baseColor = Srgb(0.55f, 0.53f, 0.5f), .roughness = 0.5f});
     AddInstance(scene, "Floor",
                 AddMesh(scene, MakeQuad("Floor", {-30.0f, 0.0f, 30.0f}, {30.0f, 0.0f, 30.0f}, {30.0f, 0.0f, -30.0f},
                                         {-30.0f, 0.0f, -30.0f}, {0.0f, 1.0f, 0.0f})),

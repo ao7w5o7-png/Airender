@@ -129,7 +129,9 @@ struct PathTracerSettings
     u32 width = 1920;
     u32 height = 1080;
     u32 samplesPerPixelPerFrame = 4; // raise for offline throughput, lower for interactive preview
-    u32 maxBounces = 8;
+    // A cap only: Russian roulette ends paths without bias long before it. 8 kept 87% of the indirect
+    // light of `door` (a room lit through a door ajar); 32 costs 1-7% of a real-time frame.
+    u32 maxBounces = 32;
     u32 targetSamples = 1024; // IsConverged() once reached; tracing stops there
     // false: every frame shows only its own samples (input for a real-time denoiser such as DLSS RR,
     // which needs the frame's jitter from the blackboard).
