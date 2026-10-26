@@ -1,8 +1,10 @@
 // The real-time clouds' layer at the render's size (docs/architecture.md §8.19): the pixels this frame
 // marched (CloudMarch.hlsl, one of every 4 x 4) blend into their history, the others follow theirs back
 // to the previous frame along the depth the clouds' light comes from, clamped to the march's
-// neighbourhood so that nothing trails where the clouds changed. Without history (the first frame, off
-// screen) the march is upsampled.
+// neighbourhood so that nothing trails where the clouds changed. A pixel whose history lies off screen
+// (what a moving camera brings in at the edges) is marched here at once: upsampled from the sparse march
+// it showed as streaks along the edge for the 16 frames it took to fill in. Without any history (the
+// first frame after a reset) the march is upsampled.
 
 #include "air/renderer/shader/SceneShared.h"
 #include "PathTracerShared.h"
@@ -39,7 +41,21 @@ void Main(uint3 id : SV_DispatchThreadID)
         float2 size = float2(f.width, f.height);
         float3 d = CameraRayDirection(f.camera, float2(id.xy) + 0.5f, size);
         float2 previous = CameraProject(f.previousCamera, Xyz(f.camera.position) + d * depth, 1.0f, size);
-        if (all(previous >= 0.0f) && all(previous < size))
+        if (!all(previous >= 0.0f) || !all(previous < size))
+        {
+            if (!fresh)
+            {
+                float cycle = float(f.frameIndex / 16u);
+                float ign = frac(52.9829189f * frac(0.06711056f * float(id.x) + 0.00583715f * float(id.y)));
+                float2 u = frac(ign + cycle * float2(0.7548777f, 0.5698403f) + float2(0.0f, 0.5f));
+                float3 ray = CameraRayDirection(f.camera, float2(id.xy) + u, size);
+                CloudRay marchedHere = MarchClouds(f, Xyz(f.camera.position), ray, 1e30f, frac(ign + 0.25f),
+                                                   frac(ign * 0.7548777f + cycle * 0.4142136f), g.steps, g.lightSamples);
+                result = float4(marchedHere.light, marchedHere.transmittance);
+                depth = marchedHere.depth;
+            }
+        }
+        else
         {
             float4 lo = current;
             float4 hi = current;

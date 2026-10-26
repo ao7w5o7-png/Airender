@@ -1828,7 +1828,10 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   scale of 0.67 a ninth of the output's): the clouds were soft and their outlines blocky against the
   sky. At the render's size with a 4 x 4 pattern the march lights as many pixels a frame as before,
   and a still view is sharp after 16 frames, its outlines antialiased by the jittered rays.
-- A yawing camera (0.5 degrees a frame) shows no trails.
+- A yawing camera (0.5 degrees a frame) shows no trails. What a moving camera brings in at the edges
+  has no history to follow back: `Clouds.Reconstruct` marches those pixels at once (upsampled from
+  the sparse march they showed as streaks along the edge for 16 frames); yawing a degree a frame it
+  takes 0.31 ms instead of 0.10.
 - Not done: the clouds in the real-time volumes' shadow maps (with `volumeMarch` the paths walk
   through the clouds); the sky map's parallax for points far from the camera; the furnace walks
   through the clouds (`furnace=1` checks their energy, §8.10).
