@@ -1794,8 +1794,8 @@ FILE[,X,Y,Z[,HEIGHT[,YAW]]]` adds any model file to any scene, and the editor's 
 
 In real time (`pathtracer.cloudMarch`, 0 off, 1 when not accumulating (the default), 2 always) the
 clouds of §8.10 are not walked through by every path: a `cumulus` frame at 1920 x 1080 under
-`pathtracer,nrd,taa,tonemap` took 93 ms (`Trace` 89 ms), and takes 7.6 ms with them marched (the
-clouds' passes 0.77 ms). `src/CloudMarcher.h` follows Schneider's Nubis (the clouds of Horizon Zero
+`pathtracer,nrd,taa,tonemap` took 93 ms (`Trace` 89 ms), and takes 8.0 ms with them marched (the
+clouds' passes 0.76 ms). `src/CloudMarcher.h` follows Schneider's Nubis (the clouds of Horizon Zero
 Dawn and Forbidden West, SIGGRAPH 2015-2023): the density is ray marched rather than tracked, empty
 space is skipped whole (the majorant cells of `CloudLookup.hlsli`, which bound the density the way
 Nubis' signed distance field bounds its voxels), a frame marches a sixteenth of the render's pixels
@@ -1806,11 +1806,13 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
 |---|---|---|
 | `Clouds.Shadow` | R32F, 512 x 512 over one tile of the clouds (they repeat): the optical depth along the sun from each point of their base up through the layer (steps of at most 25 m), rendered when the scene changes | every sun NEE below the clouds (`CloudSunTransmittance`): the transmittance of the point where the sun's ray crosses their base, instead of ratio tracking |
 | `Clouds.Sky` | RGBA32F, 128 x 128 over the upper hemisphere (the octahedron's upper half): what the clouds add to and leave of the sky towards each direction, seen from the camera (48 steps, fixed offsets) | rays that leave the scene after a bounce (`EscapeRadiance`): the clouds are kilometres away, so one viewpoint serves the scene |
-| `Clouds.March` | one pixel of every 2 x 2 block of the half-size layer, a different one each frame (96 steps, jittered) | `Clouds.Reconstruct` |
-| `Clouds.Reconstruct` | RGBA32F + R32F at half the render size: the marched pixels blended into their history (0.4), the others reprojected along the depth of the clouds' light, clamped to the march's 3 x 3 neighbourhood | the camera's rays (`AddCloudLayer`): the clouds' light added and what they let through scaling the sample and the denoiser's signals, where the ray found nothing before their front |
+| `Clouds.March` | one pixel of every 4 x 4 block of the layer, a different one each frame in a Bayer order (96 steps; the ray, its steps and its samples towards the sun jittered) | `Clouds.Reconstruct` |
+| `Clouds.Reconstruct` | RGBA32F + R32F at the render's size: the marched pixels blended into their history (0.4), the others reprojected along the depth of the clouds' light, clamped to the march's 3 x 3 neighbourhood | the camera's rays (`AddCloudLayer`): the clouds' light added and what they let through scaling the sample and the denoiser's signals, where the ray found nothing before their front |
 
 - **Light at a step**: the sun's single scattering with the clouds' phase function (§8.10, delta-M
-  scaled) and an optical depth towards the sun from 6 samples whose steps double from 30 m; the
+  scaled) and an optical depth towards the sun from 8 samples whose steps grow by 1.6 from 20 m (to
+  1.4 km), each at a place jittered along its step every frame: at fixed places the far, long steps
+  stamped the outlines of the clouds they reached into the light as bands; the
   light that scattered more than once, isotropic, falling off as the two-stream solution of a
   conservative slab, `4.4 density / (1 + 0.3 tau)` times the sun's irradiance over 4 pi (octaves of
   single scattering, Wrenninge et al. 2013, came out 50% dark inside cumulus, whose optical depths
@@ -1819,10 +1821,13 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   extinction (Hillaire 2016). The air in front dims the clouds' light and adds its own where they hide
   the sky, as a path's walk sees it.
 - **Matched** to the path traced clouds (`cloudMarch=0`, accumulated) on `cumulus` at 640 x 360, the
-  march accumulated with `cloudMarch=2`: the image's mean -1.0% (8 x 8 blocks: 5th percentile -3.2%,
-  95th +11.8%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.5%
-  with the sun at 25 degrees, azimuth 160 (-2.3%, +19.4%). The half-size layer alone would account
-  for 1% of those blocks.
+  march accumulated with `cloudMarch=2`: the image's mean -0.9% (8 x 8 blocks: 5th percentile -5.1%,
+  95th +17.3%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.5%
+  with the sun at 25 degrees, azimuth 160 (-3.4%, +27.3%).
+- The layer was half the render's size at first (a quarter of its pixels; under the editor's render
+  scale of 0.67 a ninth of the output's): the clouds were soft and their outlines blocky against the
+  sky. At the render's size with a 4 x 4 pattern the march lights as many pixels a frame as before,
+  and a still view is sharp after 16 frames, its outlines antialiased by the jittered rays.
 - A yawing camera (0.5 degrees a frame) shows no trails.
 - Not done: the clouds in the real-time volumes' shadow maps (with `volumeMarch` the paths walk
   through the clouds); the sky map's parallax for points far from the camera; the furnace walks

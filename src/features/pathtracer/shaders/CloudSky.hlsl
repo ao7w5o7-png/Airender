@@ -25,7 +25,7 @@ void Main(uint3 id : SV_DispatchThreadID)
     if (d.y > 0.0f)
     {
         // The same steps every frame: the map stays still where its light does (bounce light is soft).
-        CloudRay ray = MarchClouds(f, Xyz(f.camera.position), d, 1e30f, 0.5f, g.steps, g.lightSamples);
+        CloudRay ray = MarchClouds(f, Xyz(f.camera.position), d, 1e30f, 0.5f, 0.5f, g.steps, g.lightSamples);
         value = float4(ray.light, ray.transmittance);
     }
     RWTexture2D<float4> map = ResourceDescriptorHeap[g.target];

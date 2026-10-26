@@ -120,13 +120,13 @@ struct VolumeMarchSettings
 
 // The real-time clouds (docs/architecture.md §8.19, src/CloudMarcher.h): instead of every path's walk
 // through them, a ray march of the clouds over the camera's rays at a sixteenth of the render's pixels
-// per frame (reprojected for the rest), a map of the sky through them for the other rays that leave the
-// scene and a shadow map of them for the sun.
+// per frame (reprojected for the rest, at the render's size), a map of the sky through them for the other rays that
+// leave the scene and a shadow map of them for the sun.
 struct CloudMarchSettings
 {
     u32 mode = 1;         // kReSTIROff, kReSTIRRealTime (with accumulate=false), kReSTIRAlways
     u32 steps = 96;       // samples a camera ray may take in the clouds
-    u32 lightSamples = 6; // samples towards the sun from each (steps doubling from 30 m)
+    u32 lightSamples = 8; // samples towards the sun from each (steps growing by 1.6 from 20 m, jittered)
     u32 skySteps = 48;    // the same for the sky map
     u32 skyLightSamples = 4;
 

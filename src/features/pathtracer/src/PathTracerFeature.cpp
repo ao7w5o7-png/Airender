@@ -43,7 +43,7 @@ public:
         mParameters.Add("cloudSteps", &mSettings.cloudMarch.steps,
                         "Real-time clouds: samples a camera ray may take in them", 8, 512);
         mParameters.Add("cloudLightSamples", &mSettings.cloudMarch.lightSamples,
-                        "Real-time clouds: samples towards the sun from each (steps doubling from 30 m)", 1, 10);
+                        "Real-time clouds: samples towards the sun from each (steps growing by 1.6 from 20 m)", 1, 12);
         mParameters.Add("volumeEvents", &mSettings.volumeEvents,
                         "Scattering events a path may take in the scene's volume (besides its bounces) before its "
                         "light is given up",

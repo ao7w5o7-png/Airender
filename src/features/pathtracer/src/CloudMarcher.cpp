@@ -32,8 +32,9 @@ rhi::TextureHandle MakeTexture(rhi::Device& device, rhi::Format format, u32 widt
                                  .debugName = name});
 }
 
-// The layer pixel of every 2 x 2 block marched in frame i: (0, 0), (1, 1), (1, 0), (0, 1).
-constexpr u32 kOffsets[4] = {0u, 3u, 1u, 2u};
+// The layer pixel of every 4 x 4 block marched in frame i (x | y << 2): a 4 x 4 Bayer order, so that
+// any 4 consecutive frames cover the block evenly.
+constexpr u32 kOffsets[16] = {0u, 10u, 2u, 8u, 5u, 15u, 7u, 13u, 1u, 11u, 3u, 9u, 4u, 14u, 6u, 12u};
 
 } // namespace
 
@@ -83,8 +84,8 @@ void CloudMarcher::BeginFrame(const renderer::GpuScene& scene, u32 width, u32 he
         mSkyAccess = Access::None;
         mShadowVersion = ~0ull;
     }
-    const u32 layerWidth = (width + 1) / 2;
-    const u32 layerHeight = (height + 1) / 2;
+    const u32 layerWidth = width;
+    const u32 layerHeight = height;
     if (layerWidth != mLayerWidth || layerHeight != mLayerHeight || !mLayers[0].IsValid())
     {
         for (u32 i = 0; i < 2; ++i)
@@ -121,7 +122,7 @@ void CloudMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& 
     base.skyTable = skyTable;
     base.layerWidth = mLayerWidth;
     base.layerHeight = mLayerHeight;
-    base.offset = kOffsets[frameIndex % 4];
+    base.offset = kOffsets[frameIndex % 16];
     base.history = air::gpu::kInvalidIndex;
     base.historyDepth = air::gpu::kInvalidIndex;
 
@@ -200,8 +201,8 @@ void CloudMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& 
             c.lightSamples = lightSamples;
         });
 
-    const u32 marchWidth = (mLayerWidth + 1) / 2;
-    const u32 marchHeight = (mLayerHeight + 1) / 2;
+    const u32 marchWidth = (mLayerWidth + 3) / 4;
+    const u32 marchHeight = (mLayerHeight + 3) / 4;
     auto make = [&](rhi::Format format, const char* name)
     {
         return graph.CreateTexture({.format = format,

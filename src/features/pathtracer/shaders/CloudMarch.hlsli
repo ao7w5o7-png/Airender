@@ -75,23 +75,24 @@ static const float kCloudMsEdge = 1.0f;
 static const float kCloudAmbientBottom = 0.3f;
 static const float kCloudAmbientScale = 0.4f;
 
-// The optical depth from p towards the sun in `samples` steps that double from 30 m (to 30 x
-// (2^samples - 1) m), the far ones without the detail noise.
-float CloudSunDepth(CloudData c, float3 p, float3 sun, uint samples)
+// The optical depth from p towards the sun in `samples` steps that grow by 1.6 from 20 m (8 reach
+// 1.4 km), each sampled at `jitter` (0..1) along it. Samples at fixed places stamped the outlines of
+// the clouds they reached into the light as bands; jittered, the frames average them out.
+float CloudSunDepth(CloudData c, float3 p, float3 sun, uint samples, float jitter)
 {
     float depth = 0.0f;
     float start = 0.0f;
-    float segment = 30.0f;
+    float segment = 20.0f;
     for (uint i = 0u; i < samples; ++i)
     {
-        float3 q = p + sun * (start + 0.5f * segment);
-        if (q.y > c.top)
+        float3 q = p + sun * (start + jitter * segment);
+        if (CloudAltitude(q) > c.top)
         {
             break;
         }
         depth += CloudDensity(c, q) * segment;
         start += segment;
-        segment *= 2.0f;
+        segment *= 1.6f;
     }
     return depth * c.extinction;
 }
@@ -131,8 +132,10 @@ struct CloudRay
                          // the middle of the layer
 };
 
-// The clouds along o + t d up to tMax. `offset` in [0, 1) shifts the steps (a frame's jitter).
-CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, uint maxSteps, uint lightSamples)
+// The clouds along o + t d up to tMax. `offset` and `lightOffset` in [0, 1) shift the steps along the
+// ray and towards the sun (a frame's jitter).
+CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, float lightOffset, uint maxSteps,
+                     uint lightSamples)
 {
     CloudData c = f.clouds;
     CloudRay ray;
@@ -185,7 +188,7 @@ CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, 
                 float3 inscattered = float3(0.0f, 0.0f, 0.0f);
                 if (sun)
                 {
-                    float depth = CloudSunDepth(c, p, sunDirection, lightSamples);
+                    float depth = CloudSunDepth(c, p, sunDirection, lightSamples, lightOffset);
                     float multiple = kCloudMsScale * pow(density, kCloudMsEdge) /
                                      (4.0f * kPi * (1.0f + kCloudMsSlope * depth));
                     inscattered = sunLight * (cloudPhase * exp(-depth) + multiple);

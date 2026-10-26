@@ -11,8 +11,8 @@ namespace air::pt::gpu
 using namespace air::hlsl;
 #endif
 
-// The layer the camera's rays see is reconstructed at half the render size (each axis); every frame the
-// march lights one pixel of every 2 x 2 block of it, in this order, so that each is new every 4 frames.
+// The layer the camera's rays see is reconstructed at the render's size; every frame the march lights
+// one pixel of every 4 x 4 block of it, so that each is new every 16 frames.
 AIR_CONST uint kCloudShadowMapSize = 512; // texels over the clouds' tile, each axis
 AIR_CONST uint kCloudSkyMapSize = 128;    // texels over the upper hemisphere, each axis
 
@@ -25,9 +25,9 @@ struct CloudMarchConstants
     uint targetDepth; // RWTexture2D<float>: the march's and the layer's front distance
     uint width;       // of the target
     uint height;
-    uint layerWidth; // the reconstructed layer (half the render size)
+    uint layerWidth; // the reconstructed layer (the render's size)
     uint layerHeight;
-    uint offset;       // this frame's pixel of each 2 x 2 block of the layer: x | y << 1
+    uint offset;       // this frame's pixel of each 4 x 4 block of the layer: x | y << 2
     uint marched;      // Texture2D<float4>: this frame's march (reconstruction)
     uint marchedDepth; // Texture2D<float>
     uint history;      // Texture2D<float4>: last frame's layer; kInvalidIndex: none
