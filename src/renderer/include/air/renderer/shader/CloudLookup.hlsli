@@ -16,6 +16,11 @@
 // boundaries where the parabola does) and samples tentative collisions in each at the rate of its
 // majorant: delta tracking finds the first real collision, ratio tracking estimates transmittance.
 // Both are unbiased because no density exceeds its cell's majorant.
+//
+// Above the layer a sheet of cirrus (CloudData::cirrusDepth > 0) is crossed once by a ray: it scatters
+// with probability 1 - exp(-its optical depth along the ray), with the clouds' phase function and
+// albedo, and dims the transmittance by exp(-depth). Its optical depth is procedural (gradient noise
+// in fibres stretched along the wind and bent by broad swirls, gathered into patches).
 #ifndef AIR_RENDERER_CLOUD_LOOKUP_HLSLI
 #define AIR_RENDERER_CLOUD_LOOKUP_HLSLI
 
@@ -101,6 +106,86 @@ float CloudDensity(CloudData c, float3 p)
                                                frac((altitude - c.detailOffsetY) / c.detailPeriod)));
     float erosion = detail * c.detailStrength * (1.0f - base);
     return saturate((base - erosion) / (1.0f - erosion) * c.sharpness);
+}
+
+// --- Cirrus --------------------------------------------------------------------------------------------
+
+AIR_CONST float kCirrusMinCosine = 0.05f; // a grazing ray crosses the sheet as at 3 degrees
+
+// Gradient noise in the plane (about -0.7..0.7), from an integer hash of the lattice.
+float2 CirrusGradient(int x, int y)
+{
+    uint h = uint(x) * 0x8da6b343u ^ uint(y) * 0xd8163841u;
+    h ^= h >> 16;
+    h *= 0x7feb352du;
+    h ^= h >> 15;
+    h *= 0x846ca68bu;
+    h ^= h >> 16;
+    float a = float(h & 0xffffu) * (2.0f * kCloudPi / 65536.0f);
+    return float2(cos(a), sin(a));
+}
+
+float CirrusNoise(float2 p)
+{
+    float ix = floor(p.x);
+    float iy = floor(p.y);
+    float2 f = float2(p.x - ix, p.y - iy);
+    float2 u = f * f * f * (f * (f * 6.0f - 15.0f) + 10.0f);
+    int x = int(ix);
+    int y = int(iy);
+    float a = dot(CirrusGradient(x, y), f);
+    float b = dot(CirrusGradient(x + 1, y), f - float2(1.0f, 0.0f));
+    float c = dot(CirrusGradient(x, y + 1), f - float2(0.0f, 1.0f));
+    float d = dot(CirrusGradient(x + 1, y + 1), f - float2(1.0f, 1.0f));
+    return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
+}
+
+// The sheet's vertical optical depth over (x, z): fibres 4 km long and 500 m across, stretched along
+// the wind and bent by swirls of about 9 km (the hooks of mares' tails), in patches of 6 to 15 km.
+float CirrusOpticalDepth(CloudData c, float x, float z)
+{
+    float2 q = float2(x - c.cirrusOffsetX, z - c.cirrusOffsetZ);
+    float speed = sqrt(c.windX * c.windX + c.windZ * c.windZ);
+    float2 w = speed > 1e-3f ? float2(c.windX, c.windZ) / speed : float2(1.0f, 0.0f);
+    q += float2(CirrusNoise(q * (1.0f / 9000.0f) + float2(3.1f, 0.7f)),
+                CirrusNoise(q * (1.0f / 9000.0f) + float2(17.7f, 5.3f))) * 2500.0f;
+    float2 s = float2(dot(q, w) * (1.0f / 4000.0f), dot(q, float2(-w.y, w.x)) * (1.0f / 500.0f));
+    float fibres = CirrusNoise(s) + 0.5f * CirrusNoise(s * 2.03f + float2(5.2f, 1.3f)) +
+                   0.25f * CirrusNoise(s * 4.1f + float2(9.7f, 2.9f));
+    float patches = CirrusNoise(q * (1.0f / 15000.0f) + float2(31.3f, 11.1f)) +
+                    0.5f * CirrusNoise(q * (1.0f / 6000.0f) + float2(7.3f, 23.9f));
+    float v = 0.5f + 0.7f * patches + 0.6f * fibres;
+    float k = saturate((v - c.cirrusThreshold) / 0.35f);
+    return c.cirrusDepth * k * k * (3.0f - 2.0f * k);
+}
+
+// Where o + t d crosses the sheet after tFrom and before tMax, and its optical depth along the ray
+// there; false where the ray does not cross it (or it is clear).
+bool CirrusCrossing(CloudData c, float3 o, float3 d, float tFrom, float tMax, AIR_OUT(float) t, AIR_OUT(float) depth)
+{
+    t = 3.0e38f;
+    depth = 0.0f;
+    if (c.enabled == 0u || c.cirrusDepth <= 0.0f)
+    {
+        return false;
+    }
+    t = CloudCrossing(MakeCloudCurve(o, d), c.cirrusAltitude, tFrom);
+    if (t > min(tMax, kCloudMaxDistance))
+    {
+        return false;
+    }
+    float3 p = o + d * t;
+    float3 up = normalize(float3(p.x / kCloudPlanetRadius, 1.0f, p.z / kCloudPlanetRadius));
+    depth = CirrusOpticalDepth(c, p.x, p.z) / max(abs(dot(d, up)), kCirrusMinCosine);
+    return depth > 0.0f;
+}
+
+// What the sheet lets through along o + t d over [0, tMax].
+float CirrusTransmittance(CloudData c, float3 o, float3 d, float tMax)
+{
+    float t;
+    float depth;
+    return CirrusCrossing(c, o, d, 1.0f, tMax, t, depth) ? exp(-depth) : 1.0f;
 }
 
 // --- Majorant cells along a ray --------------------------------------------------------------------
@@ -245,52 +330,60 @@ bool NextCloudSegment(CloudData c, AIR_INOUT(CloudMarch) m, AIR_OUT(float) t0, A
     return true;
 }
 
-// The first real collision with the clouds along o + t d within [0, tMax], by delta tracking.
+// The first real collision with the clouds along o + t d within [0, tMax], by delta tracking, then
+// with the cirrus above them (a ray meets the sheet after the layer: it starts below or in the layer,
+// or at the sheet itself heading away from it).
 bool CloudCollision(CloudData c, float3 o, float3 d, float tMax, AIR_INOUT(uint) seed, AIR_OUT(float) tHit)
 {
     tHit = tMax;
     CloudMarch m;
-    if (!BeginCloudMarch(c, o, d, tMax, m))
+    if (BeginCloudMarch(c, o, d, tMax, m))
     {
-        return false;
+        float t0;
+        float t1;
+        float majorant;
+        while (NextCloudSegment(c, m, t0, t1, majorant))
+        {
+            if (majorant <= 0.0f)
+            {
+                continue;
+            }
+            float t = t0;
+            for (;;)
+            {
+                t -= log(1.0f - Rand(seed)) / majorant;
+                if (t >= t1)
+                {
+                    break;
+                }
+                if (Rand(seed) * majorant < c.extinction * CloudDensity(c, o + d * t))
+                {
+                    tHit = t;
+                    return true;
+                }
+            }
+        }
     }
-    float t0;
-    float t1;
-    float majorant;
-    while (NextCloudSegment(c, m, t0, t1, majorant))
+    float t;
+    float depth;
+    if (CirrusCrossing(c, o, d, 1.0f, tMax, t, depth) && Rand(seed) >= exp(-depth))
     {
-        if (majorant <= 0.0f)
-        {
-            continue;
-        }
-        float t = t0;
-        for (;;)
-        {
-            t -= log(1.0f - Rand(seed)) / majorant;
-            if (t >= t1)
-            {
-                break;
-            }
-            if (Rand(seed) * majorant < c.extinction * CloudDensity(c, o + d * t))
-            {
-                tHit = t;
-                return true;
-            }
-        }
+        tHit = t;
+        return true;
     }
     return false;
 }
 
-// Transmittance through the clouds along o + t d over [0, tMax], by ratio tracking; Russian
-// roulette ends it once it falls below 0.1 (unbiased).
+// Transmittance through the clouds along o + t d over [0, tMax], by ratio tracking (and through the
+// cirrus, exactly); Russian roulette ends it once it falls below 0.1 (unbiased).
 float CloudTransmittance(CloudData c, float3 o, float3 d, float tMax, AIR_INOUT(uint) seed)
 {
+    float transmittance = CirrusTransmittance(c, o, d, tMax);
     CloudMarch m;
     if (!BeginCloudMarch(c, o, d, tMax, m))
     {
-        return 1.0f;
+        return transmittance;
     }
-    float transmittance = 1.0f;
     float t0;
     float t1;
     float majorant;

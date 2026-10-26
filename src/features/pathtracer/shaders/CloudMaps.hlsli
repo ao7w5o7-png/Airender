@@ -40,20 +40,22 @@ float3 CloudSkyMapDirection(float2 uv)
 
 #if !AIR_PT_CLOUD_MAPS_MAPPING_ONLY
 
-// The sun's transmittance through the clouds from `p` (below their base) towards `wi`.
+// The sun's transmittance through the clouds from `p` (below their base) towards `wi`, the cirrus
+// above them included (exactly: it is not in the map, which would have to follow its own wind).
 float CloudShadowMapTransmittance(CloudData c, float3 p, float3 wi)
 {
     if (c.enabled == 0u || wi.y <= 0.0f || CloudAltitude(p) >= c.bottom)
     {
         return 1.0f;
     }
+    float cirrus = CirrusTransmittance(c, p, wi, 1e30f);
     float s = CloudCrossing(MakeCloudCurve(p, wi), c.bottom, 0.0f);
     if (s > kCloudMaxDistance)
     {
-        return 1.0f;
+        return cirrus;
     }
     float2 q = float2(p.x - c.baseOffsetX, p.z - c.baseOffsetZ) + float2(wi.x, wi.z) * s;
-    return exp(-max(CloudShadowSample(c, q / c.tileSize), 0.0f));
+    return cirrus * exp(-max(CloudShadowSample(c, q / c.tileSize), 0.0f));
 }
 
 // What the clouds add to (rgb) and leave of (a) the sky towards `d`.

@@ -1,7 +1,7 @@
 // The real-time clouds' layer at the render's size (docs/architecture.md §8.19): the pixels this frame
 // marched (CloudMarch.hlsl, one of every 4 x 4) blend into their history, the others follow theirs back
 // to the previous frame along the depth the clouds' light comes from, clamped to the march's
-// neighbourhood so that nothing trails where the clouds changed. A pixel whose history lies off screen
+// neighbourhood where parallax may have brought other clouds into view. A pixel whose history lies off screen
 // (what a moving camera brings in at the edges) is marched here at once: upsampled from the sparse march
 // it showed as streaks along the edge for the 16 frames it took to fill in. Without any history (the
 // first frame after a reset) the march is upsampled. The history is read through a Catmull-Rom filter.
@@ -98,8 +98,14 @@ void Main(uint3 id : SV_DispatchThreadID)
                     hi = max(hi, n);
                 }
             }
+            // The clamp guards against parallax (clouds at other depths coming into view): where the
+            // depth hardly moves the reprojection from that of a point at infinity the history holds,
+            // and clamping it to the sparse march would erase what is finer than its 4 pixels.
+            float2 farPrevious = CameraProject(f.previousCamera, Xyz(f.camera.position) + d * 1.0e7f, 1.0f, size);
+            float parallax = length(previous - farPrevious);
             Texture2D<float4> history = ResourceDescriptorHeap[g.history];
-            float4 past = clamp(SampleHistory(history, previous, size), lo, hi);
+            float4 sampled = SampleHistory(history, previous, size);
+            float4 past = lerp(sampled, clamp(sampled, lo, hi), saturate((parallax - 0.25f) / 0.75f));
             result = fresh ? lerp(past, current, kCloudFreshBlend) : past;
         }
     }

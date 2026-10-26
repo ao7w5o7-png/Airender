@@ -1045,6 +1045,12 @@ void EditorApp::BuildScenePanel()
         slider("Wind heading", &clouds.windHeading, -180.0f, 180.0f, "%.0f deg");
         ImGui::SetItemTooltip("The clouds drift with the wind in real time (pathtracer.cloudWindStep seconds a "
                               "frame), their detail faster and rising, and lean with its shear.");
+        slider("Cirrus", &clouds.cirrus, 0.0f, 1.0f, "%.2f");
+        ImGui::SetItemTooltip("Fraction of the sky under the high cirrus, a thin sheet of ice crystals above the "
+                              "layer (0: none).");
+        slider("Cirrus altitude", &clouds.cirrusAltitude, clouds.top + 100.0f, 14000.0f, "%.0f m");
+        slider("Cirrus depth", &clouds.cirrusDepth, 0.02f, 3.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Vertical optical depth where the cirrus is thickest (0.03 to 3).");
         int seed = int(clouds.seed);
         cloudsEdited |= ImGui::DragInt("Seed##clouds", &seed, 0.2f, 0, 1 << 20);
         applyClouds |= ImGui::IsItemDeactivatedAfterEdit();
@@ -1057,6 +1063,7 @@ void EditorApp::BuildScenePanel()
     // A valid layer: above the scene, at least 100 m (times the shape scale) thick.
     clouds.bottom = std::max(clouds.bottom, mSceneTop + 1.0f);
     clouds.top = std::max(clouds.top, clouds.bottom + 100.0f * clouds.scale);
+    clouds.cirrusAltitude = std::max(clouds.cirrusAltitude, clouds.top + 100.0f);
     if (applyClouds)
     {
         mScene->SetClouds(clouds);

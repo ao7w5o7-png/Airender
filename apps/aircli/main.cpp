@@ -11,6 +11,7 @@
 //                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
 //                   [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)
+//                   [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]   (the high cirrus over the layer; 0: none)
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
 //                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
 //                   [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels among the surfaces)
@@ -20,7 +21,8 @@
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
-//                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
+//                    [--clouds C[,B,T]] [--clouds-exact] [--cirrus C[,A,D]] [--cloud-events N] [--camera ...]
+//                    [--ev EV100]
 //                    [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]
 //                    [--neural-textures ...] [--ntc-cache DIR]
 //                    [--volume-march [--frames N] [--probe-frames N] [--volume-step S]
@@ -90,6 +92,7 @@ int Usage()
         "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)\n"
         "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
         "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)\n"
+        "                [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]   (high cirrus over the layer; 0: none)\n"
         "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
         "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
         "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
@@ -99,6 +102,7 @@ int Usage()
         "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
         "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
         "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact] [--cloud-events N]\n"
+        "                [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]\n"
         "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
         "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
         "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
@@ -229,7 +233,8 @@ int CommandScenes()
 // Changes to a built-in scene:
 //   --sun ELEVATION,AZIMUTH (degrees) and --aerosols DEPTH give it the physical sky (Sky.h);
 //   --clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]] (metres) adds a cloud layer (Clouds.h), 0 removes it;
-//   --clouds-exact keeps their phase function's diffraction peak;
+//   --clouds-exact keeps their phase function's diffraction peak; --cirrus COVERAGE[,ALTITUDE[,DEPTH]]
+//   sets the high cirrus over them (the fraction of the sky, metres, its vertical optical depth);
 //   --camera EX,EY,EZ,TX,TY,TZ[,FOV] puts the camera at the eye looking at the target (vertical field
 //   of view in degrees), --ev EV100 sets its exposure;
 //   --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] puts a volume (Volume.h) in it: a
@@ -251,6 +256,7 @@ struct SceneOptions
     std::optional<float> aerosols;
     std::vector<std::string> clouds;
     bool cloudsExact = false;
+    std::vector<std::string> cirrus;
     std::vector<std::string> camera;
     std::optional<float> ev100;
     struct VolumeOption
@@ -316,6 +322,11 @@ struct SceneOptions
         if (arg == "--clouds-exact")
         {
             cloudsExact = true;
+            return true;
+        }
+        if (arg == "--cirrus")
+        {
+            cirrus = Split(args.Next(), ',');
             return true;
         }
         if (arg == "--camera")
@@ -416,6 +427,18 @@ struct SceneOptions
             scene.sky.physical = scene.sky.physical || scene.clouds.enabled;
         }
         scene.clouds.exactPhase = scene.clouds.exactPhase || cloudsExact;
+        if (!cirrus.empty())
+        {
+            scene.clouds.cirrus = std::stof(cirrus[0]);
+            if (cirrus.size() >= 2)
+            {
+                scene.clouds.cirrusAltitude = std::stof(cirrus[1]);
+            }
+            if (cirrus.size() >= 3)
+            {
+                scene.clouds.cirrusDepth = std::stof(cirrus[2]);
+            }
+        }
         if (camera.size() >= 6)
         {
             const hlsl::float3 eye(std::stof(camera[0]), std::stof(camera[1]), std::stof(camera[2]));

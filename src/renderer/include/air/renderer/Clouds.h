@@ -40,6 +40,12 @@ struct Clouds
     // degrees from +x towards +z.
     float windSpeed = 12.0f;
     float windHeading = 0.0f;
+    // High cirrus: a thin sheet of ice crystals at cirrusAltitude (above `top`) over this fraction of the
+    // sky (0: none), its vertical optical depth up to cirrusDepth (cirrus: 0.03 to 3). The wind aloft
+    // carries it twice as fast as the layer.
+    float cirrus = 0.3f;
+    float cirrusAltitude = 9000.0f;
+    float cirrusDepth = 0.5f;
 
     bool operator==(const Clouds&) const = default;
 };
@@ -66,6 +72,9 @@ struct CloudVolume
     std::vector<float> majorants; // cellsX * cellsZ * cellsY
     float coverage = 0.0f;        // fraction of base texel columns with any cloud
 };
+
+// The threshold of the cirrus' noise that `coverage` of the sky exceeds (CloudData::cirrusThreshold).
+float CirrusThreshold(float coverage);
 
 // Bakes the density (about 0.2 s of CPU in release builds, all threads).
 CloudVolume BuildCloudVolume(const Clouds& clouds);

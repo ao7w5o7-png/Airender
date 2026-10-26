@@ -5,7 +5,8 @@
 // voxels), the sun's light at a step comes from a short march towards it whose steps double, the light
 // that scattered more than once from a diffusion term matched to the path traced clouds, and the sky's
 // light from an ambient term that grows with height in the layer. A frame marches a sixteenth of the
-// render's pixels and the rest is reprojected (CloudReconstruct.hlsl).
+// render's pixels and the rest is reprojected (CloudReconstruct.hlsl). The cirrus above the layer is
+// a thin sheet: its single scattering of the sun in closed form and the sky's light it scatters.
 //
 // The including shader includes SceneShared.h, PathTracerShared.h and CloudMarchShared.h and declares
 // `g` (CloudMarchConstants) before this file.
@@ -132,30 +133,56 @@ struct CloudRay
                          // the middle of the layer
 };
 
-// The clouds along o + t d up to tMax. `offset` and `lightOffset` in [0, 1) shift the steps along the
-// ray and towards the sun (a frame's jitter); each step along the ray shifts its samples towards the
-// sun on by the golden ratio, so that one ray already averages over their places.
-CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, float lightOffset, uint maxSteps,
-                     uint lightSamples)
+// The sky's light the cirrus scatters towards the viewer, of what it takes from the sky above (thin
+// and forward scattering: mostly the light from above, carried on downwards).
+static const float kCirrusAmbientScale = 1.0f;
+// Light scattered on forwards inside the sheet (twice or more), which single scattering leaves out: the
+// sun's term grows by this times the optical depth along the ray.
+static const float kCirrusForward = 0.6f;
+
+// The cirrus sheet's light along o + t d (nits, before the air in front) and what it lets through:
+// the sun's single scattering through a thin slab of optical depth tau seen at a cosine muV and lit
+// at muS, phase p (1 / muV) exp(-tau / muV) (1 - exp(-tau (1 / muS - 1 / muV))) / (1 / muS - 1 / muV),
+// and the sky's light from above scattered as the sheet dims it.
+float4 MarchCirrus(FrameData f, float3 o, float3 d, float tMax, CloudAmbient ambient, AIR_OUT(float) tCirrus)
 {
     CloudData c = f.clouds;
-    CloudRay ray;
-    ray.light = float3(0.0f, 0.0f, 0.0f);
-    ray.transmittance = 1.0f;
-    ray.depth = min(CloudCrossing(MakeCloudCurve(o, d), 0.5f * (c.bottom + c.top), 0.0f), kCloudMaxDistance);
-    CloudMarch m;
-    if (!BeginCloudMarch(c, o, d, tMax, m))
+    float depth;
+    if (!CirrusCrossing(c, o, d, 1.0f, tMax, tCirrus, depth))
     {
-        return ray;
+        return float4(0.0f, 0.0f, 0.0f, 1.0f);
     }
+    float3 p = o + d * tCirrus;
+    float3 up = normalize(float3(p.x / kCloudPlanetRadius, 1.0f, p.z / kCloudPlanetRadius));
+    float invMuV = 1.0f / max(abs(dot(d, up)), kCirrusMinCosine);
+    float tau = depth / invMuV; // vertical
+    float transmittance = exp(-depth);
+    float3 light = kCirrusAmbientScale * ambient.up * (1.0f - transmittance);
+    if (HasSun(f.sky))
+    {
+        float3 sun = f.sky.sunDirection;
+        float invMuS = 1.0f / max(dot(sun, up), kCirrusMinCosine);
+        float k = invMuS - invMuV;
+        float slab = abs(k * tau) > 1e-4f ? (1.0f - exp(-tau * k)) / k : tau;
+        light += f.sky.sunRadiance * SunSolidAngle(f.sky) *
+                 (CloudPhase(c, dot(d, sun)) * invMuV * transmittance * slab * (1.0f + kCirrusForward * depth));
+    }
+    return float4(light, transmittance);
+}
+
+// The layer along the march `m` (begun along o + t d): its light and transmittance into `ray`, the
+// weights of its distances into weightSum and depthSum.
+void MarchLayer(FrameData f, float3 o, float3 d, float offset, float lightOffset, uint maxSteps, uint lightSamples,
+                CloudAmbient ambient, AIR_INOUT(CloudMarch) m, AIR_INOUT(CloudRay) ray, AIR_INOUT(float) weightSum,
+                AIR_INOUT(float) depthSum)
+{
+    CloudData c = f.clouds;
     bool sun = HasSun(f.sky);
     float3 sunDirection = f.sky.sunDirection;
     float3 sunLight = sun ? f.sky.sunRadiance * SunSolidAngle(f.sky) : float3(0.0f, 0.0f, 0.0f);
-    float mu = dot(d, sunDirection);
-    float cloudPhase = CloudPhase(c, mu);
-    CloudAmbient ambient = SkyAmbient(f.sky);
-    float weightSum = 0.0f;
-    float depthSum = 0.0f;
+    // The cirrus above dims the sun (taken where the ray enters the layer).
+    sunLight *= CirrusTransmittance(c, o + d * m.t, sunDirection, 1e30f);
+    float cloudPhase = CloudPhase(c, dot(d, sunDirection));
     uint steps = 0u;
     float t = m.t;
     float step = 30.0f;
@@ -195,7 +222,7 @@ CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, 
                                      (4.0f * kPi * (1.0f + kCloudMsSlope * depth));
                     inscattered = sunLight * (cloudPhase * exp(-depth) + multiple);
                 }
-                float h = saturate((p.y - c.bottom) / (c.top - c.bottom));
+                float h = saturate((CloudAltitude(p) - c.bottom) / (c.top - c.bottom));
                 inscattered += kCloudAmbientScale * (ambient.up * lerp(kCloudAmbientBottom, 1.0f, h) +
                                                      ambient.down * lerp(1.0f, kCloudAmbientBottom, h));
                 // Integrated over the step with the step's own extinction (Hillaire 2016): no light is
@@ -211,6 +238,28 @@ CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, 
             t += step;
         }
     }
+}
+
+// The clouds along o + t d up to tMax, the cirrus beyond them included. `offset` and `lightOffset` in
+// [0, 1) shift the steps along the ray and towards the sun (a frame's jitter); each step along the ray
+// shifts its samples towards the sun on by the golden ratio, so that one ray already averages over
+// their places.
+CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, float lightOffset, uint maxSteps,
+                     uint lightSamples)
+{
+    CloudData c = f.clouds;
+    CloudRay ray;
+    ray.light = float3(0.0f, 0.0f, 0.0f);
+    ray.transmittance = 1.0f;
+    ray.depth = min(CloudCrossing(MakeCloudCurve(o, d), 0.5f * (c.bottom + c.top), 0.0f), kCloudMaxDistance);
+    CloudAmbient ambient = SkyAmbient(f.sky);
+    float weightSum = 0.0f;
+    float depthSum = 0.0f;
+    CloudMarch m;
+    if (BeginCloudMarch(c, o, d, tMax, m))
+    {
+        MarchLayer(f, o, d, offset, lightOffset, maxSteps, lightSamples, ambient, m, ray, weightSum, depthSum);
+    }
     if (weightSum > 1e-4f)
     {
         ray.depth = depthSum / weightSum;
@@ -218,6 +267,18 @@ CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, 
         // it adds its own light where the clouds hide the sky and dims theirs.
         Aerial air = AerialPerspective(f.sky, d, ray.depth);
         ray.light = air.inscatter * (1.0f - ray.transmittance) + air.transmittance * ray.light;
+    }
+    // The cirrus behind them, through its own air.
+    float tCirrus;
+    float4 cirrus = MarchCirrus(f, o, d, tMax, ambient, tCirrus);
+    if (cirrus.w < 1.0f)
+    {
+        Aerial air = AerialPerspective(f.sky, d, tCirrus);
+        float3 light = air.inscatter * (1.0f - cirrus.w) + air.transmittance * float3(cirrus.x, cirrus.y, cirrus.z);
+        float weight = ray.transmittance * (1.0f - cirrus.w);
+        ray.light += ray.transmittance * light;
+        ray.depth = weightSum + weight > 1e-4f ? (depthSum + weight * tCirrus) / (weightSum + weight) : ray.depth;
+        ray.transmittance *= cirrus.w;
     }
     return ray;
 }

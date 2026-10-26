@@ -499,6 +499,11 @@ std::string Validate(const SceneDesc& desc)
             return "clouds: need top >= bottom + 100 m * scale, coverage and albedo in [0, 1], extinction, "
                    "droplet size and scale > 0";
         }
+        if (!(clouds.cirrus >= 0.0f && clouds.cirrus <= 1.0f) || !(clouds.cirrusDepth >= 0.0f) ||
+            (clouds.cirrus > 0.0f && !(clouds.cirrusAltitude > clouds.top)))
+        {
+            return "clouds: need cirrus coverage in [0, 1], its optical depth >= 0 and its altitude above the tops";
+        }
         // Only camera rays look for clouds in front of a surface (Integrator.hlsli).
         const float highest = HighestPoint(desc);
         if (highest >= clouds.bottom)

@@ -322,7 +322,8 @@ TEST(Clouds_TrackingMatchesARayMarch)
             continue; // nearly clear or opaque: a weak test
         }
         ++tested;
-        const double expected = std::exp(-depth);
+        // The cirrus above dims what passes, exactly.
+        const double expected = std::exp(-depth) * reader.CirrusTransmittance(c, o, d, 1e30f);
         constexpr int kSamples = 20000;
         double ratio = 0.0;
         int passed = 0;
@@ -337,6 +338,71 @@ TEST(Clouds_TrackingMatchesARayMarch)
         EXPECT(Near(double(passed) / kSamples, expected, 5.0 * sigma + 2e-3, "delta tracking"));
     }
     EXPECT(tested == 6);
+}
+
+// The cirrus covers about the fraction of the sky asked for, and a ray through a gap in the layer
+// collides with it as often as its optical depth says.
+TEST(Clouds_CirrusCoversItsShareAndScattersByItsDepth)
+{
+    renderer::CloudVolume& volume = DefaultVolume();
+    CloudReader reader{volume};
+    CloudData c = volume.data;
+    EXPECT(c.cirrusDepth > 0.0f && c.cirrusAltitude > c.top);
+    for (float coverage : {0.15f, 0.3f, 0.6f})
+    {
+        c.cirrusThreshold = renderer::CirrusThreshold(coverage);
+        int covered = 0;
+        constexpr int kSide = 200;
+        for (int z = 0; z < kSide; ++z)
+        {
+            for (int x = 0; x < kSide; ++x)
+            {
+                covered += reader.CirrusOpticalDepth(c, float(x) * 500.0f, float(z) * 500.0f) > 0.0f ? 1 : 0;
+            }
+        }
+        const float fraction = float(covered) / float(kSide * kSide);
+        std::printf("  cirrus coverage %.2f: %.3f of a 100 km square\n", coverage, fraction);
+        EXPECT(fraction > coverage * 0.8f && fraction < coverage * 1.2f);
+    }
+    c = volume.data;
+    uint seed = 17u;
+    int tested = 0;
+    for (int attempt = 0; attempt < 2000 && tested < 4; ++attempt)
+    {
+        const float3 o(CloudReader::Rand(seed) * c.tileSize, 0.0f, CloudReader::Rand(seed) * c.tileSize);
+        const float3 d = normalize(float3(CloudReader::Rand(seed) - 0.5f, 1.0f, CloudReader::Rand(seed) - 0.5f));
+        float t = 0.0f;
+        float depth = 0.0f;
+        if (!reader.CirrusCrossing(c, o, d, 1.0f, 1e30f, t, depth) || depth < 0.05f)
+        {
+            continue;
+        }
+        // Through a gap of the layer (no density along the ray).
+        bool clear = true;
+        for (float s = 0.0f; s < t && clear; s += 10.0f)
+        {
+            clear = reader.CloudDensity(c, o + d * s) == 0.0f;
+        }
+        if (!clear)
+        {
+            continue;
+        }
+        ++tested;
+        constexpr int kSamples = 20000;
+        int hits = 0;
+        for (int i = 0; i < kSamples; ++i)
+        {
+            float tHit = 0.0f;
+            if (reader.CloudCollision(c, o, d, 1e30f, seed, tHit))
+            {
+                ++hits;
+                EXPECT(std::abs(tHit - t) < 1e-3f * t);
+            }
+        }
+        const double p = 1.0 - std::exp(-double(depth));
+        EXPECT(Near(double(hits) / kSamples, p, 5.0 * std::sqrt(p * (1.0 - p) / kSamples) + 1e-3, "cirrus collisions"));
+    }
+    EXPECT(tested == 4);
 }
 
 TEST(Clouds_DisabledCloudsAreTransparent)

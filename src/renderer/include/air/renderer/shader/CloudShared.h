@@ -59,11 +59,19 @@ struct CloudData
     float detailOffsetX;
     float detailOffsetY;
     float detailOffsetZ;
-    float windPad;
+    // High cirrus (CloudLookup.hlsli): a sheet of ice crystals at an altitude above the layer, too thin
+    // to march through, with a procedural optical depth (vertical: cirrusDepth where it is thickest; 0:
+    // no sheet) where its noise exceeds the threshold (set from the fraction of the sky it covers). The
+    // wind aloft carries it (offsets in metres).
+    float cirrusAltitude;
+    float cirrusDepth;
+    float cirrusThreshold;
+    float cirrusOffsetX;
+    float cirrusOffsetZ;
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(CloudData) == 128);
+static_assert(sizeof(CloudData) == 144);
 } // namespace air::gpu
 #endif
 

@@ -951,10 +951,12 @@ Validation:
 
 `SceneDesc::clouds` (`renderer/Clouds.h`) adds a layer of cumulus above the scene: the heights of
 its base and tops, coverage, extinction at density 1, the droplets' effective diameter and
-single-scattering albedo, a shape scale, a seed and the wind (speed and heading). `cumulus` uses it;
+single-scattering albedo, a shape scale, a seed, the wind (speed and heading) and the high cirrus
+above (coverage, altitude, optical depth). `cumulus` uses it;
 `aircli render|reference --clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]` adds it to any scene (0
 removes it; it switches on the physical sky, whose sun lights the clouds; the wind in m/s, heading in
-degrees from +x towards +z), and the editor's Scene panel edits it.
+degrees from +x towards +z; `--cirrus COVERAGE[,ALTITUDE[,DEPTH]]` sets the cirrus over them), and
+the editor's Scene panel edits it.
 
 - **Density** (`src/renderer/src/Clouds.cpp`), procedural, baked on the CPU into two 8-bit 3D
   textures when the clouds change (2.1 s for `cumulus` in debug builds, all cores):
@@ -982,6 +984,15 @@ degrees from +x towards +z), and the editor's Scene panel edits it.
   - majorants, one per 8 x 4 x 8 base texels plus the texels around them that trilinear filtering
     reaches. They bound the density everywhere because the erosion only lowers it and the
     sharpening is monotonic.
+- **Cirrus** (`CirrusOpticalDepth` in `CloudLookup.hlsli`): high clouds of ice crystals, a sheet at
+  9 km by default (above the layer's tops), too thin to march through: a ray crosses it once and
+  scatters there with probability 1 - exp(-tau / mu) (its vertical optical depth over the cosine at
+  which the ray crosses it, at least 0.05), with the clouds' phase function and albedo (ice crystals
+  scatter forward like droplets; their halos are not modelled); the transmittance through it is
+  exp(-tau / mu), exact. Its optical depth (up to 0.5 by default) is procedural, so nothing is baked
+  and the CPU reference evaluates the same code: gradient noise in fibres 4 km long and 500 m across
+  stretched along the wind, bent by swirls of 9 km (the hooks of mares' tails), gathered into patches
+  of 6 to 15 km, over the fraction of the sky asked for (0.3).
 - **The planet's curvature**: the layer's heights are altitudes above a sphere of 6371 km under the
   scene's origin, `a(p) = p.y + (p.x^2 + p.z^2) / 2R` (exact to a metre within the 100 km a ray goes):
   100 km away the layer is 785 m lower, so it sinks towards the horizon instead of a flat sheet whose
@@ -1031,7 +1042,9 @@ Validation:
   rays, the density never exceeds the majorant of the cell the DDA is in; the density repeats with
   the tile; the wind's offsets carry the density and the majorant cells with it (the detail drifting
   on over the base stays bounded); ratio and delta tracking both match a 0.5 m ray march of
-  exp(-optical depth) for rays of optical depth 0.1-3; disabled clouds are transparent.
+  exp(-optical depth) for rays of optical depth 0.1-3 (times the cirrus' transmittance); the cirrus
+  covers the fraction of the sky asked for (0.15, 0.3, 0.6, within 20%; the noise is close to normal and its quantile sets the threshold) and a ray through a gap of
+  the layer collides with it at 1 - exp(-depth); disabled clouds are transparent.
 - `Integrator_CloudsVanishInAWhiteFurnace`: with albedo 1 in a uniform environment every path
   through the clouds returns the environment exactly, so every pixel is 0.18.
 - `Integrator_CloudSunNeeAndPhaseSamplingAgree`: with a 12-degree sun, NEE + MIS and phase sampling
@@ -1814,7 +1827,7 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
 | `Clouds.Shadow` | R32F, 512 x 512 over one tile of the clouds (they repeat): the optical depth along the sun from each point of their base up through the layer (steps of at most 25 m), indexed where the drifting base lies; rendered when the scene changes and whenever the wind has moved the detail 16 m over the base | every sun NEE below the clouds (`CloudSunTransmittance`): the transmittance of the point where the sun's ray crosses their base, instead of ratio tracking |
 | `Clouds.Sky` | RGBA32F, 128 x 128 over the upper hemisphere (the octahedron's upper half): what the clouds add to and leave of the sky towards each direction, seen from the camera (48 steps, fixed offsets) | rays that leave the scene after a bounce (`EscapeRadiance`): the clouds are kilometres away, so one viewpoint serves the scene |
 | `Clouds.March` | one pixel of every 4 x 4 block of the layer, a different one each frame in a Bayer order (96 steps; the ray, its steps and its samples towards the sun jittered) | `Clouds.Reconstruct` |
-| `Clouds.Reconstruct` | RGBA32F + R32F at the render's size: the marched pixels blended into their history (0.5), the others reprojected along the depth of the clouds' light (and back along the wind's step), read through a Catmull-Rom filter and clamped to the march's 3 x 3 neighbourhood | the camera's rays (`AddCloudLayer`): the clouds' light added and what they let through scaling the sample and the denoiser's signals, where the ray found nothing before their front |
+| `Clouds.Reconstruct` | RGBA32F + R32F at the render's size: the marched pixels blended into their history (0.5), the others reprojected along the depth of the clouds' light (and back along the wind's step), read through a Catmull-Rom filter and clamped to the march's 3 x 3 neighbourhood as far as parallax moves it (from a quarter of a pixel, fully from one) | the camera's rays (`AddCloudLayer`): the clouds' light added and what they let through scaling the sample and the denoiser's signals, where the ray found nothing before their front |
 
 - **Light at a step**: the sun's single scattering with the clouds' phase function (§8.10, delta-M
   scaled) and an optical depth towards the sun from 8 samples whose steps grow by 1.6 from 20 m (to
@@ -1828,26 +1841,42 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   extinction (Hillaire 2016). The air in front dims the clouds' light and adds its own where they hide
   the sky, as a path's walk sees it.
 - **Matched** to the path traced clouds (`cloudMarch=0`, accumulated) on `cumulus` at 640 x 360, the
-  march accumulated with `cloudMarch=2`: the image's mean -3.0% (8 x 8 blocks: 5th percentile -11.7%,
-  95th +20.9%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.2%
-  with the sun at 25 degrees, azimuth 160 (-8.5%, +24.0%). (The diffused light scaled with the
+  march accumulated with `cloudMarch=2`: the image's mean -2.4% (8 x 8 blocks: 5th percentile -9.3%,
+  95th +20.5%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.1%
+  with the sun at 25 degrees, azimuth 160 (-6.3%, +24.6%); cirrus included. (The diffused light scaled with the
   density itself made the thinner stratocumulus 8% dark: with its square root.)
 - The layer was half the render's size at first (a quarter of its pixels; under the editor's render
   scale of 0.67 a ninth of the output's): the clouds were soft and their outlines blocky against the
   sky. At the render's size with a 4 x 4 pattern the march lights as many pixels a frame as before,
   and a still view is sharp after 16 frames, its outlines antialiased by the jittered rays.
+- **Cirrus**: the march crosses the sheet behind the layer once (`MarchCirrus`): the sun's single
+  scattering through a thin slab in closed form, `p (1 / muV) exp(-tau / muV) (1 - exp(-tau (1 / muS -
+  1 / muV))) / (1 / muS - 1 / muV)` for the cosines muV and muS of the view and the sun, and the sky's
+  light from above scattered as much as the sheet dims, through the air in front of it. It dims the sun
+  of the layer's steps (taken where the ray enters the layer) and of the shadow map's lookups (exactly:
+  the map does not hold it, its wind is not the layer's). The sun's term grows by `1 + 0.6 tau / muV`
+  for the light the sheet scatters on forwards more than once. Matched to the path traced sheet
+  (`cumulus` without its layer, `--clouds 0.00001`): +0.4% (the upper sky 0.0%), +0.1% with the sun
+  at 25 degrees, azimuth 160.
+- **Fine structure**: clamping the history to the sparse march (texels 4 pixels apart) erased
+  whatever was finer, the cirrus' fibres most (they came out smeared and 18% dark in places). The
+  clamp only guards against parallax, clouds at other depths coming into view: where the cloud's
+  depth moves the reprojection less than a quarter of a pixel from that of a point at infinity the
+  history is kept as it is (a camera that turns, or stands still), and fully clamped from a pixel.
+  A camera flying 30 m a frame while turning shows no trails.
 - **Wind** (`CloudData::windX` / `Z`, from `Clouds::windSpeed` and `windHeading`, 12 m/s by
   default): real-time frames advance the clouds' clock, `pathtracer.cloudTime` (seconds), by
   `pathtracer.cloudWindStep` (1/60 s; 0 stills them); accumulation holds it, so the paths' walks and
   an accumulated march see the clouds where it stopped (the CPU reference at time 0). The base density drifts with the wind; the detail half again as fast and rising at
   a quarter of its speed, so the fringes billow and change while the bodies hold their shape (Nubis
   animates its detail the same way). The offsets wrap to their periods (the tile holds 25 detail
-  periods), the DDA's cells move with the base, the shadow map is indexed where the base lies, and
+  periods; the cirrus, twice as fast aloft, every 1000 km), the DDA's cells move with the base, the
+  shadow map is indexed where the base lies, and
   `Clouds.Reconstruct` follows its history back along the wind's step as well as the camera's motion.
   The shear and the curl (§8.10) are baked, so the clouds lean downwind. Against the march accumulated
   at the same clock (`cumulus`, 960 x 540, 160 real-time frames, the sky's rows): the mean absolute
-  error of the tone-mapped layer is 0.00079 at 12 m/s, as still (0.00086), and 0.00106 at six times
-  that; its gradients match the reference's. Blending fresh pixels at 0.25 instead of 0.5 lost to it
+  error of the tone-mapped layer is 0.00085 at 12 m/s, as still (0.00091), and 0.00118 at six times
+  that (without the cirrus); its gradients match the reference's. Blending fresh pixels at 0.25 instead of 0.5 lost to it
   in all three (0.00097, 0.00100, 0.00152), and the history read bilinearly lost a little sharpness
   in a strong wind.
 - A yawing camera (0.5 degrees a frame) shows no trails. What a moving camera brings in at the edges
