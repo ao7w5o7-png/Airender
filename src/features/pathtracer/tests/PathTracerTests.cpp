@@ -461,4 +461,14 @@ TEST(PathTracer_RealTimeCloudsMarchIntoMaps)
     const auto accumulated = h.Frame();
     EXPECT(accumulated.validationErrors.empty());
     EXPECT(accumulated.graphText.find("Clouds.") == std::string::npos);
+    // The wind moving the detail over the base (67 m in a 10 s step) renders the shadow map again;
+    // stilled, it stays.
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    EXPECT(h.runner->SetParameter("pathtracer.cloudWindStep", "10"));
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        EXPECT(h.Frame().graphText.find("Clouds.Shadow (Compute)") != std::string::npos);
+    }
+    EXPECT(h.runner->SetParameter("pathtracer.cloudWindStep", "0"));
+    EXPECT(h.Frame().graphText.find("Clouds.Shadow (Compute)") == std::string::npos);
 }

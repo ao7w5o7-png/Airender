@@ -35,6 +35,11 @@ struct Clouds
     bool exactPhase = false;
     float scale = 1.0f; // size of the cloud shapes, relative
     u32 seed = 1;
+    // The wind at the clouds: they drift with it in real time (the renderer's clock; still when
+    // accumulating) and lean with its shear. Metres per second, and the direction it blows towards in
+    // degrees from +x towards +z.
+    float windSpeed = 12.0f;
+    float windHeading = 0.0f;
 
     bool operator==(const Clouds&) const = default;
 };

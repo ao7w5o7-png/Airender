@@ -4,6 +4,8 @@
 
 #include "CloudMarchShared.h"
 
+#include <cmath>
+
 namespace air::pt
 {
 
@@ -102,8 +104,27 @@ void CloudMarcher::BeginFrame(const renderer::GpuScene& scene, u32 width, u32 he
         mLayerHeight = layerHeight;
         mHistory = false;
     }
-    mRenderShadow = scene.version != mShadowVersion;
+    // The wind moves the base density and, faster, the detail over it: the shadow map follows the base
+    // (it is indexed where it lies) and is rendered again once the detail has moved 16 m over it (two
+    // of its texels).
+    const gpu::CloudData& c = frame.clouds;
+    auto wrap = [](float x, float period) { return x - period * std::round(x / period); };
+    const std::array<float, 3> drift = {wrap(c.detailOffsetX - c.baseOffsetX, c.detailPeriod), c.detailOffsetY,
+                                        wrap(c.detailOffsetZ - c.baseOffsetZ, c.detailPeriod)};
+    float moved = 0.0f;
+    for (u32 i = 0; i < 3; ++i)
+    {
+        const float d = wrap(drift[i] - mShadowDrift[i], c.detailPeriod);
+        moved += d * d;
+    }
+    mRenderShadow = scene.version != mShadowVersion || moved > 16.0f * 16.0f;
     mShadowVersion = scene.version;
+    if (mRenderShadow)
+    {
+        mShadowDrift = drift;
+    }
+    mWindStep = {wrap(c.baseOffsetX - mBaseOffset[0], c.tileSize), wrap(c.baseOffsetZ - mBaseOffset[1], c.tileSize)};
+    mBaseOffset = {c.baseOffsetX, c.baseOffsetZ};
     mUseHistory = mHistory && historyValid;
     frame.clouds.shadowMap = mDevice.GetBindlessSRV(mShadowMap);
     frame.clouds.skyMap = mDevice.GetBindlessSRV(mSkyMap);
@@ -125,6 +146,8 @@ void CloudMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& 
     base.offset = kOffsets[frameIndex % 16];
     base.history = air::gpu::kInvalidIndex;
     base.historyDepth = air::gpu::kInvalidIndex;
+    base.windStepX = mWindStep[0];
+    base.windStepZ = mWindStep[1];
 
     mShadowRef = graph.ImportTexture(mShadowMap, mShadowAccess, kRest);
     mShadowAccess = kRest;

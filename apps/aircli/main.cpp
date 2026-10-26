@@ -10,7 +10,7 @@
 //                   [--output-frames N]   (also the N - 1 frames before the last: image.<frame>.pfm)
 //                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
-//                   [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)
+//                   [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
 //                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
 //                   [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels among the surfaces)
@@ -80,37 +80,38 @@ constexpr int kExitUsage = 2;
 
 int Usage()
 {
-    std::fputs("usage:\n"
-               "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
-               "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
-               "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
-               "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
-               "                [--scene NAME] [--output image.pfm|image.ppm] [--output-frames N]\n"
-               "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)\n"
-               "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
-               "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)\n"
-               "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
-               "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
-               "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
-               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
-               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
-               "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
-               "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
-               "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
-               "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
-               "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
-               "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
-               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
-               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
-               "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
-               "                [--volume-shadow-size N] [--volume-lights N]]\n"
-               "  aircli features | scenes\n"
-               "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
-               "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
-               "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
-               "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n"
-               "  aircli coat-check [--scene NAME] [--directions N]\n",
-               stderr);
+    std::fputs(
+        "usage:\n"
+        "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
+        "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
+        "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
+        "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
+        "                [--scene NAME] [--output image.pfm|image.ppm] [--output-frames N]\n"
+        "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)\n"
+        "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
+        "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)\n"
+        "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
+        "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
+        "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
+        "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+        "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
+        "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
+        "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
+        "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
+        "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact] [--cloud-events N]\n"
+        "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
+        "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
+        "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+        "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
+        "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
+        "                [--volume-shadow-size N] [--volume-lights N]]\n"
+        "  aircli features | scenes\n"
+        "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
+        "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
+        "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
+        "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n"
+        "  aircli coat-check [--scene NAME] [--directions N]\n",
+        stderr);
     return kExitUsage;
 }
 
@@ -227,8 +228,8 @@ int CommandScenes()
 
 // Changes to a built-in scene:
 //   --sun ELEVATION,AZIMUTH (degrees) and --aerosols DEPTH give it the physical sky (Sky.h);
-//   --clouds COVERAGE[,BOTTOM,TOP] (metres) adds a cloud layer (Clouds.h), 0 removes it; --clouds-exact
-//   keeps their phase function's diffraction peak;
+//   --clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]] (metres) adds a cloud layer (Clouds.h), 0 removes it;
+//   --clouds-exact keeps their phase function's diffraction peak;
 //   --camera EX,EY,EZ,TX,TY,TZ[,FOV] puts the camera at the eye looking at the target (vertical field
 //   of view in degrees), --ev EV100 sets its exposure;
 //   --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] puts a volume (Volume.h) in it: a
@@ -402,6 +403,14 @@ struct SceneOptions
             {
                 scene.clouds.bottom = std::stof(clouds[1]);
                 scene.clouds.top = std::stof(clouds[2]);
+            }
+            if (clouds.size() >= 4)
+            {
+                scene.clouds.windSpeed = std::stof(clouds[3]);
+            }
+            if (clouds.size() >= 5)
+            {
+                scene.clouds.windHeading = std::stof(clouds[4]);
             }
             // Clouds in a uniform environment would have no sun to light them.
             scene.sky.physical = scene.sky.physical || scene.clouds.enabled;

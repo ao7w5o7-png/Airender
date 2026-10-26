@@ -30,10 +30,18 @@ namespace
 // Settings whose change invalidates the accumulated image.
 bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 {
+    // The wind's step only sets how far the clouds drift between real-time frames (an app may follow
+    // its frame time with it), and real-time frames advance their clock themselves.
+    CloudMarchSettings cloudMarch = a.cloudMarch;
+    cloudMarch.windStep = b.cloudMarch.windStep;
+    if (!a.accumulate && !b.accumulate)
+    {
+        cloudMarch.time = b.cloudMarch.time;
+    }
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
            a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
-           a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && a.cloudMarch == b.cloudMarch && a.furnace == b.furnace &&
+           a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && cloudMarch == b.cloudMarch && a.furnace == b.furnace &&
            a.debugView == b.debugView && a.debugScale == b.debugScale && a.coatModel == b.coatModel;
 }
 
@@ -417,6 +425,21 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         frame.clouds.baseTexture = mDevice.GetBindlessSRV(scene.cloudBase);
         frame.clouds.detailTexture = mDevice.GetBindlessSRV(scene.cloudDetail);
         frame.clouds.majorants = mDevice.GetBindlessSRV(scene.cloudMajorants);
+        // The wind: real-time frames advance the clouds' clock, accumulation holds it. The detail
+        // drifts half again as fast as the base and rises, so the fringes billow (Nubis). Offsets wrap
+        // to their periods (the tile holds a whole number of detail periods).
+        if (!mSettings.accumulate && spp > 0)
+        {
+            mSettings.cloudMarch.time += mSettings.cloudMarch.windStep;
+        }
+        const double time = double(mSettings.cloudMarch.time);
+        auto wrap = [](double x, float period) { return float(x - double(period) * std::round(x / double(period))); };
+        const float speed = std::hypot(frame.clouds.windX, frame.clouds.windZ);
+        frame.clouds.baseOffsetX = wrap(double(frame.clouds.windX) * time, frame.clouds.tileSize);
+        frame.clouds.baseOffsetZ = wrap(double(frame.clouds.windZ) * time, frame.clouds.tileSize);
+        frame.clouds.detailOffsetX = wrap(1.5 * double(frame.clouds.windX) * time, frame.clouds.detailPeriod);
+        frame.clouds.detailOffsetY = wrap(0.25 * double(speed) * time, frame.clouds.detailPeriod);
+        frame.clouds.detailOffsetZ = wrap(1.5 * double(frame.clouds.windZ) * time, frame.clouds.detailPeriod);
     }
     frame.cloudEvents = mSettings.cloudEvents;
     frame.volumeEvents = mSettings.volumeEvents;

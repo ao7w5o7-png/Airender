@@ -4,7 +4,7 @@
 // neighbourhood so that nothing trails where the clouds changed. A pixel whose history lies off screen
 // (what a moving camera brings in at the edges) is marched here at once: upsampled from the sparse march
 // it showed as streaks along the edge for the 16 frames it took to fill in. Without any history (the
-// first frame after a reset) the march is upsampled.
+// first frame after a reset) the march is upsampled. The history is read through a Catmull-Rom filter.
 
 #include "air/renderer/shader/SceneShared.h"
 #include "PathTracerShared.h"
@@ -14,7 +14,35 @@
 
 #include "CloudMarch.hlsli"
 
-static const float kCloudFreshBlend = 0.25f; // weight of a newly marched pixel against its history
+static const float kCloudFreshBlend = 0.5f; // weight of a newly marched pixel against its history
+
+// The history at `position` (pixels) through a Catmull-Rom filter, in 9 bilinear taps (the outer
+// weights folded into the inner taps' positions): sampling it bilinearly at the fractional positions
+// a drifting cloud or a moving camera reprojects to blurred it a little more every frame.
+float4 SampleHistory(Texture2D<float4> history, float2 position, float2 size)
+{
+    float2 center = floor(position - 0.5f) + 0.5f;
+    float2 f = position - center;
+    float2 w0 = f * (-0.5f + f * (1.0f - 0.5f * f));
+    float2 w1 = 1.0f + f * f * (-2.5f + 1.5f * f);
+    float2 w2 = f * (0.5f + f * (2.0f - 1.5f * f));
+    float2 w3 = f * f * (-0.5f + 0.5f * f);
+    float2 w12 = w1 + w2;
+    float2 p0 = (center - 1.0f) / size;
+    float2 p3 = (center + 2.0f) / size;
+    float2 p12 = (center + w2 / w12) / size;
+    float4 sum = 0.0f;
+    sum += history.SampleLevel(gLinearClamp, float2(p0.x, p0.y), 0.0f) * (w0.x * w0.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p12.x, p0.y), 0.0f) * (w12.x * w0.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p3.x, p0.y), 0.0f) * (w3.x * w0.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p0.x, p12.y), 0.0f) * (w0.x * w12.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p12.x, p12.y), 0.0f) * (w12.x * w12.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p3.x, p12.y), 0.0f) * (w3.x * w12.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p0.x, p3.y), 0.0f) * (w0.x * w3.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p12.x, p3.y), 0.0f) * (w12.x * w3.y);
+    sum += history.SampleLevel(gLinearClamp, float2(p3.x, p3.y), 0.0f) * (w3.x * w3.y);
+    return sum;
+}
 
 [numthreads(8, 8, 1)]
 void Main(uint3 id : SV_DispatchThreadID)
@@ -40,7 +68,9 @@ void Main(uint3 id : SV_DispatchThreadID)
     {
         float2 size = float2(f.width, f.height);
         float3 d = CameraRayDirection(f.camera, float2(id.xy) + 0.5f, size);
-        float2 previous = CameraProject(f.previousCamera, Xyz(f.camera.position) + d * depth, 1.0f, size);
+        // Where the clouds there were last frame, before the wind carried them on.
+        float3 before = Xyz(f.camera.position) + d * depth - float3(g.windStepX, 0.0f, g.windStepZ);
+        float2 previous = CameraProject(f.previousCamera, before, 1.0f, size);
         if (!all(previous >= 0.0f) || !all(previous < size))
         {
             if (!fresh)
@@ -69,7 +99,7 @@ void Main(uint3 id : SV_DispatchThreadID)
                 }
             }
             Texture2D<float4> history = ResourceDescriptorHeap[g.history];
-            float4 past = clamp(history.SampleLevel(gLinearClamp, previous / size, 0.0f), lo, hi);
+            float4 past = clamp(SampleHistory(history, previous, size), lo, hi);
             result = fresh ? lerp(past, current, kCloudFreshBlend) : past;
         }
     }

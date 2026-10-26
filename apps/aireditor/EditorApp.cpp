@@ -1041,6 +1041,10 @@ void EditorApp::BuildScenePanel()
         slider("Droplet size", &clouds.dropletDiameter, 5.0f, 50.0f, "%.1f um");
         ImGui::SetItemTooltip("Effective droplet diameter: shapes the phase function (Jendersie and d'Eon 2023).");
         slider("Shape scale", &clouds.scale, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+        slider("Wind", &clouds.windSpeed, 0.0f, 60.0f, "%.0f m/s");
+        slider("Wind heading", &clouds.windHeading, -180.0f, 180.0f, "%.0f deg");
+        ImGui::SetItemTooltip("The clouds drift with the wind in real time (pathtracer.cloudWindStep seconds a "
+                              "frame), their detail faster and rising, and lean with its shear.");
         int seed = int(clouds.seed);
         cloudsEdited |= ImGui::DragInt("Seed##clouds", &seed, 0.2f, 0, 1 << 20);
         applyClouds |= ImGui::IsItemDeactivatedAfterEdit();

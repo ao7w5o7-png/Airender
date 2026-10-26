@@ -34,6 +34,8 @@ struct CloudMarchConstants
     uint historyDepth; // Texture2D<float>
     uint steps;        // samples a camera ray may take in the clouds
     uint lightSamples; // samples of the optical depth towards the sun
+    float windStepX;   // metres the wind carried the clouds since the last frame (reconstruction)
+    float windStepZ;
 };
 
 #ifdef __cplusplus

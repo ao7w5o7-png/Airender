@@ -243,6 +243,56 @@ TEST(Clouds_VolumeCoversTheRequestedSkyAndMajorantsBoundIt)
     EXPECT(std::abs(reader.CloudAltitude(float3(100000.0f, 0.0f, 0.0f)) - 784.8f) < 1.0f);
 }
 
+// The wind carries the density with it, and the majorant cells (anchored to the base) along.
+TEST(Clouds_WindCarriesTheDensityAndItsMajorants)
+{
+    renderer::CloudVolume& volume = DefaultVolume();
+    CloudReader reader{volume};
+    const CloudData still = volume.data;
+    CloudData windy = still;
+    windy.baseOffsetX = 1234.5f;
+    windy.baseOffsetZ = -777.25f;
+    windy.detailOffsetX = windy.baseOffsetX;
+    windy.detailOffsetZ = windy.baseOffsetZ;
+    uint seed = 5u;
+    for (int i = 0; i < 200; ++i)
+    {
+        const float3 u = CloudReader::Rand3(seed);
+        const float3 p(u.x * still.tileSize, still.bottom + u.y * (still.top - still.bottom), u.z * still.tileSize);
+        float3 q = p + float3(windy.baseOffsetX, 0.0f, windy.baseOffsetZ);
+        q.y += reader.CloudAltitude(p) - reader.CloudAltitude(q);
+        EXPECT(std::abs(reader.CloudDensity(still, p) - reader.CloudDensity(windy, q)) < 1.2e-2f);
+    }
+    // The detail drifting on over the base still only erodes it: the majorants bound it.
+    windy.detailOffsetX += 333.0f;
+    windy.detailOffsetY = 41.0f;
+    int checked = 0;
+    for (int ray = 0; ray < 500; ++ray)
+    {
+        const float3 o =
+            CloudReader::Rand3(seed) * float3(40000.0f, 4000.0f, 40000.0f) - float3(20000.0f, 0.0f, 20000.0f);
+        const float3 d = normalize(CloudReader::Rand3(seed) * 2.0f - 1.0f);
+        CloudReader::CloudMarch m;
+        if (!reader.BeginCloudMarch(windy, o, d, 1e30f, m))
+        {
+            continue;
+        }
+        float t0 = 0.0f;
+        float t1 = 0.0f;
+        float majorant = 0.0f;
+        for (int segment = 0; segment < 64 && reader.NextCloudSegment(windy, m, t0, t1, majorant); ++segment)
+        {
+            for (int k = 0; k < 4; ++k)
+            {
+                const float t = t0 + (t1 - t0) * CloudReader::Rand(seed);
+                EXPECT(windy.extinction * reader.CloudDensity(windy, o + d * t) <= majorant);
+                ++checked;
+            }
+        }
+    }
+    EXPECT(checked > 2000);
+}
+
 // Ratio tracking's mean and delta tracking's chance to pass are both exp(-optical depth), which a
 // fine ray march gives.
 TEST(Clouds_TrackingMatchesARayMarch)

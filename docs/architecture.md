@@ -951,9 +951,10 @@ Validation:
 
 `SceneDesc::clouds` (`renderer/Clouds.h`) adds a layer of cumulus above the scene: the heights of
 its base and tops, coverage, extinction at density 1, the droplets' effective diameter and
-single-scattering albedo, a shape scale and a seed. `cumulus` uses it; `aircli render|reference
---clouds COVERAGE[,BOTTOM,TOP]` adds it to any scene (0 removes it; it switches on the physical sky,
-whose sun lights the clouds), and the editor's Scene panel edits it.
+single-scattering albedo, a shape scale, a seed and the wind (speed and heading). `cumulus` uses it;
+`aircli render|reference --clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]` adds it to any scene (0
+removes it; it switches on the physical sky, whose sun lights the clouds; the wind in m/s, heading in
+degrees from +x towards +z), and the editor's Scene panel edits it.
 
 - **Density** (`src/renderer/src/Clouds.cpp`), procedural, baked on the CPU into two 8-bit 3D
   textures when the clouds change (2.1 s for `cumulus` in debug builds, all cores):
@@ -972,7 +973,7 @@ whose sun lights the clouds), and the editor's Scene panel edits it.
     everywhere made a wall of clouds along the horizon) and congestus (0.3 + 0.7 strength^0.7, in
     fewer, larger cells, their tops spreading into anvils). The billows' and the weather's
     coordinates are swirled by curl noise (up to about 200 m, more higher up) and leaned by the
-    wind's shear (500 m over the layer's height).
+    wind's shear (500 m over the layer's height downwind, 150 m across).
   - the detail, 128^3 texels of cellular noise repeating every 1.024 km (25 to the tile), which
     erodes the base's fringe a little at render time (strength 0.4); the eroded density is then
     sharpened (times 5, clamped to 1): crisp outlines, even interiors. The earlier generator (a
@@ -1028,8 +1029,9 @@ Validation:
   5, 20 and 50 micrometres with a mean cosine of 0.75-0.92; sampled cosines follow its CDF at 8 cuts
   (400k samples, within 0.003); the volume covers about the requested sky and, along 2000 random
   rays, the density never exceeds the majorant of the cell the DDA is in; the density repeats with
-  the tile; ratio and delta tracking both match a 0.5 m ray march of exp(-optical depth) for rays of
-  optical depth 0.1-3; disabled clouds are transparent.
+  the tile; the wind's offsets carry the density and the majorant cells with it (the detail drifting
+  on over the base stays bounded); ratio and delta tracking both match a 0.5 m ray march of
+  exp(-optical depth) for rays of optical depth 0.1-3; disabled clouds are transparent.
 - `Integrator_CloudsVanishInAWhiteFurnace`: with albedo 1 in a uniform environment every path
   through the clouds returns the environment exactly, so every pixel is 0.18.
 - `Integrator_CloudSunNeeAndPhaseSamplingAgree`: with a 12-degree sun, NEE + MIS and phase sampling
@@ -1046,8 +1048,8 @@ Validation:
   In real time the clouds are ray marched into maps instead (§8.19).
 - The air between a ray's origin and its first collision with the clouds dims and adds to their
   light (§8.9's aerial perspective), so distant clouds fade into the haze.
-- Not modelled: wind, the scene's own geometry lighting the clouds, the clouds' shadows in the air
-  between them and the viewer; a ray ends 100 km out.
+- Not modelled: the scene's own geometry lighting the clouds, the clouds' shadows in the air between
+  them and the viewer; a ray ends 100 km out. The wind (§8.19) only moves them in real time.
 
 ### 8.11 Neural radiance cache
 
@@ -1809,10 +1811,10 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
 
 | Pass | Map | Read by |
 |---|---|---|
-| `Clouds.Shadow` | R32F, 512 x 512 over one tile of the clouds (they repeat): the optical depth along the sun from each point of their base up through the layer (steps of at most 25 m), rendered when the scene changes | every sun NEE below the clouds (`CloudSunTransmittance`): the transmittance of the point where the sun's ray crosses their base, instead of ratio tracking |
+| `Clouds.Shadow` | R32F, 512 x 512 over one tile of the clouds (they repeat): the optical depth along the sun from each point of their base up through the layer (steps of at most 25 m), indexed where the drifting base lies; rendered when the scene changes and whenever the wind has moved the detail 16 m over the base | every sun NEE below the clouds (`CloudSunTransmittance`): the transmittance of the point where the sun's ray crosses their base, instead of ratio tracking |
 | `Clouds.Sky` | RGBA32F, 128 x 128 over the upper hemisphere (the octahedron's upper half): what the clouds add to and leave of the sky towards each direction, seen from the camera (48 steps, fixed offsets) | rays that leave the scene after a bounce (`EscapeRadiance`): the clouds are kilometres away, so one viewpoint serves the scene |
 | `Clouds.March` | one pixel of every 4 x 4 block of the layer, a different one each frame in a Bayer order (96 steps; the ray, its steps and its samples towards the sun jittered) | `Clouds.Reconstruct` |
-| `Clouds.Reconstruct` | RGBA32F + R32F at the render's size: the marched pixels blended into their history (0.4), the others reprojected along the depth of the clouds' light, clamped to the march's 3 x 3 neighbourhood | the camera's rays (`AddCloudLayer`): the clouds' light added and what they let through scaling the sample and the denoiser's signals, where the ray found nothing before their front |
+| `Clouds.Reconstruct` | RGBA32F + R32F at the render's size: the marched pixels blended into their history (0.5), the others reprojected along the depth of the clouds' light (and back along the wind's step), read through a Catmull-Rom filter and clamped to the march's 3 x 3 neighbourhood | the camera's rays (`AddCloudLayer`): the clouds' light added and what they let through scaling the sample and the denoiser's signals, where the ray found nothing before their front |
 
 - **Light at a step**: the sun's single scattering with the clouds' phase function (§8.10, delta-M
   scaled) and an optical depth towards the sun from 8 samples whose steps grow by 1.6 from 20 m (to
@@ -1834,6 +1836,20 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   scale of 0.67 a ninth of the output's): the clouds were soft and their outlines blocky against the
   sky. At the render's size with a 4 x 4 pattern the march lights as many pixels a frame as before,
   and a still view is sharp after 16 frames, its outlines antialiased by the jittered rays.
+- **Wind** (`CloudData::windX` / `Z`, from `Clouds::windSpeed` and `windHeading`, 12 m/s by
+  default): real-time frames advance the clouds' clock, `pathtracer.cloudTime` (seconds), by
+  `pathtracer.cloudWindStep` (1/60 s; 0 stills them); accumulation holds it, so the paths' walks and
+  an accumulated march see the clouds where it stopped (the CPU reference at time 0). The base density drifts with the wind; the detail half again as fast and rising at
+  a quarter of its speed, so the fringes billow and change while the bodies hold their shape (Nubis
+  animates its detail the same way). The offsets wrap to their periods (the tile holds 25 detail
+  periods), the DDA's cells move with the base, the shadow map is indexed where the base lies, and
+  `Clouds.Reconstruct` follows its history back along the wind's step as well as the camera's motion.
+  The shear and the curl (§8.10) are baked, so the clouds lean downwind. Against the march accumulated
+  at the same clock (`cumulus`, 960 x 540, 160 real-time frames, the sky's rows): the mean absolute
+  error of the tone-mapped layer is 0.00079 at 12 m/s, as still (0.00086), and 0.00106 at six times
+  that; its gradients match the reference's. Blending fresh pixels at 0.25 instead of 0.5 lost to it
+  in all three (0.00097, 0.00100, 0.00152), and the history read bilinearly lost a little sharpness
+  in a strong wind.
 - A yawing camera (0.5 degrees a frame) shows no trails. What a moving camera brings in at the edges
   has no history to follow back: `Clouds.Reconstruct` marches those pixels at once (upsampled from
   the sparse march they showed as streaks along the edge for 16 frames); yawing a degree a frame it

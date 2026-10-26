@@ -78,9 +78,9 @@ uint CloudWrap(int i, uint n)
     return uint(m < 0 ? m + int(n) : m);
 }
 
-// Density (0..1) at a point: the base texture, its fringe eroded by the detail texture, sharpened.
-// The erosion never raises the density and the sharpening is monotonic, so the majorants of the
-// sharpened base texture bound it.
+// Density (0..1) at a point: the base texture, its fringe eroded by the detail texture, sharpened,
+// each where the wind has carried it (CloudData's offsets). The erosion never raises the density and
+// the sharpening is monotonic, so the majorants of the sharpened base texture bound it.
 float CloudDensity(CloudData c, float3 p)
 {
     float altitude = CloudAltitude(p);
@@ -89,15 +89,16 @@ float CloudDensity(CloudData c, float3 p)
     {
         return 0.0f;
     }
-    float3 uvw = float3(frac(p.x / c.tileSize), frac(p.z / c.tileSize),
+    float3 uvw = float3(frac((p.x - c.baseOffsetX) / c.tileSize), frac((p.z - c.baseOffsetZ) / c.tileSize),
                         (h * float(c.gridY) + 1.0f) / float(c.gridY + 2u));
     float base = CloudBaseSample(c, uvw);
     if (base <= 0.0f || c.detailStrength <= 0.0f)
     {
         return saturate(base * c.sharpness);
     }
-    float detail = CloudDetailSample(
-        c, float3(frac(p.x / c.detailPeriod), frac(p.z / c.detailPeriod), frac(altitude / c.detailPeriod)));
+    float detail = CloudDetailSample(c, float3(frac((p.x - c.detailOffsetX) / c.detailPeriod),
+                                               frac((p.z - c.detailOffsetZ) / c.detailPeriod),
+                                               frac((altitude - c.detailOffsetY) / c.detailPeriod)));
     float erosion = detail * c.detailStrength * (1.0f - base);
     return saturate((base - erosion) / (1.0f - erosion) * c.sharpness);
 }
@@ -197,9 +198,10 @@ bool BeginCloudMarch(CloudData c, float3 o, float3 d, float tMax, AIR_OUT(CloudM
         m.tEnd = m.t;
         return false;
     }
-    // Cells are anchored at (0, bottom, 0); the altitude's cell at the middle of the first step.
-    CloudAxis(o.x, d.x, c.tileSize / float(c.cellsX), t0, m.cellX, m.stepX, m.nextX, m.deltaX);
-    CloudAxis(o.z, d.z, c.tileSize / float(c.cellsZ), t0, m.cellZ, m.stepZ, m.nextZ, m.deltaZ);
+    // Cells are anchored at (0, bottom, 0) of the drifting base; the altitude's cell at the middle of the
+    // first step.
+    CloudAxis(o.x - c.baseOffsetX, d.x, c.tileSize / float(c.cellsX), t0, m.cellX, m.stepX, m.nextX, m.deltaX);
+    CloudAxis(o.z - c.baseOffsetZ, d.z, c.tileSize / float(c.cellsZ), t0, m.cellZ, m.stepZ, m.nextZ, m.deltaZ);
     float start = CloudAltitude(o + d * min(after, 0.5f * (t0 + t1)));
     m.cellY = min(max(int(floor((start - c.bottom) / m.cellHeight)), 0), int(c.cellsY) - 1);
     CloudNextAltitudeBoundary(c, m, after);

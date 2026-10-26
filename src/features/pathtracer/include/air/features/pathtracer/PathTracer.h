@@ -129,6 +129,10 @@ struct CloudMarchSettings
     u32 lightSamples = 8; // samples towards the sun from each (steps growing by 1.6 from 20 m, jittered)
     u32 skySteps = 48;    // the same for the sky map
     u32 skyLightSamples = 4;
+    // The clouds' clock: seconds of wind so far (they drift with it, Clouds::windSpeed). Real-time frames
+    // advance it by windStep (0 stills them); accumulation holds it.
+    float time = 0.0f;
+    float windStep = 1.0f / 60.0f;
 
     bool operator==(const CloudMarchSettings&) const = default;
 };

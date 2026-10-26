@@ -260,6 +260,11 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
     const u32 layers = std::max(1u, u32(std::lround(thickness / (float(kCellY) * kVoxelHeight * scale))));
     data.extinction = clouds.extinction;
     data.albedo = clouds.albedo;
+    const float heading = clouds.windHeading * (3.14159265f / 180.0f);
+    const float windU = std::cos(heading);
+    const float windW = std::sin(heading);
+    data.windX = clouds.windSpeed * windU;
+    data.windZ = clouds.windSpeed * windW;
     data.tileSize = float(n) * kVoxel * scale;
     data.gridX = n;
     data.gridY = layers * kCellY;
@@ -339,9 +344,9 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
         return (at(x0, z0) * (1.0f - ax) + at(x0 + 1, z0) * ax) * (1.0f - az) +
                (at(x0, z0 + 1) * (1.0f - ax) + at(x0 + 1, z0 + 1) * ax) * az;
     };
-    // The wind's shear: 500 m of lean over the layer's height, towards +x and a little +z.
-    const float shearU = 500.0f / data.tileSize;
-    const float shearW = 150.0f / data.tileSize;
+    // The wind's shear: 500 m of lean over the layer's height downwind, 150 m across (veering).
+    const float shearU = (500.0f * windU - 150.0f * windW) / data.tileSize;
+    const float shearW = (500.0f * windW + 150.0f * windU) / data.tileSize;
     // The swirl: up to about 200 m, more higher up.
     const float swirl = 200.0f / data.tileSize;
 

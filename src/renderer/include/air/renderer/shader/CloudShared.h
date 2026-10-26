@@ -48,10 +48,22 @@ struct CloudData
     // leave of the sky seen from the camera (Texture2D<float4>, the upper hemisphere).
     uint shadowMap;
     uint skyMap;
+    // The wind (Nubis): the clouds drift with it, their detail faster and rising, so that their fringes
+    // billow. The velocity is the scene's, metres per second along x and z; the offsets (metres) are
+    // how far the base density and the detail have moved, set per frame by the renderer (zero in a
+    // still scene).
+    float windX;
+    float windZ;
+    float baseOffsetX;
+    float baseOffsetZ;
+    float detailOffsetX;
+    float detailOffsetY;
+    float detailOffsetZ;
+    float windPad;
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(CloudData) == 96);
+static_assert(sizeof(CloudData) == 128);
 } // namespace air::gpu
 #endif
 

@@ -44,6 +44,11 @@ public:
                         "Real-time clouds: samples a camera ray may take in them", 8, 512);
         mParameters.Add("cloudLightSamples", &mSettings.cloudMarch.lightSamples,
                         "Real-time clouds: samples towards the sun from each (steps growing by 1.6 from 20 m)", 1, 12);
+        mParameters.Add("cloudTime", &mSettings.cloudMarch.time,
+                        "Clouds: seconds of wind so far (real-time frames advance it; accumulation holds it)", 0.0f,
+                        1e7f);
+        mParameters.Add("cloudWindStep", &mSettings.cloudMarch.windStep,
+                        "Clouds: seconds the wind blows each real-time frame (0: the clouds stand still)", 0.0f, 10.0f);
         mParameters.Add("volumeEvents", &mSettings.volumeEvents,
                         "Scattering events a path may take in the scene's volume (besides its bounces) before its "
                         "light is given up",
@@ -193,6 +198,8 @@ public:
         live.signals = live.guides && context.Consumes(slots::kDiffuseSignal);
         live.transparencyGuides = live.guides && context.Consumes(slots::kColorBeforeTransparency);
         mTracer->AddPasses(context.graph, context.scene, context.camera, context.blackboard, context.sceneColor);
+        // Real-time frames advance the clouds' clock.
+        mSettings.cloudMarch.time = live.cloudMarch.time;
     }
 
     renderer::FeatureStage GetStage() const override { return renderer::FeatureStage::Scene; }

@@ -4,7 +4,8 @@
 //   float  CloudShadowSample(CloudData c, float2 uv)  CloudData::shadowMap, bilinear, wrapping
 //   float4 CloudSkySample(CloudData c, float2 uv)     CloudData::skyMap, bilinear, clamping
 //
-// The shadow map holds, over one tile of the clouds (which repeat), the optical depth along the sun
+// The shadow map holds, over one tile of the clouds (which repeat, and drift with the wind: it is
+// indexed where the base density lies, CloudData::baseOffsetX / Z), the optical depth along the sun
 // from a point of the cloud base (at its altitude: the base curves with the planet, CloudLookup.hlsli)
 // up through the layer: below the base (all geometry is) the sun's transmittance is that of the point
 // where the sun's ray crosses the base. The lookups need CloudLookup.hlsli included before. The sky map holds what the
@@ -51,7 +52,7 @@ float CloudShadowMapTransmittance(CloudData c, float3 p, float3 wi)
     {
         return 1.0f;
     }
-    float2 q = float2(p.x, p.z) + float2(wi.x, wi.z) * s;
+    float2 q = float2(p.x - c.baseOffsetX, p.z - c.baseOffsetZ) + float2(wi.x, wi.z) * s;
     return exp(-max(CloudShadowSample(c, q / c.tileSize), 0.0f));
 }
 

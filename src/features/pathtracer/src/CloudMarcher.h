@@ -62,6 +62,8 @@ private:
     rhi::TextureHandle mShadowMap; // R32F, kCloudShadowMapSize^2
     rhi::Access mShadowAccess = rhi::Access::None;
     u64 mShadowVersion = ~0ull; // the scene version it shows
+    // Where the wind had moved the detail over the base density when it was rendered (metres).
+    std::array<float, 3> mShadowDrift{};
     bool mRenderShadow = false;
     u32 mShadowRenders = 0;
     rhi::TextureHandle mSkyMap; // RGBA32F, kCloudSkyMapSize^2
@@ -77,6 +79,9 @@ private:
     u32 mCurrent = 0;
     bool mHistory = false;
     bool mUseHistory = false;
+    // The base density's offset last frame, and how far the wind carried it since.
+    std::array<float, 2> mBaseOffset{};
+    std::array<float, 2> mWindStep{};
 
     // This frame's, for DeclareReads.
     rdg::TextureRef mShadowRef;
