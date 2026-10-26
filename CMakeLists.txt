@@ -22,6 +22,7 @@ option(AIR_BUILD_APPS  "Build command line apps" ON)
 option(AIR_BUILD_EDITOR "Build the ImGui editor (UI library + tests everywhere, executable on Windows/D3D12)" ON)
 option(AIR_WITH_DLSS "Build the DLSS feature (Windows, D3D12, NVIDIA DLSS SDK)" ${AIR_D3D12_DEFAULT})
 option(AIR_WITH_NRD "Build the NRD denoiser feature (D3D12, NVIDIA NRD built from source)" ${AIR_D3D12_DEFAULT})
+option(AIR_WITH_NTC "Neural texture compression (Windows x64, NVIDIA RTXNTC's prebuilt LibNTC)" ${AIR_D3D12_DEFAULT})
 # Preview Agility SDK + DXC: Shader Model 6.10 linear algebra (tensor-core matrix-vector products for
 # the neural radiance cache). Off: the retail SDK, and neural networks run their portable kernels.
 option(AIR_D3D12_PREVIEW "Use the preview Agility SDK and DXC for Shader Model 6.10 linear algebra" ${AIR_D3D12_DEFAULT})

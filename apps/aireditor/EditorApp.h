@@ -15,6 +15,7 @@
 #include "air/core/Image.h"
 #include "air/core/TaskSystem.h"
 #include "air/renderer/FrameRunner.h"
+#include "air/renderer/NeuralTextures.h"
 #include "air/renderer/Scene.h"
 #include "air/renderer/ShaderHotReload.h"
 
@@ -63,6 +64,9 @@ struct EditorOptions
     std::string focusWindow;           // a window brought to front at startup (selects its dock tab)
     // Feature parameters set at startup ("feature.parameter", value), as aircli's --set.
     std::vector<std::pair<std::string, std::string>> parameters;
+    // Neural texture compression of the scenes' texture sets (renderer/NeuralTextures.h), applied as a
+    // scene loads.
+    renderer::NeuralTextureOptions neuralTextures;
 };
 
 inline constexpr const char* kHtmlProfilerWindow = "Profiler (HTML)";
@@ -112,6 +116,12 @@ public:
     // Applies a resolution change now (the UI otherwise waits until the viewport stops resizing).
     void Resize(u32 width, u32 height);
     bool LoadScene(const std::string& name);
+    // Neural texture compression of the scene's texture sets: reloads the scene. Without LibNTC (or a
+    // CUDA device) it loads the plain textures and GetNeuralTextureError() says why.
+    void SetNeuralTextureMode(renderer::NeuralTextureMode mode);
+    renderer::NeuralTextureMode GetNeuralTextureMode() const { return mOptions.neuralTextures.mode; }
+    const std::vector<renderer::NeuralTextureReport>& GetNeuralTextureReport() const { return mNeuralReport; }
+    const std::string& GetNeuralTextureError() const { return mNeuralError; }
     // Inserts or removes the dlss feature after pathtracer. Enabling switches the path tracer to
     // jittered single frames (accumulate=false, spp=1); disabling restores what was set before.
     void SetDlssEnabled(bool enabled);
@@ -155,6 +165,8 @@ private:
     EditorOptions mOptions;
     std::unique_ptr<renderer::Scene> mScene;
     std::string mSceneName;
+    std::vector<renderer::NeuralTextureReport> mNeuralReport; // of the loaded scene
+    std::string mNeuralError;
     renderer::Camera mCamera;
     std::unique_ptr<renderer::FrameRunner> mRunner;
     std::vector<std::string> mActiveFeatures;

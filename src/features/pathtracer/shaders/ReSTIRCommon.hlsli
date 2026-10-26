@@ -52,6 +52,7 @@ IntegratorParams MakeParams(FrameData f)
     params.volumeCount = f.volumeCount;
     params.volumeTable = f.volumeTable;
     params.textureSets = f.textureSets;
+    params.textureSeed = f.frameIndex;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
@@ -108,6 +109,16 @@ struct Receiver
     BsdfContext bsdf;
 };
 
+// The first surface's material as Trace stored it (PrimaryHit::redGreen, blueRoughness, metallic).
+BsdfMaterial DecodeMaterial(PrimaryHit h)
+{
+    BsdfMaterial m;
+    m.baseColor = float3(f16tof32(h.redGreen), f16tof32(h.redGreen >> 16), f16tof32(h.blueRoughness));
+    m.roughness = f16tof32(h.blueRoughness >> 16);
+    m.metallic = f16tof32(h.metallic);
+    return m;
+}
+
 Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
 {
     Receiver r = (Receiver)0;
@@ -122,14 +133,21 @@ Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
     hit.instance = h.instance;
     hit.primitive = h.primitive;
     hit.barycentrics = h.barycentrics;
-    // LoadSurface orients the normals against a ray, unknown here: orient them towards the eye.
-    Surface s = LoadSurface(hit, float3(0.0f, 0.0f, 0.0f), params);
+    // The geometry from LoadSurface, the shading normal and the material as Trace stored them.
+    // LoadSurface orients the normals against a ray, unknown here: orient them towards the eye (the
+    // stored shading normal is on the side of the geometric normal, as LoadSurface keeps it).
+    Surface s = LoadSurface(hit, float3(0.0f, 0.0f, 0.0f), params, kSurfaceGeometry);
     float3 toEye = eye - s.position;
     if (dot(s.geometricNormal, toEye) < 0.0f)
     {
         s.geometricNormal = -s.geometricNormal;
+    }
+    s.shadingNormal = DecodeNormal(h.normalAndRoughness);
+    if (dot(s.shadingNormal, s.geometricNormal) < 0.0f)
+    {
         s.shadingNormal = -s.shadingNormal;
     }
+    s.material = DecodeMaterial(h);
     float3 wo = normalize(toEye);
     float3 ns = dot(s.shadingNormal, wo) > 0.0f ? s.shadingNormal : s.geometricNormal;
     r.valid = true;

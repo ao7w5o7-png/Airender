@@ -189,6 +189,7 @@ public:
         status["ser"] = mTracer && mTracer->UsesShaderExecutionReordering();
         status["restirDi"] = mTracer && mTracer->UsesReSTIRDI();
         status["restirGi"] = mTracer && mTracer->UsesReSTIRGI();
+        status["neuralTextures"] = mTracer && mTracer->UsesNeuralTextures(); // decoded on sample
         status["nrc"] = mTracer && mTracer->UsesRadianceCache();
         status["nrcLinearAlgebra"] = mTracer && mTracer->RadianceCacheUsesLinearAlgebra();
         status["nrcSteps"] = mTracer ? mTracer->GetRadianceCacheSteps() : 0u;

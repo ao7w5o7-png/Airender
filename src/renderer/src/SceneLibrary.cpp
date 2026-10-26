@@ -2,6 +2,8 @@
 
 #include "air/renderer/Scene.h"
 
+#include "air/renderer/NeuralTextures.h"
+
 #include "SceneBuilders.h"
 
 #include <algorithm>
@@ -425,6 +427,14 @@ std::string Validate(const SceneDesc& desc)
         if (texels == 0 || t.color.size() != texels || t.surface.size() != texels)
         {
             return std::format("textures '{}' need {}x{} colour and surface texels", t.name, t.width, t.height);
+        }
+        if (t.neural &&
+            (t.neural->latents.size() != size_t(t.neural->latentLayers) * t.neural->latentMips ||
+             t.neural->data.size() < gpu::kNeuralTextureConstantBytes ||
+             t.neural->coarseColor.size() != size_t(t.neural->coarseWidth) * t.neural->coarseHeight ||
+             t.neural->coarseSurface.size() != t.neural->coarseColor.size() || t.neural->coarseColor.empty()))
+        {
+            return std::format("textures '{}': incomplete neural data", t.name);
         }
     }
     for (const Instance& instance : desc.instances)

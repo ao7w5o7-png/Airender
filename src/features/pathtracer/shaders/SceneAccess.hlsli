@@ -59,6 +59,42 @@ float4 MaterialTextureSample(uint texture, float2 uv)
     return t.SampleLevel(gLinearWrap, uv, 0.0f);
 }
 
+// Neural texture sets decoded on sample (TextureSetData::latents, NeuralTextures.h) with LibNTC's int8
+// inference: in the kernels compiled with AIR_PT_NTC (PathTracerNtc.hlsl, PathTracerGiNtc.hlsl), where
+// configuring found its shaders (AIR_WITH_NTC). Elsewhere neural sets read their coarse copy.
+#ifndef AIR_PT_NTC
+#define AIR_PT_NTC 0
+#endif
+#if AIR_PT_NTC && !__has_include("libntc/shaders/Inference.hlsli")
+#undef AIR_PT_NTC
+#define AIR_PT_NTC 0
+#endif
+#if AIR_PT_NTC
+#include "libntc/shaders/Inference.hlsli"
+
+// A neural set's colour (linear) and surface at uv: the texel that stochastic texture filtering picks
+// with u (uniform in [0, 1)^2), whose expectation is the bilinear filter's result (Pharr et al. 2024),
+// decoded by the set's MLP.
+void NeuralTextureSample(TextureSetData t, float2 uv, float2 u, out float4 color, out float4 surface)
+{
+    ByteAddressBuffer data = ResourceDescriptorHeap[NonUniformResourceIndex(t.neural)];
+    Texture2DArray<float4> latents = ResourceDescriptorHeap[NonUniformResourceIndex(t.latents)];
+    NtcTextureSetConstants c = data.Load<NtcTextureSetConstants>(0);
+    int2 size = int2(c.imageWidth, c.imageHeight);
+    int2 texel = int2(floor(uv * float2(size) - 0.5f + u));
+    texel = ((texel % size) + size) % size;
+    float outputs[NTC_MLP_OUTPUT_CHANNELS];
+    [unroll]
+    for (int i = 0; i < NTC_MLP_OUTPUT_CHANNELS; ++i)
+    {
+        outputs[i] = 0.0f;
+    }
+    NtcSampleTextureSet(c, latents, gLinearWrap, data, kNeuralTextureConstantBytes, texel, 0, true, outputs);
+    color = saturate(float4(outputs[0], outputs[1], outputs[2], 1.0f));
+    surface = saturate(float4(outputs[3], outputs[4], outputs[5], outputs[6]));
+}
+#endif
+
 LightTriangle LoadLight(uint light)
 {
     StructuredBuffer<LightTriangle> lights = ResourceDescriptorHeap[g.lights];

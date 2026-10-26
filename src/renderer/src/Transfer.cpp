@@ -163,7 +163,68 @@ rhi::TextureHandle CreateTextureWithData(rhi::Device& device, rhi::TextureDesc d
     auto cmd = device.CreateCommandList(rhi::QueueType::Graphics);
     cmd->Begin();
     cmd->Barriers(std::array{Barrier::Tex(texture, Access::None, Access::CopyDst)});
-    cmd->CopyBufferToTexture(texture, 0, staging, 0);
+    cmd->CopyBufferToTexture(texture, 0, 0, staging, 0);
+    cmd->Barriers(std::array{Barrier::Tex(texture, Access::CopyDst, Access::SRVCompute)});
+    cmd->End();
+    rhi::CommandList* lists[] = {cmd.get()};
+    device.WaitForFence(rhi::QueueType::Graphics, device.Submit(rhi::QueueType::Graphics, lists));
+    device.DestroyBuffer(staging);
+    return texture;
+}
+
+rhi::TextureHandle CreateTextureWithSubresources(rhi::Device& device, rhi::TextureDesc desc,
+                                                 std::span<const std::span<const u8>> subresources)
+{
+    desc.usage |= rhi::TextureUsage::CopyDst | rhi::TextureUsage::ShaderResource;
+    const u32 layers = desc.dimension == rhi::TextureDimension::Tex2D ? desc.depthOrArraySize : 1u;
+    AIR_CHECK(subresources.size() == size_t(layers) * desc.mipLevels, "'{}': {} subresources for {} x {}",
+              desc.debugName, subresources.size(), layers, desc.mipLevels);
+    // Each subresource's rows at TextureCopyRowPitch, its start 512-byte aligned.
+    std::vector<u64> offsets;
+    u64 size = 0;
+    for (u32 layer = 0; layer < layers; ++layer)
+    {
+        for (u32 mip = 0; mip < desc.mipLevels; ++mip)
+        {
+            const u32 width = std::max(desc.width >> mip, 1u);
+            const u32 height = std::max(desc.height >> mip, 1u);
+            offsets.push_back(size);
+            size += (u64(rhi::TextureCopyRowPitch(desc.format, width)) * height + 511) / 512 * 512;
+        }
+    }
+    const rhi::TextureHandle texture = device.CreateTexture(desc);
+    const rhi::BufferHandle staging = device.CreateBuffer({.size = std::max<u64>(size, 4),
+                                                           .usage = rhi::BufferUsage::CopySrc,
+                                                           .memory = rhi::MemoryLocation::Upload,
+                                                           .debugName = desc.debugName + ".Staging"});
+    if (!texture.IsValid() || !staging.IsValid())
+    {
+        AIR_LOG(Error, "Transfer", "out of memory creating '{}'", desc.debugName);
+        return texture;
+    }
+    auto* mapped = static_cast<u8*>(device.GetMappedPointer(staging));
+    auto cmd = device.CreateCommandList(rhi::QueueType::Graphics);
+    cmd->Begin();
+    cmd->Barriers(std::array{Barrier::Tex(texture, Access::None, Access::CopyDst)});
+    for (u32 layer = 0; layer < layers; ++layer)
+    {
+        for (u32 mip = 0; mip < desc.mipLevels; ++mip)
+        {
+            const size_t index = size_t(layer) * desc.mipLevels + mip;
+            const u32 width = std::max(desc.width >> mip, 1u);
+            const u32 height = std::max(desc.height >> mip, 1u);
+            const u64 rowBytes = u64(width) * rhi::FormatBytesPerPixel(desc.format);
+            const u64 pitch = rhi::TextureCopyRowPitch(desc.format, width);
+            AIR_CHECK(subresources[index].size() == rowBytes * height, "'{}': mip {} layer {} has {} bytes",
+                      desc.debugName, mip, layer, subresources[index].size());
+            for (u32 row = 0; row < height; ++row)
+            {
+                std::memcpy(mapped + offsets[index] + row * pitch, subresources[index].data() + row * rowBytes,
+                            rowBytes);
+            }
+            cmd->CopyBufferToTexture(texture, mip, layer, staging, offsets[index]);
+        }
+    }
     cmd->Barriers(std::array{Barrier::Tex(texture, Access::CopyDst, Access::SRVCompute)});
     cmd->End();
     rhi::CommandList* lists[] = {cmd.get()};

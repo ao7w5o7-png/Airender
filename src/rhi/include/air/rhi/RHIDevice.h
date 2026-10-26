@@ -38,7 +38,9 @@ public:
     virtual void CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size) = 0;
     // Rows in `src` start TextureCopyRowPitch(format, mipWidth) bytes apart; the slices of a 3D
     // texture follow each other, mipHeight rows each.
-    virtual void CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) = 0;
+    // Rows in `src` start TextureCopyRowPitch(format, mipWidth) bytes apart; `layer` is the slice of a 2D
+    // texture array (0 otherwise).
+    virtual void CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset) = 0;
     virtual void CopyTexture(TextureHandle dst, TextureHandle src) = 0;
     // Rows in `dst` start TextureCopyRowPitch(format, mipWidth) bytes apart.
     virtual void CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) = 0;

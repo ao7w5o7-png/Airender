@@ -13,6 +13,7 @@ add_executable(air_tests
     ShaderHotReloadTests.cpp
     SceneTests.cpp
     MaterialTexturesTests.cpp
+    NeuralTexturesTests.cpp
     SkyTests.cpp
     CloudTests.cpp
     VolumeTests.cpp
@@ -28,6 +29,7 @@ target_compile_definitions(air_tests PRIVATE AIR_SOURCE_DIR="${PROJECT_SOURCE_DI
 target_link_libraries(air_tests PRIVATE air_builtin_features)
 air_target_defaults(air_tests)
 air_target_d3d12_runtime(air_tests)
+air_target_ntc_runtime(air_tests)
 add_test(NAME air_tests COMMAND air_tests)
 
 # The editor UI runs headless on the Null device (no window, no ImGui backends).

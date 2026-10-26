@@ -50,6 +50,8 @@ float ExposureScale(float ev100);
 
 inline constexpr u32 kNoTextures = ~0u;
 
+struct NeuralTextureGpuData; // NeuralTextures.h
+
 struct Material
 {
     std::string name;
@@ -78,6 +80,10 @@ struct MaterialTextures
     // surface: the tangent-space normal's x and y mapped to [0, 1] (z follows), roughness, metallic.
     std::vector<u32> color;
     std::vector<u32> surface;
+    // Set when the GPU decodes the texels on sample from neural texture compression's latents and
+    // weights (ApplyNeuralTextures, NeuralTextures.h): `color` and `surface` then hold the same texels
+    // decoded, for the CPU renderers, and are not uploaded.
+    std::shared_ptr<const NeuralTextureGpuData> neural;
     bool operator==(const MaterialTextures&) const = default;
 };
 
@@ -174,9 +180,10 @@ struct GpuScene
     rhi::AccelStructHandle tlas;
     rhi::BufferHandle instances; // StructuredBuffer<gpu::InstanceData>, indexed by InstanceID()
     rhi::BufferHandle materials; // StructuredBuffer<gpu::MaterialData>
-    // StructuredBuffer<gpu::TextureSetData> (bindless indices of RGBA8 SRGB / UNORM Texture2Ds), one per
-    // SceneDesc::textureSets entry, at least one element.
+    // StructuredBuffer<gpu::TextureSetData> (bindless indices of RGBA8 SRGB / UNORM Texture2Ds, or of a
+    // neural set's latents and data), one per SceneDesc::textureSets entry, at least one element.
     rhi::BufferHandle textureSetTable;
+    bool neuralTextures = false; // some set is decoded on sample (TextureSetData::latents)
     rhi::BufferHandle lights;    // StructuredBuffer<gpu::LightTriangle>, at least one element
     rhi::BufferHandle lightTree; // StructuredBuffer<gpu::LightTreeNode> over `lights`, at least one node
     // StructuredBuffer<uint> per instance: its first entry in `lights`, gpu::kInvalidIndex if it does
@@ -267,7 +274,8 @@ private:
     SceneDesc mDesc;
     GpuScene mGpu;
     std::vector<GpuMesh> mMeshes;
-    std::vector<rhi::TextureHandle> mTextures; // of the texture sets, two each
+    std::vector<rhi::TextureHandle> mTextures;  // of the texture sets: two each, or a neural set's latents
+    std::vector<rhi::BufferHandle> mNeuralData; // the neural sets' constants and weights
     rhi::BufferHandle mInstances;
     // Host-visible rings, one slot per frame in flight + 1, so writing a slot never races the GPU.
     std::vector<rhi::BufferHandle> mMaterialRing;

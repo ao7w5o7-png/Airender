@@ -96,7 +96,7 @@ SecondaryVertex LoadSecondaryVertex(GiSample x, IntegratorParams params)
     hit.primitive = x.primitive;
     hit.barycentrics = x.barycentrics;
     // LoadSurface orients the normals against a ray; the path's side is the one it leaves from.
-    Surface s = LoadSurface(hit, float3(0.0f, 0.0f, 0.0f), params);
+    Surface s = LoadSurface(hit, float3(0.0f, 0.0f, 0.0f), params, kSurfaceCoarse);
     if (dot(s.geometricNormal, x.direction) < 0.0f)
     {
         s.geometricNormal = -s.geometricNormal;

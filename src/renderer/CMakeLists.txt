@@ -7,6 +7,8 @@ add_library(air_renderer
     src/LightTree.cpp
     src/Mlp.cpp
     src/MlpCheck.cpp
+    src/NeuralTextureCheck.cpp
+    src/NeuralTextures.cpp
     src/NeuralNetwork.cpp
     src/Parameters.cpp
     src/ProfileReport.cpp
@@ -25,13 +27,17 @@ add_library(air_renderer
 )
 target_include_directories(air_renderer PUBLIC include)
 target_link_libraries(air_renderer PUBLIC air_rdg)
+if(TARGET air_ntc)
+    target_link_libraries(air_renderer PRIVATE air_ntc) # headers only: libntc.dll is loaded at run time
+endif()
 air_target_defaults(air_renderer)
 # The profile report page (ProfileReport.h), compiled in so reports need no files next to the binary.
 air_embed_text(TARGET air_renderer SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/report/ProfileReport.html
                NAME ProfileReportHtml)
-# The renderer's own shaders (the fallback upscale, the neural networks' optimizer), loaded from
-# <shader root>/renderer.
+# The renderer's own shaders (the fallback upscale, the neural networks' optimizer, the checks of the
+# network kernels and of neural texture decoding), loaded from <shader root>/renderer.
 air_compile_shaders(TARGET air_renderer NAME renderer
                     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/shaders/Upscale.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/MlpOptimize.hlsl
                             ${CMAKE_CURRENT_SOURCE_DIR}/shaders/MlpCheck.hlsl ${CMAKE_CURRENT_SOURCE_DIR}/shaders/MlpCheckPortable.hlsl
-                    INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+                            ${CMAKE_CURRENT_SOURCE_DIR}/shaders/NtcCheck.hlsl
+                    INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${AIR_NTC_SHADER_INCLUDE})

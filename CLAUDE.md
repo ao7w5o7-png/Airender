@@ -63,6 +63,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.
+- Neural texture compression (LibNTC, docs/architecture.md §8.16): `--neural-textures load|sample[,BPP]`
+  on `render` / `reference` (the `textured` scene); decoding on sample runs in the path tracer's
+  `AIR_PT_NTC` kernels. After touching the decode path run `aircli ntc-check --shaders build/shaders`
+  (the shader's decode against LibNTC's CUDA decode, every texel), and compare an accumulated
+  `sample` image with a `load` one (they agree within about 0.1%).
 - Real-time denoising (docs/architecture.md §8.14): the editor's default chain is
   `pathtracer,nrd,taa,tonemap` (NRD on the surfaces' light split by lobe, TAA for edges; nrd needs
   D3D12), the alternative `pathtracer,dlss`. Anything that adds light at the first surface must also

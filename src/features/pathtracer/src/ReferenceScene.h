@@ -126,6 +126,7 @@ Params MakeParams(const SceneTables& tables, const ReferenceSettings& settings, 
     params.volumeCount = u32(tables.volumes.size());
     params.volumeTable = 0;
     params.textureSets = 0;
+    params.textureSeed = 0; // the CPU renders neural sets from their decoded texels
     params.cloudEvents = settings.cloudEvents;
     params.volumeEvents = settings.volumeEvents;
     params.lightCount = tables.lightPower > 0.0 ? u32(tables.lights.size()) : 0u;

@@ -12,6 +12,7 @@
 #   Dear ImGui (docking)        1.93.0          AIR_IMGUI_DIR          editor
 #   NVIDIA DLSS SDK             310.9.1         AIR_DLSS_SDK_DIR       dlss feature (Ray Reconstruction)
 #   NVIDIA NRD (+ ShaderMake, MathLib) 4.18.0   AIR_NRD_DIR            nrd feature (denoisers), built from source
+#   NVIDIA RTXNTC (LibNTC)      0.10.0 beta                            neural texture compression (loaded at run time)
 #   Microsoft WebView2 SDK      1.0.4314.35     AIR_WEBVIEW2_SDK_DIR   editor's HTML profiler panel (Windows)
 #
 # Targets / functions defined here:
@@ -40,6 +41,9 @@ set(AIR_DLSS_TAG v310.9.1)
 set(AIR_NRD_TAG v4.18.0)
 set(AIR_SHADERMAKE_COMMIT 3f01623a76b092ac127d2debd79a672f55d77665) # NRD v4.18.0's
 set(AIR_MATHLIB_TAG v11)                                             # NRD v4.18.0's
+set(AIR_NTC_TAG v0.10.0-beta)
+set(AIR_NTC_RELEASE v0.10.0b)
+set(AIR_NTC_LIBRARY_COMMIT 35ec039503ef5e151c661beccc82390948dd5218) # RTXNTC v0.10.0-beta's
 set(AIR_WEBVIEW2_VERSION 1.0.4314.35)
 set(AIR_WEBVIEW2_SHA256 90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4)
 
@@ -352,6 +356,49 @@ if(AIR_WITH_NRD)
         set(AIR_WITH_NRD OFF CACHE BOOL "" FORCE)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# NVIDIA RTX Neural Texture Compression (LibNTC): the prebuilt library of the SDK release (its
+# compression runs on CUDA through the driver: no CUDA toolkit needed), and its headers and inference
+# shaders from RTXNTC-Library at the commit that release pins. The library is loaded at run time
+# (renderer/NeuralTextures.cpp), so nothing links against it.
+# ---------------------------------------------------------------------------
+if(AIR_WITH_NTC)
+    set(ntcDir "${AIR_DEPS_DIR}/rtxntc-${AIR_NTC_TAG}")
+    if(NOT EXISTS "${ntcDir}/.complete")
+        air_download("https://github.com/NVIDIA-RTX/RTXNTC/releases/download/${AIR_NTC_TAG}/RTXNTC_windows_x64_${AIR_NTC_RELEASE}.zip"
+                     "${ntcDir}.zip" ok)
+        if(ok)
+            file(ARCHIVE_EXTRACT INPUT "${ntcDir}.zip" DESTINATION "${ntcDir}"
+                 PATTERNS "bin/windows-x64/libntc.dll" "LICENSE.txt")
+            file(REMOVE "${ntcDir}.zip") # 180 MB of samples and assets besides the library
+            file(TOUCH "${ntcDir}/.complete")
+        endif()
+    endif()
+    air_fetch_github_files(NVIDIA-RTX/RTXNTC-Library ${AIR_NTC_LIBRARY_COMMIT} ntc-library ntcLibraryDir
+        include/libntc/ntc.h include/libntc/wrappers.h include/libntc/shaders/InferenceConstants.h
+        include/libntc/shaders/Inference.hlsli include/libntc/shaders/InferenceCoopVec.hlsli
+        include/libntc/shaders/ColorSpaces.hlsli)
+    if(EXISTS "${ntcDir}/bin/windows-x64/libntc.dll" AND ntcLibraryDir)
+        add_library(air_ntc INTERFACE)
+        target_include_directories(air_ntc SYSTEM INTERFACE "${ntcLibraryDir}/include")
+        target_compile_definitions(air_ntc INTERFACE AIR_WITH_NTC=1)
+        set(AIR_NTC_DLL "${ntcDir}/bin/windows-x64/libntc.dll" CACHE INTERNAL "")
+        set(AIR_NTC_SHADER_INCLUDE "${ntcLibraryDir}/include" CACHE INTERNAL "") # libntc/shaders/*.hlsli
+        message(STATUS "Airender: LibNTC ${AIR_NTC_TAG}")
+    else()
+        message(WARNING "Airender: LibNTC not available, building without neural texture compression")
+        set(AIR_WITH_NTC OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
+function(air_target_ntc_runtime target)
+    if(TARGET air_ntc)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AIR_NTC_DLL}" "$<TARGET_FILE_DIR:${target}>/"
+            VERBATIM)
+    endif()
+endfunction()
 
 function(air_target_dlss_runtime target)
     if(TARGET air_dlss)

@@ -14,12 +14,14 @@
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
 //                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
 //                   [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels among the surfaces)
+//                   [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]   (LibNTC)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
 //                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
 //                    [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]
+//                    [--neural-textures ...] [--ntc-cache DIR]
 //                    [--volume-march [--frames N] [--probe-frames N] [--volume-step S]
 //                    [--volume-shadow-size N] [--volume-lights N]]   (the real-time volumes' method)
 //   aircli vdb FILE.vdb [--read GRID] [--max-resolution N]   the grids of an OpenVDB file (JSON); --read
@@ -27,6 +29,8 @@
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
 //   aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]   the GPU's neural network kernels
 //                    (float32 and linear algebra) against the CPU's (JSON; exit 1 when they disagree)
+//   aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]   neural
+//                    texture decoding in the shader (as on sample) against LibNTC's on CUDA (JSON)
 //
 // `render` fails (exit 1) if any frame produced a validation error.
 
@@ -40,6 +44,7 @@
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/NeuralNetwork.h"
+#include "air/renderer/NeuralTextures.h"
 #include "air/renderer/ProfileReport.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
@@ -82,18 +87,21 @@ int Usage()
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
                "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
                "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
+               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
                "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
+               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
                "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
                "                [--volume-shadow-size N] [--volume-lights N]]\n"
                "  aircli features | scenes\n"
                "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
-               "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n",
+               "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
+               "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n",
                stderr);
     return kExitUsage;
 }
@@ -198,7 +206,11 @@ int CommandScenes()
 //   procedural plume of smoke; none removes them all. The n-th --volume sets the scene's n-th volume
 //   (its other settings stay) or adds one. --volume-at X,Y,Z[,SIZE] places the last one given (before
 //   any --volume: the first): with SIZE its longest side is scaled to SIZE metres and its bottom
-//   centred on the point, else the point moves the file's own placement; --volume-grid likewise.
+//   centred on the point, else the point moves the file's own placement; --volume-grid likewise;
+//   --neural-textures off|load|sample[,BPP[,STEPS]] puts its texture sets through neural texture
+//   compression (NeuralTextures.h) at about BPP bits per texel (4) with STEPS training steps (20000),
+//   decoded on load or by the shader on sample; compressed sets are kept in --ntc-cache DIR (a
+//   directory in the temporary files; "" keeps none).
 struct SceneOptions
 {
     std::optional<std::pair<float, float>> sun;
@@ -214,10 +226,40 @@ struct SceneOptions
         std::vector<std::string> at;
     };
     std::vector<VolumeOption> volumes;
+    renderer::NeuralTextureOptions neural;
 
     // True when `arg` was one of these options.
     bool Parse(std::string_view arg, Args& args)
     {
+        if (arg == "--neural-textures")
+        {
+            const std::vector<std::string> spec = Split(args.Next(), ',');
+            const std::string mode = spec.empty() ? std::string() : spec[0];
+            if (mode == "off" || mode == "load" || mode == "sample")
+            {
+                neural.mode = mode == "off"    ? renderer::NeuralTextureMode::Off
+                              : mode == "load" ? renderer::NeuralTextureMode::OnLoad
+                                               : renderer::NeuralTextureMode::OnSample;
+            }
+            else
+            {
+                args.error = true;
+            }
+            if (spec.size() >= 2)
+            {
+                neural.bitsPerPixel = std::stof(spec[1]);
+            }
+            if (spec.size() >= 3)
+            {
+                neural.steps = u32(std::stoul(spec[2]));
+            }
+            return true;
+        }
+        if (arg == "--ntc-cache")
+        {
+            neural.cache = std::string(args.Next());
+            return true;
+        }
         if (arg == "--sun")
         {
             const std::string value(args.Next());
@@ -369,6 +411,44 @@ struct SceneOptions
         }
         scene.volumes.resize(std::min<size_t>(scene.volumes.size(), gpu::kMaxVolumes));
     }
+
+    // Neural texture compression of the scene's texture sets (--neural-textures), its results in
+    // report["neuralTextures"]. False (logged) when they could not be compressed.
+    bool ApplyNeuralTextures(renderer::SceneDesc& scene, json::Value* report) const
+    {
+        std::vector<renderer::NeuralTextureReport> sets;
+        std::string error;
+        const auto start = std::chrono::steady_clock::now();
+        if (!renderer::ApplyNeuralTextures(scene, neural, &sets, &error))
+        {
+            AIR_LOG(Error, "aircli", "--neural-textures: {}", error);
+            return false;
+        }
+        json::Value list = json::Value::MakeArray();
+        for (const renderer::NeuralTextureReport& set : sets)
+        {
+            AIR_LOG(Info, "aircli", "neural textures '{}': {:.2f} bpp, PSNR {:.2f} dB, {} -> {} bytes{}", set.name,
+                    set.bitsPerPixel, set.psnr, set.sourceBytes, set.compressedBytes, set.cached ? " (cached)" : "");
+            json::Value item = json::Value::MakeObject();
+            item["name"] = set.name;
+            item["bitsPerPixel"] = set.bitsPerPixel;
+            item["psnr"] = set.psnr;
+            item["sourceBytes"] = set.sourceBytes;
+            item["compressedBytes"] = set.compressedBytes;
+            item["cached"] = set.cached;
+            list.Push(std::move(item));
+        }
+        if (!sets.empty())
+        {
+            AIR_LOG(Info, "aircli", "neural textures: {:.1f} s",
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        }
+        if (report)
+        {
+            (*report)["neuralTextures"] = std::move(list);
+        }
+        return true;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -473,6 +553,10 @@ int CommandReference(Args& args)
         return Usage();
     }
     sceneOptions.Apply(*scene);
+    if (!sceneOptions.ApplyNeuralTextures(*scene, nullptr))
+    {
+        return kExitUsage;
+    }
     if (volumeMarch && scene->volumes.empty())
     {
         AIR_LOG(Error, "aircli", "--volume-march: scene '{}' has no volumes", sceneName);
@@ -728,6 +812,61 @@ int CommandMlpCheck(Args& args)
 }
 
 // ---------------------------------------------------------------------------
+// ntc-check
+// ---------------------------------------------------------------------------
+int CommandNtcCheck(Args& args)
+{
+    rhi::Backend backend = rhi::Backend::D3D12;
+    std::filesystem::path shaderRoot = renderer::FrameRunnerDesc{}.shaderRoot;
+    renderer::NeuralTextureOptions options;
+    options.steps = 20000;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--backend")
+        {
+            const std::string_view b = args.Next();
+            backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
+        }
+        else if (arg == "--shaders")
+        {
+            shaderRoot = std::string(args.Next());
+        }
+        else if (arg == "--bpp")
+        {
+            options.bitsPerPixel = std::stof(std::string(args.Next()));
+        }
+        else if (arg == "--steps")
+        {
+            options.steps = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--ntc-cache")
+        {
+            options.cache = std::string(args.Next());
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    if (args.error)
+    {
+        return Usage();
+    }
+    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = true});
+    if (!device)
+    {
+        AIR_LOG(Error, "aircli", "could not create a {} device", rhi::ToString(backend));
+        return kExitUsage;
+    }
+    json::Value report = renderer::CheckNeuralTextures(*device, shaderRoot / "renderer", options);
+    report["adapter"] = device->GetCapabilities().adapterName;
+    const bool passed = report["passed"].AsBool();
+    std::puts(report.Dump().c_str());
+    return passed ? kExitOk : kExitCheckFailed;
+}
+
+// ---------------------------------------------------------------------------
 // render
 // ---------------------------------------------------------------------------
 int CommandRender(Args& args)
@@ -884,6 +1023,10 @@ int CommandRender(Args& args)
             return kExitUsage;
         }
         sceneOptions.Apply(*sceneDesc);
+        if (!sceneOptions.ApplyNeuralTextures(*sceneDesc, &report))
+        {
+            return kExitUsage;
+        }
         renderer::Scene scene(*device, std::move(*sceneDesc));
         renderer::Camera camera = scene.Desc().camera;
         report["scene"] = sceneName;
@@ -1104,6 +1247,10 @@ int main(int argc, char** argv)
     if (command == "mlp-check")
     {
         return CommandMlpCheck(args);
+    }
+    if (command == "ntc-check")
+    {
+        return CommandNtcCheck(args);
     }
     if (command == "vdb")
     {

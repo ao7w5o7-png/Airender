@@ -339,6 +339,29 @@ TEST(Editor_DenoiserChoice)
     EXPECT(app.GetLastResult().validationErrors.empty());
 }
 
+// The neural texture choice reloads the scene: with LibNTC its sets are compressed and reported, without
+// it the plain textures load and the editor says why; frames run either way.
+TEST(Editor_NeuralTexturesReloadTheScene)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorOptions options = SmallOptions();
+    options.scene = "textured";
+    options.neuralTextures.steps = 500;
+    options.neuralTextures.cache = std::filesystem::temp_directory_path() / "airender-ntc-editor-tests";
+    editor::EditorApp app(*device, tasks, options);
+    EXPECT(app.GetNeuralTextureMode() == renderer::NeuralTextureMode::Off && app.GetNeuralTextureReport().empty());
+    app.SetNeuralTextureMode(renderer::NeuralTextureMode::OnSample);
+    EXPECT(app.GetNeuralTextureMode() == renderer::NeuralTextureMode::OnSample);
+    EXPECT(app.GetNeuralTextureReport().size() == 3 || !app.GetNeuralTextureError().empty());
+    ui.Frame(app);
+    ui.Frame(app);
+    EXPECT(app.GetLastResult().validationErrors.empty());
+    std::error_code ignored;
+    std::filesystem::remove_all(options.neuralTextures.cache, ignored);
+}
+
 // One slow frame (pipelines compiling) must not commit the viewport size of that frame: the render
 // resolution only follows the viewport once it has been stable for a while and a few frames.
 TEST(Editor_ResizeWaitsForAStableViewport)

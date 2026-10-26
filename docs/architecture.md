@@ -168,6 +168,26 @@ its own vector by a matrix in memory, and the hardware gathers a wave's.
     against 1.4e-4 for a single rounding);
   - the debug layer does not validate Shader Model 6.10 shaders (it says so once per pipeline).
 
+### 3.5 Shader language: HLSL, not Slang
+
+Every shader is HLSL compiled by DXC. Slang (a shading language with automatic differentiation,
+modules and generics, the language of NVIDIA's neural shading samples) was assessed for the neural
+work (§8.11, §8.16, §8.17) and is not needed:
+
+- **What neural rendering needs from the language**: matrix x vector products on the matrix units
+  (DXC's `dx/linalg.h`, §3.4), and gradients for training. The networks are small and of one shape
+  (`MlpShared.h`), so their backward pass is written by hand once (`MlpGradients.hlsli`) and checked
+  against the CPU twin (`aircli mlp-check`); automatic differentiation would save that one file.
+- **Third-party code**: LibNTC's shader headers compile with DXC (`Inference.hlsli`; its
+  cooperative-vector variant includes `dx/linalg.h` unless compiled as Slang); its only Slang shader
+  is compiled into `libntc.dll`. NRD and DLSS ship HLSL or binaries.
+- **What Slang would cost**: a second compiler beside DXC (which the preview linear algebra needs
+  anyway) in the build, hot reload and `air.py shaders`; and the CPU twins compile the integrator's
+  `.hlsli` as C++ (`HlslCompat.h`), which Slang's generics and interfaces would not.
+- **When to revisit**: networks of many shapes whose gradients are a burden to write and check by
+  hand, or a backend DXC does not reach (Metal). Slang reads HLSL, so `.slang` files could be added
+  through a second compiler entry in `AirShaders.cmake` without porting the existing shaders.
+
 ---
 
 ## 4. GPU Memory Management (Multiple Memory Types)
@@ -477,7 +497,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `cumulus` | a 4 km meadow, a farmstead and trees under fair-weather cumulus | volumetric clouds (§8.10): their light, shadows, cost |
   | `smoke` | smoke rising from a brazier in a walled yard, the low sun behind it | volumes (§8.12): scattering, NEE in a medium, its shadow |
   | `braziers` | three overlapping plumes over braziers at dusk, a lantern among them | several volumes and light groups near them (§8.13) |
-  | `textured` | a courtyard corner of tiles, bricks and riveted metal plates in the afternoon sun | material textures and normal maps (§8.15) |
+  | `textured` | a courtyard corner of tiles, bricks and riveted metal plates in the afternoon sun | material textures and normal maps (§8.15), neural texture compression (§8.16) |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -693,9 +713,11 @@ with GI: receivers, neighbours, push constants), `ReSTIRDIInitial/Temporal/Spati
 
 - **Split with the path tracer**: with `kFlagReSTIR`, `PathTracer.Trace` leaves out the direct light
   from emissive triangles at the first surface (no NEE there, and no emission found by its BSDF
-  sample), and writes the first sample's hit (`PrimaryHit`: instance, primitive, barycentrics, plus a
-  normal, roughness and distance for the choice of neighbours). The passes rebuild the surface from it with the
-  integrator's own `LoadSurface`, so they shade exactly what the path tracer would have, and add
+  sample), and writes the first sample's hit (`PrimaryHit`: instance, primitive, barycentrics,
+  distance, the shading normal and the material after its textures in float16). The passes rebuild
+  the surface's geometry from it with the integrator's own `LoadSurface` and take its normal and
+  material as stored, so they shade exactly what the path tracer did without reading textures again
+  (a neural texture set decoded on sample, §8.16, would cost a decode per pass and neighbour), and add
   the result (times the samples per pixel) to the accumulation before `PathTracer.Resolve`. The
   environment is still reached only by BSDF sampling, and deeper vertices keep NEE.
 - **Samples**: a point on an emissive triangle (light index, barycentrics), the same point in every
@@ -756,7 +778,10 @@ Validation (`aircli render --set pathtracer.debugView=8` isolates the direct lig
 
   The unbiased MIS rays cost about 0.1 ms; each neighbour about 0.4 ms on `many_lights`, each light
   candidate about 0.1 ms. Rebuilding a surface from its `PrimaryHit` costs about 0.1 ms per use
-  (six per pixel), cheaper in total than storing a full-precision G-buffer twice.
+  (six per pixel), cheaper in total than storing a full-precision G-buffer twice. Storing the material
+  (40 bytes a hit, from 24) also made the receivers of normal-mapped surfaces agree with the trace:
+  rebuilt without the camera ray, a bent normal's side was judged differently, and ReSTIR GI on
+  `textured` was 0.31% dark against NEE, now 0.10%.
 - When frames accumulate, ReSTIR's correlated samples converge about as fast per unit of time as
   plain paths (§8.8 has the measurement), and with several samples per pixel per frame only the first
   one's light is resampled; hence the default of running it in real time only.
@@ -1462,6 +1487,60 @@ the mesh's texture coordinates times `Material::uvScale`.
   a bent normal sends below the surface are lost, so `textured` in a white furnace is 3.2% dark (the
   mortar's grooves darkest; microfacet-based normal mapping, Schuessler et al. 2017, would keep that
   light) and gains nothing. GPU against the CPU reference on `textured`: +0.05%.
+
+### 8.16 Neural texture compression
+
+A scene's texture sets may go through neural texture compression (Vaidyanathan et al., *Random-Access
+Neural Compression of Material Textures*, SIGGRAPH 2023) with NVIDIA's LibNTC (RTXNTC 0.10 beta):
+a set's seven channels (colour, the normal's x and y, roughness, metallic) become a few grids of
+4-bit latents and a small MLP (48 -> 64 -> 48 -> 32 -> 16, int8 weights) that decodes a texel from
+them and its position. `cmake/AirThirdParty.cmake` downloads the SDK's prebuilt `libntc.dll` (Windows
+x64) and the library's headers and shaders at the commit that release pins (`AIR_WITH_NTC`, never
+committed); `renderer/NeuralTextures.h` loads the DLL at run time from next to the executable. CUDA
+compresses and decodes through the driver (no toolkit); without the DLL or an NVIDIA GPU the codec
+says why and scenes keep their textures.
+
+- **Modes** (`NeuralTextureOptions`, `aircli --neural-textures off|load|sample[,BPP[,STEPS]]
+  [--ntc-cache DIR]`, the editor's Scene panel and `aireditor --neural-textures`):
+  - **Decode on load**: compressed, then decoded once on CUDA into ordinary textures: the memory on
+    disk / in transit shrinks, the renderer is unchanged.
+  - **Decode on sample**: the GPU keeps only the latents (an RGBA8 2D array: LibNTC's BGRA4 texels
+    widened, which filter the same since x / 15 is exact in 8 bits) and the MLP's constants and
+    weights (`TextureSetData::latents`, `neural`), and the path tracer decodes a texel at every
+    camera-visible hit with LibNTC's own shader code (`libntc/shaders/Inference.hlsli`, int8 dot
+    products). The filter is stochastic (Pharr et al., *Filtering After Shading With Stochastic
+    Texture Filtering*, 2024): the hit picks one texel with a hash of the hit and the frame, the
+    bilinear weights as its probabilities, so one decode replaces four. Deeper vertices, whose
+    footprints are wide, read the set's coarse copy (a quarter of its resolution, box filtered in
+    linear light, `kNeuralTextureCoarseFactor`; what ray cones would choose at most of them), and
+    ReSTIR reads the first surface's material from `PrimaryHit` (§8.7), so a pixel decodes once a
+    frame. The decoder lives in kernel variants of their own (`PathTracerNtc.hlsl`,
+    `PathTracerGiNtc.hlsl`, `AIR_PT_NTC`), used while the scene has such sets: compiled into the other
+    kernels its registers cost them 7-10%. The volume and radiance cache kernels read the coarse copy
+    everywhere.
+  - Either way the scene's texels become the decoded ones (with the int8 weights, as the shader
+    decodes), so the CPU reference renders what the GPU does.
+- **Compression** (`NeuralTextureCodec`): `PickLatentShape` for the rate (4 bits per texel asks for
+  3.75), 20000 training steps (about 4 s a set on an RTX 5070 whatever its size; LibNTC's default
+  100000 adds a few dB), the colour learnt in sRGB. Results are cached by content and settings
+  (`<temp>/airender-ntc`). Every channel must belong to a texture of the set's metadata
+  (`AddTexture`, `SetChannels`), else LibNTC learns NaN.
+- **Measured** (`textured`'s three 512 x 512 sets): 2 MiB of RGBA8 each to 113-140 KiB (14-18x), PSNR
+  54-56 dB at 20000 steps (58-63 at 100000; photographed materials reach about 30 dB at 4 bpp). Images
+  accumulated over 2048 frames: decode on load +0.04% against the source textures; decode on sample (the
+  stochastic filter at the first surface, the coarse copy beyond) -0.12% against decode on load, as
+  much as decoding four texels bilinearly at every vertex (the shader's int8 decode against CUDA's);
+  the stochastic filter at every vertex gave -0.28%, shading single texels where bilinear shades their
+  average (normal maps and roughness are not linear in the image). Cost at 1920 x 1080 in real time:
+  `PathTracer.Trace` 3.9 ms with ordinary textures, 7.9 ms decoding on sample (the whole frame 8.4 ->
+  12.4 ms); decoding at every vertex and in every ReSTIR pass took 81 ms. LibNTC's cooperative-vector
+  path (FP8 weights on the matrix units) needs its weights converted on the device by LibNTC with our
+  D3D12 device, not done yet.
+- **Validation**: `aircli ntc-check` decodes every texel of `textured`'s sets with the shader
+  (`NtcCheck.hlsl`, the code the path tracer runs) and compares with CUDA's decode: under 1 / 255 RMS
+  per channel, means within 3e-4. `NeuralTextures_*` (the coarse copy, a scene's latents and its
+  kernels on the Null device, and with LibNTC a codec round trip and the cache), and
+  `Editor_NeuralTexturesReloadTheScene`; on the GPU the debug layer reports no errors.
 
 ---
 

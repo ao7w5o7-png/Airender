@@ -2,6 +2,7 @@
 
 #include "air/core/Assert.h"
 #include "air/core/Profiler.h"
+#include "air/renderer/NeuralTextures.h"
 #include "air/renderer/Transfer.h"
 
 #include <algorithm>
@@ -328,6 +329,10 @@ Scene::~Scene()
     {
         mDevice.DestroyTexture(texture);
     }
+    for (rhi::BufferHandle buffer : mNeuralData)
+    {
+        mDevice.DestroyBuffer(buffer);
+    }
     mDevice.DestroyBuffer(mGpu.textureSetTable);
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
@@ -338,13 +343,13 @@ void Scene::UploadTextures()
     std::vector<gpu::TextureSetData> table;
     for (const MaterialTextures& t : mDesc.textureSets)
     {
-        auto make = [&](const std::vector<u32>& texels, rhi::Format format, const char* kind)
+        auto make = [&](const std::vector<u32>& texels, u32 width, u32 height, rhi::Format format, const char* kind)
         {
             const rhi::TextureHandle texture =
                 CreateTextureWithData(mDevice,
                                       {.format = format,
-                                       .width = t.width,
-                                       .height = t.height,
+                                       .width = width,
+                                       .height = height,
                                        .usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDst,
                                        .debugName = std::format("{}.{}", t.name, kind)},
                                       texels.data());
@@ -353,14 +358,50 @@ void Scene::UploadTextures()
             mGeometryBytes += texels.size() * sizeof(u32);
             return mDevice.GetBindlessSRV(texture);
         };
-        gpu::TextureSetData data{};
-        data.color = make(t.color, rhi::Format::RGBA8_SRGB, "Color");
-        data.surface = make(t.surface, rhi::Format::RGBA8_UNORM, "Surface");
+        gpu::TextureSetData data{gpu::kInvalidIndex, gpu::kInvalidIndex, gpu::kInvalidIndex, gpu::kInvalidIndex};
+        if (t.neural)
+        {
+            const NeuralTextureGpuData& n = *t.neural;
+            std::vector<std::span<const u8>> subresources(n.latents.begin(), n.latents.end());
+            const rhi::TextureHandle latents =
+                CreateTextureWithSubresources(mDevice,
+                                              {.format = rhi::Format::RGBA8_UNORM,
+                                               .width = n.latentWidth,
+                                               .height = n.latentHeight,
+                                               .depthOrArraySize = n.latentLayers,
+                                               .mipLevels = n.latentMips,
+                                               .usage = rhi::TextureUsage::ShaderResource,
+                                               .debugName = t.name + ".Latents"},
+                                              subresources);
+            AIR_CHECK(latents.IsValid(), "out of device memory uploading the latents of '{}'", t.name);
+            mTextures.push_back(latents);
+            mNeuralData.push_back(CreateBufferWithData(mDevice,
+                                                       {.usage = BufferUsage::ShaderResource, // stride 0: a raw view
+                                                        .debugName = t.name + ".Neural"},
+                                                       n.data.data(), n.data.size()));
+            for (const std::vector<u8>& latent : n.latents)
+            {
+                mGeometryBytes += latent.size();
+            }
+            mGeometryBytes += n.data.size();
+            data.latents = mDevice.GetBindlessSRV(latents);
+            data.neural = mDevice.GetBindlessSRV(mNeuralData.back());
+            mGpu.neuralTextures = true;
+            // The coarse copy, for the path vertices beyond the first surface.
+            data.color = make(n.coarseColor, n.coarseWidth, n.coarseHeight, rhi::Format::RGBA8_SRGB, "CoarseColor");
+            data.surface =
+                make(n.coarseSurface, n.coarseWidth, n.coarseHeight, rhi::Format::RGBA8_UNORM, "CoarseSurface");
+        }
+        else
+        {
+            data.color = make(t.color, t.width, t.height, rhi::Format::RGBA8_SRGB, "Color");
+            data.surface = make(t.surface, t.width, t.height, rhi::Format::RGBA8_UNORM, "Surface");
+        }
         table.push_back(data);
     }
     if (table.empty())
     {
-        table.push_back({gpu::kInvalidIndex, gpu::kInvalidIndex, 0, 0});
+        table.push_back({gpu::kInvalidIndex, gpu::kInvalidIndex, gpu::kInvalidIndex, gpu::kInvalidIndex});
     }
     mGpu.textureSetTable = CreateBufferWithData(mDevice,
                                                 {.stride = sizeof(gpu::TextureSetData),

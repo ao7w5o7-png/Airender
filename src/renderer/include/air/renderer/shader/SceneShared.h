@@ -14,6 +14,9 @@ using namespace air::hlsl;
 #endif
 
 AIR_CONST uint kInvalidIndex = 0xFFFFFFFFu;
+// The size of LibNTC's NtcTextureSetConstants, which start a neural texture set's data
+// (TextureSetData::neural); its weights follow.
+AIR_CONST uint kNeuralTextureConstantBytes = 336u;
 
 struct Vertex
 {
@@ -38,13 +41,14 @@ struct MaterialData
 };
 
 // A material's textures (renderer::MaterialTextures): bindless Texture2D<float4> indices on the GPU,
-// indices into the CPU renderers' tables there.
+// indices into the CPU renderers' tables there. A set the GPU decodes on sample (neural texture
+// compression, NeuralTextures.h) has no colour and surface textures but its latents and data instead.
 struct TextureSetData
 {
     uint color;   // RGBA8 sRGB: the base colour
     uint surface; // RGBA8: the tangent-space normal's x and y (0.5 = 0, z follows), roughness, metallic
-    uint pad0;
-    uint pad1;
+    uint latents; // kInvalidIndex, or Texture2DArray<float4> (RGBA8): the neural set's latents
+    uint neural;  // ByteAddressBuffer: its NtcTextureSetConstants (336 bytes), then its int8 weights
 };
 
 // One TLAS instance. InstanceID() indexes this array.

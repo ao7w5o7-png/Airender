@@ -154,7 +154,7 @@ public:
 
     void Barriers(std::span<const Barrier> barriers) override;
     void CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size) override;
-    void CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) override;
+    void CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset) override;
     void CopyTexture(TextureHandle dst, TextureHandle src) override;
     void CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) override;
     void ClearTexture(TextureHandle texture, const float color[4]) override;
@@ -996,10 +996,12 @@ void NullCommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle s
     Record(std::format("CopyBuffer {}+{} <- {}+{} ({} bytes)", mDevice.Describe(dst), dstOffset, mDevice.Describe(src),
                        srcOffset, size));
 }
-void NullCommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset)
+void NullCommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset)
 {
-    Record(std::format("CopyBufferToTexture {} mip {} <- {}+{}", mDevice.Describe(dst), mip, mDevice.Describe(src),
-                       srcOffset));
+    Record(layer == 0 ? std::format("CopyBufferToTexture {} mip {} <- {}+{}", mDevice.Describe(dst), mip,
+                                    mDevice.Describe(src), srcOffset)
+                      : std::format("CopyBufferToTexture {} mip {} layer {} <- {}+{}", mDevice.Describe(dst), mip,
+                                    layer, mDevice.Describe(src), srcOffset));
 }
 void NullCommandList::CopyTexture(TextureHandle dst, TextureHandle src)
 {

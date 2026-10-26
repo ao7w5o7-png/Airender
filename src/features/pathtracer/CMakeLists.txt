@@ -16,4 +16,7 @@ air_add_feature(NAME pathtracer
         tests/LightTreeTests.cpp
         tests/PathTracerTests.cpp
         tests/VolumeMarchTests.cpp
+    # LibNTC's inference shaders, for neural texture sets decoded on sample (SceneAccess.hlsli).
+    SHADER_INCLUDE_DIRS
+        ${AIR_NTC_SHADER_INCLUDE}
 )

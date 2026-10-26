@@ -88,8 +88,9 @@ PathTracer::~PathTracer()
     }
     mTraceNrc.Destroy(mDevice);
     mTraceNrcPortable.Destroy(mDevice);
-    for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mTracePipelineVolume,
-                                         mTracePipelineVolumeShadows, mResolvePipeline})
+    for (rhi::PipelineHandle pipeline :
+         {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mTracePipelineVolume, mTracePipelineVolumeShadows,
+          mTracePipelineNtc, mTracePipelineGiNtc, mResolvePipeline})
     {
         if (pipeline.IsValid())
         {
@@ -128,10 +129,18 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
         AIR_LOG(Info, "PathTracer", "shader execution reordering {}",
                 mTracePipelineSer.IsValid() ? "available" : "unavailable (PathTracerSer.lib missing)");
     }
-    // The kernel that records ReSTIR GI's candidates (AIR_PT_RESTIR_GI).
+    // The plain kernel that decodes neural texture sets on sample (AIR_PT_NTC), created the first time a
+    // scene has such sets.
+    mTraceNtcDesc = trace;
+    mTraceNtcDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerNtc.lib", "");
+    mTraceNtcDesc.debugName = "PathTracer.TraceNtc";
+    // The kernel that records ReSTIR GI's candidates (AIR_PT_RESTIR_GI), and its twin with AIR_PT_NTC.
     trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGi.lib", "");
     trace.debugName = "PathTracer.TraceGi";
     mTracePipelineGi = mDevice.CreateRayTracingPipeline(trace);
+    mTraceGiNtcDesc = trace;
+    mTraceGiNtcDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGiNtc.lib", "");
+    mTraceGiNtcDesc.debugName = "PathTracer.TraceGiNtc";
     // The kernel that tracks the scene's volume (AIR_PT_VOLUME), created the first time a scene has one.
     mTraceVolumeDesc = trace;
     mTraceVolumeDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerVolume.lib", "");
@@ -257,6 +266,19 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         mTracePipelineVolume = mDevice.CreateRayTracingPipeline(mTraceVolumeDesc);
         AIR_CHECK(mTracePipelineVolume.IsValid(), "PathTracer: the volume kernel did not compile");
     }
+    // Neural texture sets decoded on sample: by the plain and ReSTIR GI kernels' twins; the others read
+    // the sets' coarse copies at every vertex.
+    const bool neural = scene.neuralTextures && !volume;
+    auto create = [&](rhi::PipelineHandle& pipeline, const rhi::RayTracingPipelineDesc& desc)
+    {
+        if (neural && !pipeline.IsValid())
+        {
+            pipeline = mDevice.CreateRayTracingPipeline(desc);
+            AIR_CHECK(pipeline.IsValid(), "PathTracer: {} did not compile", desc.debugName);
+        }
+    };
+    create(mTracePipelineNtc, mTraceNtcDesc);
+    create(mTracePipelineGiNtc, mTraceGiNtcDesc);
     const bool diWanted = on(mSettings.restir.di) && mSettings.nextEventEstimation && !mSettings.furnace &&
                           scene.lightCount > 0 && lightView && !volume && mReSTIR->IsDiAvailable();
     // The neural radiance cache: its own kernel variant, which leaves the indirect light to the cache
@@ -289,6 +311,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         mUsedReSTIRGI = restirGi;
         mUsedNrc = nrc;
         mUsedVolumeMarch = march;
+        mUsedNeuralTextures =
+            neural && !nrc && (restirGi ? mTracePipelineGiNtc.IsValid() : mTracePipelineNtc.IsValid());
     }
 
     const float aspect = float(mSettings.width) / float(mSettings.height);
@@ -454,13 +478,14 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const rdg::BufferRef primaryHits = restirOutputs.primaryHits;
         const rdg::BufferRef giReservoirs = restirOutputs.giReservoirs;
 
-        const rhi::PipelineHandle pipeline =
-            nrc        ? nrcPipeline
-            : restirGi ? mTracePipelineGi
-            : march    ? mTracePipelineVolumeShadows
-            : volume && mTracePipelineVolume.IsValid()
-                ? mTracePipelineVolume
-                : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
+        const rhi::PipelineHandle pipeline = nrc        ? nrcPipeline
+                                             : restirGi ? (mUsedNeuralTextures ? mTracePipelineGiNtc : mTracePipelineGi)
+                                             : march    ? mTracePipelineVolumeShadows
+                                             : volume && mTracePipelineVolume.IsValid()
+                                                 ? mTracePipelineVolume
+                                                 : (mUsedNeuralTextures               ? mTracePipelineNtc
+                                                    : UsesShaderExecutionReordering() ? mTracePipelineSer
+                                                                                      : mTracePipeline);
         RadianceCache* cache = nrc ? mRadianceCache.get() : nullptr;
         // Under real-time volumes the trace writes the frame's samples here, and the march accumulates.
         rdg::TextureRef target = accumulation;

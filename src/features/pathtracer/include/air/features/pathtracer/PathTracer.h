@@ -189,12 +189,15 @@ public:
     // which has a kernel of its own).
     bool UsesShaderExecutionReordering() const
     {
-        return mSettings.shaderExecutionReordering && mTracePipelineSer.IsValid() && !mUsedReSTIRGI;
+        return mSettings.shaderExecutionReordering && mTracePipelineSer.IsValid() && !mUsedReSTIRGI &&
+               !mUsedNeuralTextures;
     }
     bool IsConverged() const { return mSettings.accumulate && mAccumulatedSamples >= mSettings.targetSamples; }
     // Whether the last traced frame's direct / indirect light came from ReSTIR DI / GI.
     bool UsesReSTIRDI() const { return mUsedReSTIRDI; }
     bool UsesReSTIRGI() const { return mUsedReSTIRGI; }
+    // Whether the last traced frame decoded neural texture sets on sample (a kernel with AIR_PT_NTC).
+    bool UsesNeuralTextures() const { return mUsedNeuralTextures; }
     // Whether the last traced frame's paths ended in the neural radiance cache, and whether it ran
     // on the matrix units (Shader Model 6.10 linear algebra).
     bool UsesRadianceCache() const { return mUsedNrc; }
@@ -224,6 +227,12 @@ private:
     // The kernel under real-time volumes (AIR_PT_VOLUME_SHADOWS), created the first time they run.
     rhi::RayTracingPipelineDesc mTraceVolumeShadowsDesc;
     rhi::PipelineHandle mTracePipelineVolumeShadows;
+    // The kernels that decode neural texture sets on sample (AIR_PT_NTC), PathTracerNtc.lib and
+    // PathTracerGiNtc.lib, created the first time a scene has such sets.
+    rhi::RayTracingPipelineDesc mTraceNtcDesc;
+    rhi::RayTracingPipelineDesc mTraceGiNtcDesc;
+    rhi::PipelineHandle mTracePipelineNtc;
+    rhi::PipelineHandle mTracePipelineGiNtc;
     // PathTracerNrc.cs (paths end in the cache, linear algebra) and PathTracerNrcPortable.cs (float32),
     // created the first time the cache runs.
     renderer::LazyComputePipeline mTraceNrc;
@@ -240,6 +249,7 @@ private:
     bool mUsedVolumeMarch = false;
     bool mUsedReSTIRDI = false;
     bool mUsedReSTIRGI = false;
+    bool mUsedNeuralTextures = false;
     bool mUsedNrc = false;
 
     u32 mAccumulatedSamples = 0;

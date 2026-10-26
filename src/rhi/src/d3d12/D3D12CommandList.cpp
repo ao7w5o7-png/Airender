@@ -264,7 +264,7 @@ D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint(const TextureDesc& desc, u32 mip, u
 
 } // namespace
 
-void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset)
+void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset)
 {
     D3D12Texture* t = mDevice.Texture(dst);
     D3D12Buffer* b = mDevice.Buffer(src);
@@ -274,13 +274,18 @@ void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHan
     D3D12_TEXTURE_COPY_LOCATION to = {};
     to.pResource = t->resource.Get();
     to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    to.SubresourceIndex = mip;
+    AIR_CHECK(layer == 0 || (t->desc.dimension == TextureDimension::Tex2D && layer < t->desc.depthOrArraySize),
+              "CopyBufferToTexture: layer {} of '{}'", layer, t->desc.debugName);
+    to.SubresourceIndex = mip + layer * t->desc.mipLevels;
     D3D12_TEXTURE_COPY_LOCATION from = {};
     from.pResource = b->resource.Get();
     from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     from.PlacedFootprint = Footprint(t->desc, mip, srcOffset);
     mList->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-    Capture(std::format("CopyBufferToTexture '{}' mip {} <- '{}'", t->desc.debugName, mip, b->desc.debugName));
+    Capture(layer == 0
+                ? std::format("CopyBufferToTexture '{}' mip {} <- '{}'", t->desc.debugName, mip, b->desc.debugName)
+                : std::format("CopyBufferToTexture '{}' mip {} layer {} <- '{}'", t->desc.debugName, mip, layer,
+                              b->desc.debugName));
 }
 
 void D3D12CommandList::CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip)

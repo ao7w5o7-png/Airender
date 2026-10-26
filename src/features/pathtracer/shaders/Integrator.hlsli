@@ -12,6 +12,10 @@
 //   MaterialData  LoadMaterial(uint material)
 //   TextureSetData LoadTextureSet(uint table, uint set)  a material's textures (IntegratorParams::textureSets)
 //   float4        MaterialTextureSample(uint texture, float2 uv)  one of them, bilinear, repeating
+// and, compiled with AIR_PT_NTC (the GPU's, where LibNTC's shaders were found):
+//   void          NeuralTextureSample(TextureSetData t, float2 uv, float2 u, out float4 color, out float4 surface)
+//                                                     a neural set's (TextureSetData::latents) texels, the
+//                                                     texel stochastic filtering picks with u
 //   LightTriangle LoadLight(uint light)
 //   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
@@ -110,6 +114,10 @@
 #ifndef AIR_PT_PROBE
 #define AIR_PT_PROBE 0
 #endif
+// Neural texture sets decoded on sample (SceneAccess.hlsli).
+#ifndef AIR_PT_NTC
+#define AIR_PT_NTC 0
+#endif
 
 struct IntegratorParams
 {
@@ -118,6 +126,7 @@ struct IntegratorParams
     uint volumeCount; // the scene's volumes, read with LoadVolume(volumeTable, i)
     uint volumeTable; // bindless StructuredBuffer<VolumeData> on the GPU
     uint textureSets; // the materials' textures: bindless StructuredBuffer<TextureSetData> on the GPU
+    uint textureSeed; // the frame's: neural texture sets filter stochastically
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
@@ -395,7 +404,15 @@ float LightTreePmf(uint light, float3 p, float3 n)
 
 // --- Surfaces ------------------------------------------------------------------------------------
 
-Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
+// What LoadSurface reads of a material's textures. A neural texture set (TextureSetData::latents) is
+// decoded on sample only for the detail of the surfaces the camera sees; deeper vertices read its
+// coarse copy (a quarter of its resolution, NeuralTextures.h), as their wide footprints would choose a
+// coarse level anyway. Other sets read the same textures either way.
+AIR_CONST uint kSurfaceGeometry = 0u; // none: the material's constants and the interpolated normal
+AIR_CONST uint kSurfaceDetail = 1u;
+AIR_CONST uint kSurfaceCoarse = 2u;
+
+Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params, uint textures)
 {
     InstanceData instance = LoadInstance(hit.instance);
     uint i0 = LoadIndex(instance, hit.primitive * 3u);
@@ -426,16 +443,32 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
     s.material.baseColor = m.baseColor;
     s.material.roughness = m.roughness;
     s.material.metallic = m.metallic;
-    if (m.textureSet != kInvalidIndex)
+    if (m.textureSet != kInvalidIndex && textures != kSurfaceGeometry)
     {
         // The textures at the hit's texture coordinates (level 0: a path has no footprint to filter by).
         float2 uv0 = float2(v0.u, v0.v) * m.uvScale;
         float2 uv1 = float2(v1.u, v1.v) * m.uvScale;
         float2 uv2 = float2(v2.u, v2.v) * m.uvScale;
-        TextureSetData textures = LoadTextureSet(params.textureSets, m.textureSet);
+        TextureSetData set = LoadTextureSet(params.textureSets, m.textureSet);
         float2 uv = uv0 * b0 + uv1 * b1 + uv2 * b2;
-        float4 color = MaterialTextureSample(textures.color, uv);
-        float4 surface = MaterialTextureSample(textures.surface, uv);
+        float4 color;
+        float4 surface;
+#if AIR_PT_NTC
+        if (textures == kSurfaceDetail && set.latents != kInvalidIndex)
+        {
+            // Stochastic filtering's choice by the hit and the frame: the same wherever the frame loads
+            // the hit again (ReSTIR's passes), different every frame.
+            uint h = Pcg(asuint(hit.barycentrics.x) ^ Pcg(asuint(hit.barycentrics.y) ^
+                                                          Pcg(hit.primitive ^ Pcg(hit.instance + params.textureSeed))));
+            float2 u = float2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0f;
+            NeuralTextureSample(set, uv, u, color, surface);
+        }
+        else
+#endif
+        {
+            color = MaterialTextureSample(set.color, uv);
+            surface = MaterialTextureSample(set.surface, uv);
+        }
         s.material.baseColor *= float3(color.x, color.y, color.z);
         s.material.roughness = saturate(s.material.roughness * surface.z);
         s.material.metallic = saturate(s.material.metallic * surface.w);
@@ -938,7 +971,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             }
             break;
         }
-        Surface s = LoadSurface(hit, direction, params);
+        Surface s = LoadSurface(hit, direction, params, bounce == 0u ? kSurfaceDetail : kSurfaceCoarse);
         if (bounce == 0u)
         {
             result.hit = true;

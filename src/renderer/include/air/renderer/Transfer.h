@@ -7,6 +7,7 @@
 #include "air/rhi/RHIDevice.h"
 
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace air::renderer
@@ -27,6 +28,10 @@ rhi::BufferHandle CreateBufferWithData(rhi::Device& device, rhi::BufferDesc desc
 // Creates a texture (2D or 3D, one mip) holding `texels`, tightly packed rows of desc.width texels
 // (x fastest, then y, then the slices of a 3D texture), ready for shader reads (Access::SRVCompute).
 rhi::TextureHandle CreateTextureWithData(rhi::Device& device, rhi::TextureDesc desc, const void* texels);
+// Creates a 2D texture (array) with all its mips from tightly packed subresources, layer by layer, each
+// layer's mips in order (subresources[layer * desc.mipLevels + mip]), ready for shader reads.
+rhi::TextureHandle CreateTextureWithSubresources(rhi::Device& device, rhi::TextureDesc desc,
+                                                 std::span<const std::span<const u8>> subresources);
 
 float HalfToFloat(u16 half);
 u16 FloatToHalf(float value); // round to nearest even; overflow gives infinity

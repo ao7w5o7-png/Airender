@@ -109,6 +109,12 @@ bool EditorApp::LoadScene(const std::string& name)
         AIR_LOG(Error, "Editor", "unknown scene '{}'", name);
         return false;
     }
+    mNeuralReport.clear();
+    mNeuralError.clear();
+    if (!renderer::ApplyNeuralTextures(*desc, mOptions.neuralTextures, &mNeuralReport, &mNeuralError))
+    {
+        AIR_LOG(Warning, "Editor", "neural textures: {} (the plain textures instead)", mNeuralError);
+    }
     mDevice.WaitIdle(); // the GPU may still read the old scene
     mScene.reset();
     mScene = std::make_unique<renderer::Scene>(mDevice, std::move(*desc));
@@ -121,6 +127,15 @@ bool EditorApp::LoadScene(const std::string& name)
     AIR_LOG(Info, "Editor", "scene '{}': {} triangles, {} instances, {} materials", name, mScene->GetTriangleCount(),
             mScene->Desc().instances.size(), mScene->Desc().materials.size());
     return true;
+}
+
+void EditorApp::SetNeuralTextureMode(renderer::NeuralTextureMode mode)
+{
+    if (mode != mOptions.neuralTextures.mode)
+    {
+        mOptions.neuralTextures.mode = mode;
+        LoadScene(mSceneName);
+    }
 }
 
 void EditorApp::CreateRunner(u32 width, u32 height)
@@ -898,6 +913,30 @@ void EditorApp::BuildScenePanel()
     ImGui::Text("Geometry %s, %u emissive triangles, light power %.1f",
                 renderer::FormatBytes(mScene->GetGeometryBytes()).c_str(), mScene->Get().lightCount,
                 mScene->Get().lightPower);
+    if (!mScene->Desc().textureSets.empty())
+    {
+        constexpr const char* kModes[] = {"Off", "Decode on load", "Decode on sample"};
+        int mode = int(mOptions.neuralTextures.mode);
+        if (ImGui::Combo("Neural textures", &mode, kModes, 3))
+        {
+            SetNeuralTextureMode(renderer::NeuralTextureMode(mode));
+        }
+        ImGui::SetItemTooltip("Neural texture compression (LibNTC) of the material textures, at about %.1f bits\n"
+                              "per texel. Decoded once on load, or by the path tracer at every first\n"
+                              "surface (deeper vertices read a quarter-resolution copy). Compressing takes a\n"
+                              "few seconds a set the first time; the results are cached.",
+                              mOptions.neuralTextures.bitsPerPixel);
+        if (!mNeuralError.empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%s", mNeuralError.c_str());
+        }
+        for (const renderer::NeuralTextureReport& set : mNeuralReport)
+        {
+            ImGui::BulletText("%s: %.2f bpp, PSNR %.1f dB, %s -> %s", set.name.c_str(), set.bitsPerPixel, set.psnr,
+                              renderer::FormatBytes(set.sourceBytes).c_str(),
+                              renderer::FormatBytes(set.compressedBytes).c_str());
+        }
+    }
 
     ImGui::SeparatorText("Camera");
     ImGui::DragFloat3("Position", &mCamera.position.x, 0.01f);

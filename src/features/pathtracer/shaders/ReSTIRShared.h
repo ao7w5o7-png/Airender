@@ -19,8 +19,10 @@ AIR_CONST uint kReSTIRMaxSpatialSamples = 16u;
 AIR_CONST uint kReSTIRMaxLight = 0xFFFFFFu; // light indices have 24 bits in a reservoir
 
 // The first surface a pixel's camera ray hit, as PathTracer.Trace found it (its first sample). The
-// ReSTIR passes rebuild the surface from it with the integrator's LoadSurface, so they shade
-// exactly what the path tracer shades; normal, roughness and distance serve the choice of
+// ReSTIR passes rebuild the surface's geometry from it with the integrator's LoadSurface and take its
+// shading normal and material as stored, after the textures: they shade what the path tracer shades
+// without reading the textures again (a neural texture set decoded on sample would cost them a
+// decode for every pass and neighbour). Normal, roughness and distance also serve the choice of
 // neighbours.
 struct PrimaryHit
 {
@@ -29,6 +31,11 @@ struct PrimaryHit
     float2 barycentrics;
     uint normalAndRoughness; // shading normal, octahedral 12 + 12 bits snorm; roughness in bits 24-31
     float distance;          // from the eye
+    // The BSDF's material in float16: base colour red and green, blue and roughness, metallic (bits 0-15).
+    uint redGreen;
+    uint blueRoughness;
+    uint metallic;
+    uint pad0;
 };
 
 // One light sample and its resampling state: a point on an emissive triangle (light-list entry and
@@ -86,7 +93,7 @@ struct ReSTIRConstants
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(PrimaryHit) == 24);
+static_assert(sizeof(PrimaryHit) == 40);
 static_assert(sizeof(Reservoir) == 16);
 static_assert(sizeof(GiReservoir) == 64);
 static_assert(sizeof(ReSTIRConstants) <= 128, "push constants are limited to 128 bytes");
