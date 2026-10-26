@@ -69,7 +69,7 @@ static const float kCloudMsScale = 4.4f;
 static const float kCloudMsSlope = 0.3f;
 // Where the clouds thin out (their eroded fringe) little light has scattered more than once: the
 // diffused light scales with the density to this power.
-static const float kCloudMsEdge = 1.0f;
+static const float kCloudMsEdge = 0.5f;
 // The sky's light at a height h (0 at the base, 1 at the tops) of the layer: kCloudAmbientBottom +
 // (1 - kCloudAmbientBottom) h of the light the sky sends from above, and the reverse share from below.
 static const float kCloudAmbientBottom = 0.3f;

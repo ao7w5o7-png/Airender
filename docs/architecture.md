@@ -965,9 +965,14 @@ whose sun lights the clouds), and the editor's Scene panel edits it.
     over coordinates warped by about 700 m, makes clouds of many sizes with uneven outlines. Bases are
     flat at the condensation level; above, a cloud narrows into a dome, billowy cellular noise in
     cells of 640 to 160 m carves its flanks and top (barely its base) and liquid water grows with
-    height above the base. Most clouds stay shallow (fair-weather cumulus: their tops at
-    0.12 + 0.88 strength^1.6 of the layer), the strongest grow tall; tall ones everywhere made a wall
-    of clouds along the horizon.
+    height above the base. As in Horizon's Nubis (Schneider 2015, 2017) a second field, of cloud
+    types (gradient noise of 12.8 and 3.2 km), varies over the sky: stratocumulus (tops at
+    0.06 + 0.18 strength of the layer, hardly narrowing: flat-topped sheets, the weather raised there
+    so they spread), cumulus (0.12 + 0.88 strength^1.6: mostly shallow, the strongest tall; tall ones
+    everywhere made a wall of clouds along the horizon) and congestus (0.3 + 0.7 strength^0.7, in
+    fewer, larger cells, their tops spreading into anvils). The billows' and the weather's
+    coordinates are swirled by curl noise (up to about 200 m, more higher up) and leaned by the
+    wind's shear (500 m over the layer's height).
   - the detail, 128^3 texels of cellular noise repeating every 1.024 km (25 to the tile), which
     erodes the base's fringe a little at render time (strength 0.4); the eroded density is then
     sharpened (times 5, clamped to 1): crisp outlines, even interiors. The earlier generator (a
@@ -1814,16 +1819,17 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   1.4 km), each at a place jittered along its step every frame: at fixed places the far, long steps
   stamped the outlines of the clouds they reached into the light as bands; the
   light that scattered more than once, isotropic, falling off as the two-stream solution of a
-  conservative slab, `4.4 density / (1 + 0.3 tau)` times the sun's irradiance over 4 pi (octaves of
+  conservative slab, `4.4 sqrt(density) / (1 + 0.3 tau)` times the sun's irradiance over 4 pi (octaves of
   single scattering, Wrenninge et al. 2013, came out 50% dark inside cumulus, whose optical depths
   towards the sun are tens); the sky's light from 8 directions above and below, `0.4 (up (0.3 + 0.7 h)
   + down (1 - 0.7 h))` at a height h in the layer. Each step integrates its light with its own
   extinction (Hillaire 2016). The air in front dims the clouds' light and adds its own where they hide
   the sky, as a path's walk sees it.
 - **Matched** to the path traced clouds (`cloudMarch=0`, accumulated) on `cumulus` at 640 x 360, the
-  march accumulated with `cloudMarch=2`: the image's mean -0.9% (8 x 8 blocks: 5th percentile -5.1%,
-  95th +17.3%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.5%
-  with the sun at 25 degrees, azimuth 160 (-3.4%, +27.3%).
+  march accumulated with `cloudMarch=2`: the image's mean -3.0% (8 x 8 blocks: 5th percentile -11.7%,
+  95th +20.9%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.2%
+  with the sun at 25 degrees, azimuth 160 (-8.5%, +24.0%). (The diffused light scaled with the
+  density itself made the thinner stratocumulus 8% dark: with its square root.)
 - The layer was half the render's size at first (a quarter of its pixels; under the editor's render
   scale of 0.67 a ninth of the output's): the clouds were soft and their outlines blocky against the
   sky. At the render's size with a 4 x 4 pattern the march lights as many pixels a frame as before,

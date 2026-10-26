@@ -4,12 +4,15 @@
 // into fields with clear gaps between, and cellular noise at 3.2, 1.6 and 0.8 km, its coordinates
 // warped by more gradient noise, makes clouds of many sizes and uneven outlines. Its quantile at
 // 1 - coverage is the threshold, so the requested fraction of the tile lies under cloud bases; how far
-// the weather exceeds it sets how tall the cloud grows and how dense it is. Vertically each cloud has
-// a flat base at the condensation level and narrows into a rounded top, where billowy cellular noise
-// (cells of 640 m down to 160 m) carves it, less so near the base. A second periodic grid of finer
-// cellular noise (1.024 km, 25 to the tile) erodes the fringe gently at render time (CloudLookup.hlsli), and the eroded
-// density is sharpened into crisp outlines over even interiors. The tile (25.6 km) repeats too far
-// away to show from the ground. Everything is deterministic in the seed.
+// the weather exceeds it sets how tall the cloud grows and how dense it is. As in Horizon's Nubis
+// (Schneider 2015, 2017) a second field, of cloud types, varies regionally: stratocumulus (shallow
+// sheets, lumpy flat tops), cumulus (domes) and congestus (towers whose tops spread like anvils), each
+// with its height profile. Vertically each cloud has a flat base at the condensation level and narrows
+// with height, where billowy cellular noise (cells of 640 m down to 160 m), its coordinates swirled by
+// curl noise, carves it, less so near the base; the wind's shear leans the clouds with height. A second periodic grid
+// of finer cellular noise (1.024 km, 25 to the tile) erodes the fringe gently at render time (CloudLookup.hlsli), and
+// the eroded density is sharpened into crisp outlines over even interiors. The tile (25.6 km) repeats too far away to
+// show from the ground. Everything is deterministic in the seed.
 
 #include "air/renderer/Clouds.h"
 
@@ -180,6 +183,28 @@ float Weather(float u, float w, u32 seed)
     return 0.8f * regional + cells;
 }
 
+// The cloud type over the tile: 0 stratocumulus, 0.5 cumulus, 1 congestus; fields of 12.8 to 3.2 km.
+float CloudType(float u, float w, u32 seed)
+{
+    const float t =
+        0.5f + 1.4f * Perlin(u * 2.0f, w * 2.0f, 2, seed + 51u) + 0.5f * Perlin(u * 8.0f, w * 8.0f, 8, seed + 52u);
+    return Saturate(t);
+}
+
+// A divergence-free swirl over the tile (the curl of gradient noise of 1.6 km cells): an offset in
+// tile units, about +-1 at most.
+void Curl(float u, float w, u32 seed, float& du, float& dw)
+{
+    const float e = 1.0f / 1024.0f;
+    const float px0 = Perlin((u - e) * 16.0f, w * 16.0f, 16, seed + 61u);
+    const float px1 = Perlin((u + e) * 16.0f, w * 16.0f, 16, seed + 61u);
+    const float pz0 = Perlin(u * 16.0f, (w - e) * 16.0f, 16, seed + 61u);
+    const float pz1 = Perlin(u * 16.0f, (w + e) * 16.0f, 16, seed + 61u);
+    const float scale = 1.0f / (2.0f * e * 16.0f) * 0.5f;
+    du = (pz1 - pz0) * scale;
+    dw = -(px1 - px0) * scale;
+}
+
 // Billows over the tile at (u, height in metres, w): cellular noise in cells of 640, 320 and 160 m,
 // high near its points.
 float Billows(float u, float y, float w, float tileSize, u32 seed)
@@ -273,8 +298,15 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
                 {
                     for (u32 x = 0; x < n; ++x)
                     {
+                        const float u = (float(x) + 0.5f) / float(n);
+                        const float w = (float(z) + 0.5f) / float(n);
+                        // Stratocumulus spreads into sheets; congestus gathers into fewer, larger cells.
+                        const float type = CloudType(u, w, clouds.seed);
+                        const float sheets = 0.35f * Saturate(1.0f - type * 2.5f);
+                        const float towers = Smoothstep(0.65f, 1.0f, type);
+                        const float big = 1.0f - Worley(u * 4.0f, w * 4.0f, 4, clouds.seed + 71u);
                         weather[size_t(z) * n + x] =
-                            Weather((float(x) + 0.5f) / float(n), (float(z) + 0.5f) / float(n), clouds.seed);
+                            Weather(u, w, clouds.seed) + sheets + towers * (0.9f * big - 0.45f);
                     }
                 });
     std::vector<float> sorted = weather;
@@ -283,6 +315,35 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
     std::nth_element(sorted.begin(), sorted.begin() + std::ptrdiff_t(rank), sorted.end());
     const float threshold = coverage > 0.0f ? sorted[rank] : 1e30f;
     const float highest = *std::max_element(weather.begin(), weather.end());
+
+    // The types, and the weather between its texels (repeating).
+    std::vector<float> types(size_t(n) * n);
+    ParallelFor(int(n),
+                [&](int z)
+                {
+                    for (u32 x = 0; x < n; ++x)
+                    {
+                        types[size_t(z) * n + x] =
+                            CloudType((float(x) + 0.5f) / float(n), (float(z) + 0.5f) / float(n), clouds.seed);
+                    }
+                });
+    auto bilinear = [&](const std::vector<float>& field, float u, float w)
+    {
+        const float fx = u * float(n) - 0.5f;
+        const float fz = w * float(n) - 0.5f;
+        const int x0 = int(std::floor(fx));
+        const int z0 = int(std::floor(fz));
+        const float ax = fx - float(x0);
+        const float az = fz - float(z0);
+        auto at = [&](int x, int z) { return field[size_t(Wrap(z, int(n))) * n + size_t(Wrap(x, int(n)))]; };
+        return (at(x0, z0) * (1.0f - ax) + at(x0 + 1, z0) * ax) * (1.0f - az) +
+               (at(x0, z0 + 1) * (1.0f - ax) + at(x0 + 1, z0 + 1) * ax) * az;
+    };
+    // The wind's shear: 500 m of lean over the layer's height, towards +x and a little +z.
+    const float shearU = 500.0f / data.tileSize;
+    const float shearW = 150.0f / data.tileSize;
+    // The swirl: up to about 200 m, more higher up.
+    const float swirl = 200.0f / data.tileSize;
 
     // Base texels; slice y + 1 holds height y (the first and last slices stay empty).
     volume.base.assign(size_t(n) * n * (data.gridY + 2), 0);
@@ -296,29 +357,44 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
                     const float height = h * thickness;
                     for (u32 x = 0; x < n; ++x)
                     {
-                        const float excess = weather[size_t(z) * n + x] - threshold;
+                        // Where this texel's air came from: leaned by the shear, swirled by the curl.
+                        float u = (float(x) + 0.5f) / float(n) - shearU * h;
+                        float w = (float(z) + 0.5f) / float(n) - shearW * h;
+                        float du = 0.0f;
+                        float dw = 0.0f;
+                        Curl(u, w, clouds.seed, du, dw);
+                        u += du * swirl * (0.3f + h);
+                        w += dw * swirl * (0.3f + h);
+                        const float excess = bilinear(weather, u, w) - threshold;
                         if (excess <= 0.0f)
                         {
                             continue;
                         }
                         const float strength = Saturate(excess / std::max(highest - threshold, 1e-6f));
-                        // Of the layer: most clouds stay shallow (fair-weather cumulus), the strongest grow tall.
-                        const float cloudTop = 0.12f + 0.88f * std::pow(strength, 1.6f);
+                        const float type = bilinear(types, u, w);
+                        // Of the layer, by type: stratocumulus stays low, cumulus mostly shallow (the
+                        // strongest tall), congestus towers.
+                        const float shallow = 0.06f + 0.18f * strength;
+                        const float cumulus = 0.12f + 0.88f * std::pow(strength, 1.6f);
+                        const float tower = 0.3f + 0.7f * std::pow(strength, 0.7f);
+                        const float cloudTop = type < 0.5f ? shallow + (cumulus - shallow) * (type * 2.0f)
+                                                           : cumulus + (tower - cumulus) * (type * 2.0f - 1.0f);
                         const float r = h / cloudTop;
                         if (r >= 1.0f)
                         {
                             continue;
                         }
-                        // Flat base at the condensation level; above it the cloud narrows into a dome
-                        // (its outline recedes to where the weather is stronger).
+                        // Flat base at the condensation level; above it the cloud narrows (stratocumulus
+                        // hardly: flat-topped sheets) into a dome, and a tower's top spreads into an anvil.
+                        const float narrowing = 0.05f + 0.3f * Smoothstep(0.0f, 0.5f, type);
+                        const float anvil = 0.35f * Smoothstep(0.7f, 1.0f, type) * Smoothstep(0.65f, 0.95f, r);
                         const float envelope = Smoothstep(0.0f, 0.03f, h) * (1.0f - Smoothstep(0.45f, 1.0f, r)) *
-                                               Smoothstep(0.0f, 0.15f, strength - 0.3f * r * r) * std::sqrt(strength);
+                                               Smoothstep(0.0f, 0.15f, strength - narrowing * r * r + anvil) *
+                                               std::sqrt(strength);
                         if (envelope <= 0.0f)
                         {
                             continue;
                         }
-                        const float u = (float(x) + 0.5f) / float(n);
-                        const float w = (float(z) + 0.5f) / float(n);
                         const float billows = Billows(u, height, w, data.tileSize, clouds.seed);
                         // Billows carve the flanks and the top; the base stays flat.
                         const float carve = (1.0f - billows) * (0.2f + 0.35f * Smoothstep(0.0f, 0.5f, r));
