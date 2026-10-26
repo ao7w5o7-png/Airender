@@ -199,8 +199,13 @@ public:
 
     std::vector<std::string_view> ConsumedSlots() const override
     {
-        return {slots::kDiffuseAlbedo, slots::kSpecularAlbedo, slots::kNormalRoughness, slots::kViewDepth,
-                slots::kMotionVectors};
+        std::lock_guard lock(mHandleMutex);
+        if (!mEnabled || mCreateFailed)
+        {
+            return {};
+        }
+        return {slots::kDiffuseAlbedo, slots::kSpecularAlbedo, slots::kNormalRoughness,
+                slots::kViewDepth,     slots::kMotionVectors,  slots::kColorBeforeTransparency};
     }
 
     void AddPasses(renderer::FrameContext& context) override
@@ -245,10 +250,13 @@ public:
                                                       rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopySrc,
                                              .debugName = "DLSS.Denoised"});
 
+        // Optional: the frame before transparent media were laid over it (the path tracer's real-time
+        // volumes), which keeps them from ghosting.
+        const auto before = context.blackboard.FindTexture(slots::kColorBeforeTransparency);
         struct Inputs
         {
-            rdg::TextureRef color, denoised, diffuse, specular, normals, depth, motion;
-        } in{color, denoised, *diffuse, *specular, *normals, *depth, *motion};
+            rdg::TextureRef color, denoised, diffuse, specular, normals, depth, motion, before;
+        } in{color, denoised, *diffuse, *specular, *normals, *depth, *motion, before ? *before : rdg::TextureRef{}};
         // The path tracer samples at pixel + 0.5 + jitter; NGX takes the jitter as the shift of the
         // rendered image, which is the opposite. Measured on a static camera: with this sign the
         // output stays within 0.02 px from frame to frame, with the other it moves by up to 0.6 px.
@@ -270,6 +278,10 @@ public:
                 {
                     b.Read(t, Access::SRVCompute);
                 }
+                if (in.before.IsValid())
+                {
+                    b.Read(in.before, Access::SRVCompute);
+                }
                 b.Write(in.denoised, Access::UAVCompute);
             },
             [this, in, jitterX, jitterY, reset, preset, worldToView, viewToClip](rdg::PassContext& ctx) mutable
@@ -290,6 +302,7 @@ public:
                 eval.pInRoughness = nullptr; // packed in normals.w
                 eval.pInDepth = resource(in.depth);
                 eval.pInMotionVectors = resource(in.motion);
+                eval.pInColorBeforeTransparency = in.before.IsValid() ? resource(in.before) : nullptr;
                 eval.InJitterOffsetX = jitterX;
                 eval.InJitterOffsetY = jitterY;
                 eval.InRenderSubrectDimensions = {mRenderWidth, mRenderHeight};

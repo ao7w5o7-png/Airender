@@ -123,6 +123,63 @@ TEST(Bsdf_SampleWeightMatchesEvaluation)
     EXPECT(std::abs(e.fCos[0] / e.pdf - s.weight[0]) <= 1e-4f);
 }
 
+// A shading normal leaning 35 degrees away from the surface's normal (as a normal map bends it): the
+// diffuse lobe still reflects all the light that arrives from above the surface, what it sends below
+// it mirrored back up; the specular lobes lose their (small) share below it; nothing is gained. A white
+// rough dielectric lost up to a third of its light at grazing views without the mirror.
+TEST(Bsdf_SurfaceKeepsTheDiffuseLightOfALeaningShadingNormal)
+{
+    const float tilt = 35.0f * 3.14159265f / 180.0f;
+    const air::pt::Direction ng = {std::sin(tilt), 0.0f, std::cos(tilt)};
+    for (float roughness : {0.1f, 0.5f, 1.0f})
+    {
+        for (float metallic : {0.0f, 1.0f})
+        {
+            const Material m{{1.0f, 1.0f, 1.0f}, roughness, metallic};
+            // wo above both the surface and the shading plane, from the side the normal leans to and the other.
+            for (const air::pt::Direction& wo :
+                 {air::pt::Direction{0.8f, 0.0f, 0.6f}, air::pt::Direction{-0.3f, 0.0f, 0.953939f},
+                  air::pt::Direction{0.0f, 0.7f, 0.714143f}})
+            {
+                const air::pt::Rgb plain = air::pt::EstimateAlbedo(m, wo[2], 1 << 15);
+                const air::pt::Rgb surface = air::pt::EstimateSurfaceAlbedo(m, wo, ng, 1 << 15);
+                EXPECT(surface[1] <= plain[1] + 0.01f);
+                if (metallic == 0.0f && roughness >= 0.5f)
+                {
+                    EXPECT(Near(surface[1], plain[1], 0.03f, "dielectric albedo on a surface", m, wo[2]));
+                }
+            }
+        }
+    }
+}
+
+// The mirrored lobes' samples and their evaluation (each direction its own value plus its mirror
+// image's, the pdfs likewise) integrate to the same albedo as uniform sampling around the surface.
+TEST(Bsdf_SurfaceSamplingMatchesUniformIntegration)
+{
+    const float tilt = 25.0f * 3.14159265f / 180.0f;
+    const air::pt::Direction ng = {0.0f, std::sin(tilt), std::cos(tilt)};
+    const air::pt::Direction wo = {0.2f, 0.5f, 0.842615f};
+    for (float roughness : {0.4f, 0.8f})
+    {
+        for (float metallic : {0.0f, 1.0f})
+        {
+            const Material m{{0.7f, 0.4f, 0.2f}, roughness, metallic};
+            const air::pt::Rgb sampled = air::pt::EstimateSurfaceAlbedo(m, wo, ng, 1 << 16);
+            const air::pt::Rgb uniform = air::pt::EstimateSurfaceAlbedoUniform(m, wo, ng, 1 << 18);
+            for (int c = 0; c < 3; ++c)
+            {
+                EXPECT(Near(sampled[c], uniform[c], 0.015f, "surface: sampled vs uniform", m, wo[2]));
+            }
+            const air::pt::BsdfDraw s = air::pt::SampleSurfaceBsdf(m, wo, ng, 0.6f, 0.3f, 0.9f);
+            EXPECT(s.valid);
+            const air::pt::BsdfValue e = air::pt::EvaluateSurfaceBsdf(m, wo, ng, s.wi);
+            EXPECT(std::abs(e.pdf - s.pdf) <= 1e-5f * std::max(1.0f, e.pdf));
+            EXPECT(s.wi[0] * ng[0] + s.wi[1] * ng[1] + s.wi[2] * ng[2] > 0.0f);
+        }
+    }
+}
+
 TEST(Bsdf_LutIsBoundedAndMonotonic)
 {
     const auto lut = air::pt::GetBsdfLut();

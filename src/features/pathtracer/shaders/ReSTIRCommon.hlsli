@@ -21,9 +21,16 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     ray.Direction = direction;
     ray.TMin = 0.0f;
     ray.TMax = 1e30f;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
-    query.Proceed();
+    while (query.Proceed())
+    {
+        if (CandidateIsSolid(query.CandidateType(), query.CandidateInstanceID(), query.CandidatePrimitiveIndex(),
+                             query.CandidateTriangleBarycentrics()))
+        {
+            query.CommitNonOpaqueTriangleHit();
+        }
+    }
     HitInfo hit;
     hit.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     hit.t = hit.hit ? query.CommittedRayT() : -1.0f;
@@ -49,11 +56,22 @@ IntegratorParams MakeParams(FrameData f)
     IntegratorParams params;
     params.sky = f.sky;
     params.clouds = f.clouds;
+    params.volumeCount = f.volumeCount;
+    params.volumeTable = f.volumeTable;
+    params.textureSets = f.textureSets;
+    gTextureSets = f.textureSets;
+    params.textureSeed = f.frameIndex;
+    params.coatModel = f.coatModel;
+    gNeuralCoat = f.neuralCoat;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
     params.lightTreeBounces = f.lightTreeBounces;
     params.cloudEvents = f.cloudEvents;
+    params.volumeEvents = f.volumeEvents;
+    params.nrcSpread = 0.0f; // ReSTIR's paths do not end in the radiance cache
+    params.nrcSlot = 0u;
+    params.nrcRecords = 0u;
     return params;
 }
 
@@ -96,10 +114,22 @@ struct Receiver
     bool valid;
     float3 position;
     float3 origin; // where its rays start, off the surface
-    float3 ng;     // geometric normal, facing the eye
-    Frame frame;   // around the shading normal the BSDF uses
+    float3 ng;      // geometric normal, facing the eye
+    Frame frame;    // around the shading normal the BSDF uses
+    float3 ngLocal; // ng in that frame (EvaluateSurfaceBsdf)
     BsdfContext bsdf;
 };
+
+// The first surface's material as Trace stored it (PrimaryHit::redGreen, blueRoughness, metallic);
+// its coat is the material's (LoadSurface).
+BsdfMaterial DecodeMaterial(PrimaryHit h)
+{
+    BsdfMaterial m = (BsdfMaterial)0;
+    m.baseColor = float3(f16tof32(h.redGreen), f16tof32(h.redGreen >> 16), f16tof32(h.blueRoughness));
+    m.roughness = f16tof32(h.blueRoughness >> 16);
+    m.metallic = f16tof32(h.metallic);
+    return m;
+}
 
 Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
 {
@@ -115,14 +145,24 @@ Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
     hit.instance = h.instance;
     hit.primitive = h.primitive;
     hit.barycentrics = h.barycentrics;
-    // LoadSurface orients the normals against a ray, unknown here: orient them towards the eye.
-    Surface s = LoadSurface(hit, float3(0.0f, 0.0f, 0.0f), params);
+    // The geometry from LoadSurface, the shading normal and the material as Trace stored them.
+    // LoadSurface orients the normals against a ray, unknown here: orient them towards the eye (the
+    // stored shading normal is on the side of the geometric normal, as LoadSurface keeps it).
+    Surface s = LoadSurface(hit, float3(0.0f, 0.0f, 0.0f), params, kSurfaceGeometry);
     float3 toEye = eye - s.position;
     if (dot(s.geometricNormal, toEye) < 0.0f)
     {
         s.geometricNormal = -s.geometricNormal;
+    }
+    s.shadingNormal = DecodeNormal(h.normalAndRoughness);
+    if (dot(s.shadingNormal, s.geometricNormal) < 0.0f)
+    {
         s.shadingNormal = -s.shadingNormal;
     }
+    BsdfMaterial stored = DecodeMaterial(h);
+    s.material.baseColor = stored.baseColor;
+    s.material.roughness = stored.roughness;
+    s.material.metallic = stored.metallic;
     float3 wo = normalize(toEye);
     float3 ns = dot(s.shadingNormal, wo) > 0.0f ? s.shadingNormal : s.geometricNormal;
     r.valid = true;
@@ -130,6 +170,7 @@ Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
     r.origin = OffsetRayOrigin(s.position, s.geometricNormal);
     r.ng = s.geometricNormal;
     r.frame = MakeFrame(ns);
+    r.ngLocal = ToLocal(r.frame, r.ng);
     r.bsdf = PrepareBsdf(s.material, ToLocal(r.frame, wo));
     return r;
 }

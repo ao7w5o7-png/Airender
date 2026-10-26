@@ -2,7 +2,7 @@
 //
 //   aireditor [--scene NAME] [--shaders DIR] [--features a,b,...] [--no-vsync] [--dlss]
 //             [--dlss-mode dlaa|quality|balanced|performance|ultra] [--gpu-validation] [--no-validation]
-//             [--focus WINDOW]
+//             [--focus WINDOW] [--neural-textures off|load|sample]
 //
 // --features replaces the feature chain (default pathtracer,tonemap); dlss is inserted after the
 // path tracer when enabled. --focus brings a window to front at startup (selects its dock tab),
@@ -220,6 +220,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             else if (arg == "--focus" && i + 1 < argc)
             {
                 options.focusWindow = Narrow(argv[++i]);
+            }
+            else if (arg == "--neural-textures" && i + 1 < argc)
+            {
+                const std::string mode = Narrow(argv[++i]);
+                options.neuralTextures.mode = mode == "load"     ? renderer::NeuralTextureMode::OnLoad
+                                              : mode == "sample" ? renderer::NeuralTextureMode::OnSample
+                                                                 : renderer::NeuralTextureMode::Off;
+            }
+            else if (arg == "--set" && i + 1 < argc)
+            {
+                const std::string assignment = Narrow(argv[++i]);
+                const size_t equals = assignment.find('=');
+                if (equals != std::string::npos)
+                {
+                    options.parameters.emplace_back(assignment.substr(0, equals), assignment.substr(equals + 1));
+                }
             }
         }
         LocalFree(argv);

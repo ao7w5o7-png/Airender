@@ -33,17 +33,63 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   must stay unbiased: force it on while accumulating (`--set pathtracer.restirDi=2 --set
   pathtracer.restirGi=2`, thousands of frames) and compare the mean against an NEE reference of the
   same scene; `--set pathtracer.debugView=8` / `9` isolates the direct / indirect light.
+- Neural radiance cache (`--set pathtracer.nrc=1`, real time; `2` also when accumulating;
+  docs/architecture.md §8.11): biased by design, so measure its bias and noise against a reference
+  rendered with the same jitter (`accumulate=0`, same `--frames`, plain paths at high `spp`), and
+  look at the cache itself with `--set pathtracer.debugView=10`. After changing the network code
+  run `aircli mlp-check --backend d3d12 --shaders build/shaders`: the GPU's float32 and matrix-unit
+  (Shader Model 6.10 linear algebra, docs/architecture.md §3.4) kernels against the CPU's.
+  `--set pathtracer.nrcLinearAlgebra=0` runs the float32 kernels for an A/B comparison.
 - Test scenes (`aircli scenes` lists them with sizes; docs/architecture.md §8.1): pick the one that
   stresses the change, e.g. `veach_mis` for MIS / light sampling, `many_lights` for light
   selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`
   for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory,
   `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9),
-  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10).
+  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10;
+  in real time they are ray marched into maps, `--set pathtracer.cloudMarch=0|1|2`, §8.19),
+  `smoke` for volumes (`--volume FILE.vdb|plume[,EXTINCTION,ALBEDO,G] --volume-at X,Y,Z,SIZE` puts
+  an OpenVDB grid in any scene, repeated for several; `aircli vdb FILE` lists a file's grids; §8.12),
+  `braziers` for several volumes and lights close to them (§8.13), `textured` for material textures
+  and normal maps (§8.15), `coated` for clear coats and their network (§8.17). File scenes made from
+  real assets (§8.18): `picapica`, `sponza` (textures at scale, cutout foliage), `helmets`; fetch them
+  first with `python3 tools/air.py fetch-scenes` (into `.deps/scenes`, never committed).
+  `--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]` adds any glTF, FBX or OBJ to any scene.
   `--camera EX,EY,EZ,TX,TY,TZ[,FOV]` and `--ev EV100` move a scene's camera.
   Validate GPU against `aircli reference` on the same scene.
+- Real-time volumes (`pathtracer.volumeMarch`, on when `accumulate=0`; docs/architecture.md §8.13):
+  measure the method against tracked volumes with its CPU twin, `aircli reference --volume-march`
+  (the same shader code; `--frames` frames of `--spp` paths), and the GPU against both with
+  `--set pathtracer.accumulate=1 --set pathtracer.volumeMarch=2`. Debug views 11 / 12 / 13 show the
+  march's steps, adaptive sampling rate and volumes per ray. Adaptive sampling (lighting shared over
+  2 x 2 / 4 x 4 pixels) has no CPU twin: compare the GPU's accumulated image at the full output size
+  (it shares by the pixels a voxel covers) with `--set pathtracer.volumeAdaptive=0`, per 8 x 8 block.
+  Time with `--set pathtracer.spp=1` and enough frames that the GPU's clocks have risen.
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.
+- Neural texture compression (LibNTC, docs/architecture.md §8.16): `--neural-textures load|sample[,BPP]`
+  on `render` / `reference` (the `textured` scene); decoding on sample runs in the path tracer's
+  `AIR_PT_NEURAL` kernels. After touching the decode path run `aircli ntc-check --shaders build/shaders`
+  (the shader's decode against LibNTC's CUDA decode, every texel), and compare an accumulated
+  `sample` image with a `load` one (they agree within about 0.1%).
+- Neural shading, clear coats (docs/architecture.md §8.17, scene `coated`): `--set pathtracer.coatModel=0|1|2`
+  (network, random walk reference, approximation). After changing the coat or its network run
+  `aircli coat-check` and compare an accumulated `coatModel=0` image with a `coatModel=1` one; raise the
+  version in `TrainNeuralCoat`'s cache key so stale networks are not reused.
+- Real-time denoising (docs/architecture.md §8.14): the editor's default chain is
+  `pathtracer,nrd,taa,tonemap` (NRD on the surfaces' indirect light split by lobe, TAA for edges and
+  the direct light; nrd needs D3D12), the alternative `pathtracer,dlss`. Indirect light added at the
+  first surface must also add its lobe split to `kDiffuseSignal` / `kSpecularSignal` (as ReSTIR GI
+  does), or NRD leaves it noisy; direct light stays out of them (NRD spreads shadows: 2-10% of the
+  light lost). Energy is part of correctness: check the mean of 32 real-time frames against an
+  accumulated reference, in real lighting and in the white furnace (`--set pathtracer.furnace=1`;
+  docs/architecture.md §8.14 "Energy"); a filter that clips or clamps noisy samples loses light.
+- Real time is judged over frames, and a static camera hides trails: `--camera-motion
+  RIGHT,UP,FORWARD[,YAW[,PITCH]]` moves the camera every frame and `--output-frames N` writes the last
+  N frames. Compare a moving camera's last frame with a static camera's at the same place (trails,
+  e.g. a denoiser reprojecting with the wrong motion), and a static camera's consecutive frames
+  (flicker). Anything laid over the surfaces must keep the denoiser's guides consistent with it
+  (docs/architecture.md §8.13, "Under a denoiser").
 - Before trusting GPU timings, check the report's `vramBudgetBytes`: other processes holding VRAM
   (graphics debuggers, IDEs) make WDDM page resources to system memory and inflate every pass.
 - Debug a frame with `--set pathtracer.debugView=N` (normals, albedo, depth, heatmaps, direct /

@@ -2,6 +2,8 @@
 
 #include "air/renderer/Scene.h"
 
+#include "air/renderer/NeuralTextures.h"
+
 #include "SceneBuilders.h"
 
 #include <algorithm>
@@ -44,6 +46,12 @@ gpu::MaterialData Material::ToGpu() const
     out.metallic = metallic;
     const float luminance = dot(emissionColor, float3(0.2126f, 0.7152f, 0.0722f));
     out.emission = luminance > 0.0f && emissionNits > 0.0f ? emissionColor * (emissionNits / luminance) : float3(0.0f);
+    out.textureSet = textures == kNoTextures ? gpu::kInvalidIndex : textures;
+    out.uvScale = uvScale;
+    out.coat = coat ? 1u : 0u;
+    out.coatRoughness = coatRoughness;
+    out.coatColor = coatColor;
+    out.alphaCutoff = textures == kNoTextures ? 0.0f : alphaCutoff;
     return out;
 }
 
@@ -324,6 +332,10 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"terrain", detail::MakeTerrain},
     {"sunset", detail::MakeSunset},
     {"cumulus", detail::MakeCumulus},
+    {"smoke", detail::MakeSmoke},
+    {"braziers", detail::MakeBraziers},
+    {"textured", detail::MakeTextured},
+    {"coated", detail::MakeCoated},
 };
 
 } // namespace
@@ -367,6 +379,25 @@ float HighestPoint(const SceneDesc& desc)
     return highest;
 }
 
+void SceneBounds(const SceneDesc& desc, float3& lo, float3& hi)
+{
+    lo = float3(1e30f);
+    hi = float3(-1e30f);
+    for (const Instance& instance : desc.instances)
+    {
+        if (instance.mesh >= desc.meshes.size())
+        {
+            continue;
+        }
+        for (const gpu::Vertex& v : desc.meshes[instance.mesh].vertices)
+        {
+            const float3 p = TransformPoint(instance.transform, v.position);
+            lo = hlsl::min(lo, p);
+            hi = hlsl::max(hi, p);
+        }
+    }
+}
+
 std::string Validate(const SceneDesc& desc)
 {
     for (const Mesh& mesh : desc.meshes)
@@ -390,6 +421,36 @@ std::string Validate(const SceneDesc& desc)
         {
             return std::format("material '{}': roughness and metallic must be in [0, 1], emission >= 0", m.name);
         }
+        if (m.coat && (!(m.coatRoughness >= 0.0f && m.coatRoughness <= 1.0f) ||
+                       !(std::min({m.coatColor.x, m.coatColor.y, m.coatColor.z}) >= 0.0f &&
+                         std::max({m.coatColor.x, m.coatColor.y, m.coatColor.z}) <= 1.0f)))
+        {
+            return std::format("material '{}': coat roughness and colour must be in [0, 1]", m.name);
+        }
+        if (m.textures != kNoTextures && m.textures >= desc.textureSets.size())
+        {
+            return std::format("material '{}' references missing textures {}", m.name, m.textures);
+        }
+        if (!(m.alphaCutoff >= 0.0f && m.alphaCutoff <= 1.0f) || (m.alphaCutoff > 0.0f && m.textures == kNoTextures))
+        {
+            return std::format("material '{}': an alpha cutoff (in [0, 1]) needs textures", m.name);
+        }
+    }
+    for (const MaterialTextures& t : desc.textureSets)
+    {
+        const size_t texels = size_t(t.width) * t.height;
+        if (texels == 0 || t.color.size() != texels || t.surface.size() != texels)
+        {
+            return std::format("textures '{}' need {}x{} colour and surface texels", t.name, t.width, t.height);
+        }
+        if (t.neural &&
+            (t.neural->latents.size() != size_t(t.neural->latentLayers) * t.neural->latentMips ||
+             t.neural->data.size() < gpu::kNeuralTextureConstantBytes ||
+             t.neural->coarseColor.size() != size_t(t.neural->coarseWidth) * t.neural->coarseHeight ||
+             t.neural->coarseSurface.size() != t.neural->coarseColor.size() || t.neural->coarseColor.empty()))
+        {
+            return std::format("textures '{}': incomplete neural data", t.name);
+        }
     }
     for (const Instance& instance : desc.instances)
     {
@@ -401,6 +462,22 @@ std::string Validate(const SceneDesc& desc)
     if (desc.instances.empty())
     {
         return "scene has no instances";
+    }
+    if (desc.volumes.size() > gpu::kMaxVolumes)
+    {
+        return std::format("{} volumes: at most {}", desc.volumes.size(), gpu::kMaxVolumes);
+    }
+    for (size_t i = 0; i < desc.volumes.size(); ++i)
+    {
+        const Volume& volume = desc.volumes[i];
+        if (volume.enabled && (!(volume.extinction >= 0.0f) || !(volume.albedo >= 0.0f && volume.albedo <= 1.0f) ||
+                               !(volume.anisotropy > -1.0f && volume.anisotropy < 1.0f) || !(volume.size >= 0.0f) ||
+                               volume.maxResolution < 8 || volume.maxResolution > 2048))
+        {
+            return std::format("volume {}: needs extinction >= 0, albedo in [0, 1], anisotropy in (-1, 1), size >= 0 "
+                               "and a maxResolution of 8 to 2048 voxels (the 3D texture limit)",
+                               i);
+        }
     }
     const Clouds& clouds = desc.clouds;
     if (clouds.enabled)

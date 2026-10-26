@@ -33,16 +33,16 @@ Resources:
 [Graphics] Barrier [tex 'PathTracer.Accumulation' None -> UAVCompute]
 [Graphics] BeginEvent 'PathTracer.Trace'
 [Graphics] SetPipeline pipeline 'PathTracer.Trace'
-[Graphics] PushConstants 72 bytes
+[Graphics] PushConstants 80 bytes
 [Graphics] DispatchRays 64x32x1
 [Graphics] EndEvent
 [Graphics] Barrier [tex 'PathTracer.Accumulation' UAVCompute -> SRVCompute] [tex 'FrameOutput' None -> UAVCompute]
 [Graphics] BeginEvent 'PathTracer.Resolve'
 [Graphics] SetPipeline pipeline 'PathTracer.Resolve'
-[Graphics] PushConstants 16 bytes
+[Graphics] PushConstants 24 bytes
 [Graphics] Dispatch 8x4x1
 [Graphics] EndEvent
-[Compute] Wait Graphics fence 3
+[Compute] Wait Graphics fence 4
 [Compute] Barrier [tex 'Example.Pattern' None -> UAVCompute discard]
 [Compute] BeginEvent 'Example.Generate'
 [Compute] SetPipeline pipeline 'Example.Generate'

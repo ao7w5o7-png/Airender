@@ -7,15 +7,33 @@
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
 //                   [--no-async-compute] [--no-transient-pool] [--html profile.html]   (report of the last frame)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
+//                   [--output-frames N]   (also the N - 1 frames before the last: image.<frame>.pfm)
+//                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
 //                   [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
+//                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
+//                   [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels among the surfaces)
+//                   [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]   (LibNTC)
+//                   [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (a glTF, FBX or OBJ model into the scene)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
 //                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
+//                    [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]
+//                    [--neural-textures ...] [--ntc-cache DIR]
+//                    [--volume-march [--frames N] [--probe-frames N] [--volume-step S]
+//                    [--volume-shadow-size N] [--volume-lights N]]   (the real-time volumes' method)
+//   aircli vdb FILE.vdb [--read GRID] [--max-resolution N]   the grids of an OpenVDB file (JSON); --read
+//                    reads one as a volume would and reports its voxels
 //   aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]
+//   aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]   the GPU's neural network kernels
+//                    (float32 and linear algebra) against the CPU's (JSON; exit 1 when they disagree)
+//   aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]   neural
+//                    texture decoding in the shader (as on sample) against LibNTC's on CUDA (JSON)
+//   aircli coat-check [--scene NAME] [--directions N]   the neural coat of a scene's coated materials
+//                    against the random walk it learnt from: errors and albedos (JSON)
 //
 // `render` fails (exit 1) if any frame produced a validation error.
 
@@ -25,13 +43,18 @@
 #include "air/core/Log.h"
 #include "air/core/Profiler.h"
 #include "air/core/TaskSystem.h"
+#include "air/features/pathtracer/NeuralCoat.h"
 #include "air/features/pathtracer/ReferenceRenderer.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
+#include "air/renderer/NeuralNetwork.h"
+#include "air/renderer/NeuralTextures.h"
 #include "air/renderer/ProfileReport.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
+#include "air/renderer/SceneFiles.h"
 #include "air/renderer/Transfer.h"
+#include "air/renderer/Vdb.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <algorithm>
@@ -62,17 +85,31 @@ int Usage()
                "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
                "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
                "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
-               "                [--scene NAME] [--output image.pfm|image.ppm]\n"
+               "                [--scene NAME] [--output image.pfm|image.ppm] [--output-frames N]\n"
+               "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
+               "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
+               "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
+               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
                "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
+               "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
+               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
+               "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
+               "                [--volume-shadow-size N] [--volume-lights N]]\n"
                "  aircli features | scenes\n"
-               "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n",
+               "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
+               "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
+               "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
+               "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n"
+               "  aircli coat-check [--scene NAME] [--directions N]\n",
                stderr);
     return kExitUsage;
 }
@@ -137,6 +174,28 @@ int CommandFeatures()
 // ---------------------------------------------------------------------------
 // scenes
 // ---------------------------------------------------------------------------
+// A scene's size and lights.
+json::Value DescribeScene(const std::string& name, const renderer::SceneDesc& desc)
+{
+    u64 triangles = 0;
+    u32 emissive = 0;
+    for (const renderer::Instance& instance : desc.instances)
+    {
+        triangles += desc.meshes[instance.mesh].indices.size() / 3;
+        emissive += desc.materials[instance.material].emissionNits > 0.0f ? 1u : 0u;
+    }
+    json::Value item = json::Value::MakeObject();
+    item["name"] = name;
+    item["instances"] = u64(desc.instances.size());
+    item["meshes"] = u64(desc.meshes.size());
+    item["materials"] = u64(desc.materials.size());
+    item["textureSets"] = u64(desc.textureSets.size());
+    item["triangles"] = triangles;
+    item["emissiveInstances"] = emissive;
+    item["ev100"] = desc.camera.ev100;
+    return item;
+}
+
 int CommandScenes()
 {
     json::Value out = json::Value::MakeArray();
@@ -144,22 +203,22 @@ int CommandScenes()
     {
         const std::optional<renderer::SceneDesc> found = renderer::MakeBuiltinScene(name);
         AIR_CHECK(found.has_value(), "scene '{}' is listed but cannot be made", name);
-        const renderer::SceneDesc& desc = *found;
-        u64 triangles = 0;
-        u32 emissive = 0;
-        for (const renderer::Instance& instance : desc.instances)
-        {
-            triangles += desc.meshes[instance.mesh].indices.size() / 3;
-            emissive += desc.materials[instance.material].emissionNits > 0.0f ? 1u : 0u;
-        }
-        json::Value item = json::Value::MakeObject();
+        out.Push(DescribeScene(name, *found));
+    }
+    // The file scenes (SceneFiles.h): loaded when their assets are there (seconds each), else what is
+    // missing.
+    for (const std::string& name : renderer::FileSceneNames())
+    {
+        std::string problem;
+        const std::optional<renderer::SceneDesc> found = renderer::MakeFileScene(name, &problem);
+        json::Value item = found ? DescribeScene(name, *found) : json::Value::MakeObject();
         item["name"] = name;
-        item["instances"] = u64(desc.instances.size());
-        item["meshes"] = u64(desc.meshes.size());
-        item["materials"] = u64(desc.materials.size());
-        item["triangles"] = triangles;
-        item["emissiveInstances"] = emissive;
-        item["ev100"] = desc.camera.ev100;
+        item["file"] = true;
+        item["available"] = found.has_value();
+        if (!found)
+        {
+            item["problem"] = problem;
+        }
         out.Push(std::move(item));
     }
     std::puts(out.Dump().c_str());
@@ -171,7 +230,20 @@ int CommandScenes()
 //   --clouds COVERAGE[,BOTTOM,TOP] (metres) adds a cloud layer (Clouds.h), 0 removes it; --clouds-exact
 //   keeps their phase function's diffraction peak;
 //   --camera EX,EY,EZ,TX,TY,TZ[,FOV] puts the camera at the eye looking at the target (vertical field
-//   of view in degrees), --ev EV100 sets its exposure.
+//   of view in degrees), --ev EV100 sets its exposure;
+//   --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] puts a volume (Volume.h) in it: a
+//   grid of an OpenVDB file (--volume-grid NAME, else "density" or its first float grid) or the
+//   procedural plume of smoke; none removes them all. The n-th --volume sets the scene's n-th volume
+//   (its other settings stay) or adds one. --volume-at X,Y,Z[,SIZE] places the last one given (before
+//   any --volume: the first): with SIZE its longest side is scaled to SIZE metres and its bottom
+//   centred on the point, else the point moves the file's own placement; --volume-grid likewise;
+//   --neural-textures off|load|sample[,BPP[,STEPS]] puts its texture sets through neural texture
+//   compression (NeuralTextures.h) at about BPP bits per texel (4) with STEPS training steps (20000),
+//   decoded on load or by the shader on sample; compressed sets are kept in --ntc-cache DIR (a
+//   directory in the temporary files; "" keeps none);
+//   --model FILE[,X,Y,Z[,HEIGHT[,YAW]]] adds a model file (glTF, FBX, OBJ; SceneFiles.h) standing on the
+//   point (the origin), HEIGHT metres tall (its own size: 0), turned YAW degrees about +y; repeated for
+//   several.
 struct SceneOptions
 {
     std::optional<std::pair<float, float>> sun;
@@ -180,10 +252,48 @@ struct SceneOptions
     bool cloudsExact = false;
     std::vector<std::string> camera;
     std::optional<float> ev100;
+    struct VolumeOption
+    {
+        std::vector<std::string> spec; // empty: options given before any --volume
+        std::optional<std::string> grid;
+        std::vector<std::string> at;
+    };
+    std::vector<VolumeOption> volumes;
+    std::vector<std::vector<std::string>> models;
+    renderer::NeuralTextureOptions neural;
 
     // True when `arg` was one of these options.
     bool Parse(std::string_view arg, Args& args)
     {
+        if (arg == "--neural-textures")
+        {
+            const std::vector<std::string> spec = Split(args.Next(), ',');
+            const std::string mode = spec.empty() ? std::string() : spec[0];
+            if (mode == "off" || mode == "load" || mode == "sample")
+            {
+                neural.mode = mode == "off"    ? renderer::NeuralTextureMode::Off
+                              : mode == "load" ? renderer::NeuralTextureMode::OnLoad
+                                               : renderer::NeuralTextureMode::OnSample;
+            }
+            else
+            {
+                args.error = true;
+            }
+            if (spec.size() >= 2)
+            {
+                neural.bitsPerPixel = std::stof(spec[1]);
+            }
+            if (spec.size() >= 3)
+            {
+                neural.steps = u32(std::stoul(spec[2]));
+            }
+            return true;
+        }
+        if (arg == "--ntc-cache")
+        {
+            neural.cache = std::string(args.Next());
+            return true;
+        }
         if (arg == "--sun")
         {
             const std::string value(args.Next());
@@ -217,7 +327,59 @@ struct SceneOptions
             ev100 = std::stof(std::string(args.Next()));
             return true;
         }
+        if (arg == "--model")
+        {
+            models.push_back(Split(args.Next(), ','));
+            return true;
+        }
+        if (arg == "--volume")
+        {
+            if (volumes.empty() || !volumes.back().spec.empty())
+            {
+                volumes.emplace_back();
+            }
+            volumes.back().spec = Split(args.Next(), ',');
+            return true;
+        }
+        if (arg == "--volume-grid" || arg == "--volume-at")
+        {
+            if (volumes.empty())
+            {
+                volumes.emplace_back();
+            }
+            if (arg == "--volume-grid")
+            {
+                volumes.back().grid = std::string(args.Next());
+            }
+            else
+            {
+                volumes.back().at = Split(args.Next(), ',');
+            }
+            return true;
+        }
         return false;
+    }
+
+    // False (logged) when a model cannot be read.
+    bool AddModels(renderer::SceneDesc& scene) const
+    {
+        for (const std::vector<std::string>& spec : models)
+        {
+            std::string problem;
+            const std::optional<renderer::ImportedModel> model =
+                renderer::ImportModel(scene, spec.empty() ? std::string() : spec[0], {}, &problem);
+            if (!model)
+            {
+                AIR_LOG(Error, "aircli", "--model: {}", problem);
+                return false;
+            }
+            auto value = [&](size_t i, float fallback) { return spec.size() > i ? std::stof(spec[i]) : fallback; };
+            const float height = value(4, 0.0f);
+            const float size = model->boundsMax.y - model->boundsMin.y;
+            renderer::PlaceModel(scene, *model, height > 0.0f && size > 0.0f ? height / size : 1.0f, value(5, 0.0f),
+                                 {value(1, 0.0f), value(2, 0.0f), value(3, 0.0f)});
+        }
+        return true;
     }
 
     void Apply(renderer::SceneDesc& scene) const
@@ -262,11 +424,98 @@ struct SceneOptions
         {
             scene.camera.ev100 = *ev100;
         }
+        size_t next = 0; // the scene volume the next --volume sets
+        for (const VolumeOption& option : volumes)
+        {
+            if (!option.spec.empty() && option.spec[0] == "none")
+            {
+                scene.volumes.clear();
+                next = 0;
+                continue;
+            }
+            if (next >= scene.volumes.size())
+            {
+                if (option.spec.empty())
+                {
+                    continue; // placement for a volume the scene does not have
+                }
+                scene.volumes.emplace_back();
+            }
+            renderer::Volume& volume = scene.volumes[next++];
+            const std::vector<std::string>& spec = option.spec;
+            if (!spec.empty())
+            {
+                volume.enabled = true;
+                volume.file = spec[0] == "plume" ? std::string() : spec[0];
+                if (spec.size() >= 2)
+                {
+                    volume.extinction = std::stof(spec[1]);
+                }
+                if (spec.size() >= 3)
+                {
+                    volume.albedo = std::stof(spec[2]);
+                }
+                if (spec.size() >= 4)
+                {
+                    volume.anisotropy = std::stof(spec[3]);
+                }
+            }
+            if (option.grid)
+            {
+                volume.grid = *option.grid;
+            }
+            if (option.at.size() >= 3)
+            {
+                volume.position = {std::stof(option.at[0]), std::stof(option.at[1]), std::stof(option.at[2])};
+                volume.size = option.at.size() >= 4 ? std::stof(option.at[3]) : 0.0f;
+            }
+        }
+        scene.volumes.resize(std::min<size_t>(scene.volumes.size(), gpu::kMaxVolumes));
+    }
+
+    // Neural texture compression of the scene's texture sets (--neural-textures), its results in
+    // report["neuralTextures"]. False (logged) when they could not be compressed.
+    bool ApplyNeuralTextures(renderer::SceneDesc& scene, json::Value* report) const
+    {
+        std::vector<renderer::NeuralTextureReport> sets;
+        std::string error;
+        const auto start = std::chrono::steady_clock::now();
+        if (!renderer::ApplyNeuralTextures(scene, neural, &sets, &error))
+        {
+            AIR_LOG(Error, "aircli", "--neural-textures: {}", error);
+            return false;
+        }
+        json::Value list = json::Value::MakeArray();
+        for (const renderer::NeuralTextureReport& set : sets)
+        {
+            AIR_LOG(Info, "aircli", "neural textures '{}': {:.2f} bpp, PSNR {:.2f} dB, {} -> {} bytes{}", set.name,
+                    set.bitsPerPixel, set.psnr, set.sourceBytes, set.compressedBytes, set.cached ? " (cached)" : "");
+            json::Value item = json::Value::MakeObject();
+            item["name"] = set.name;
+            item["bitsPerPixel"] = set.bitsPerPixel;
+            item["psnr"] = set.psnr;
+            item["sourceBytes"] = set.sourceBytes;
+            item["compressedBytes"] = set.compressedBytes;
+            item["cached"] = set.cached;
+            list.Push(std::move(item));
+        }
+        if (!sets.empty())
+        {
+            AIR_LOG(Info, "aircli", "neural textures: {:.1f} s",
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+        }
+        if (report)
+        {
+            (*report)["neuralTextures"] = std::move(list);
+        }
+        return true;
     }
 };
 
 // ---------------------------------------------------------------------------
-// reference: the path tracer's estimator on the CPU, to validate GPU output with `compare`
+// reference: the path tracer's estimator on the CPU, to validate GPU output with `compare`; with
+// --volume-march the real-time volumes' (pt::RenderVolumeMarchReference), `--spp` paths per pixel and
+// frame
 // ---------------------------------------------------------------------------
 int CommandReference(Args& args)
 {
@@ -276,7 +525,9 @@ int CommandReference(Args& args)
     pt::ReferenceSettings settings;
     settings.width = 320;
     settings.height = 180;
-    settings.samplesPerPixel = 256;
+    settings.samplesPerPixel = 0; // 256, or 16 a frame with --volume-march
+    bool volumeMarch = false;
+    pt::VolumeMarchReferenceSettings march;
     while (!args.Done())
     {
         const std::string_view arg = args.Take();
@@ -316,9 +567,37 @@ int CommandReference(Args& args)
         {
             settings.cloudEvents = u32(std::stoul(std::string(args.Next()))); // as pathtracer.cloudEvents
         }
+        else if (arg == "--volume-events")
+        {
+            settings.volumeEvents = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeEvents
+        }
         else if (arg == "--light-tree-bounces")
         {
             settings.lightTreeBounces = u32(std::stoul(std::string(args.Next()))); // as pathtracer.lightTreeBounces
+        }
+        else if (arg == "--volume-march")
+        {
+            volumeMarch = true;
+        }
+        else if (arg == "--frames")
+        {
+            march.frames = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--probe-frames")
+        {
+            march.probeFrames = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--volume-step")
+        {
+            march.march.step = std::stof(std::string(args.Next())); // as pathtracer.volumeStep
+        }
+        else if (arg == "--volume-shadow-size")
+        {
+            march.march.shadowSize = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeShadowSize
+        }
+        else if (arg == "--volume-lights")
+        {
+            march.march.lights = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeLights
         }
         else if (sceneOptions.Parse(arg, args))
         {
@@ -329,16 +608,40 @@ int CommandReference(Args& args)
             return Usage();
         }
     }
-    std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
+    std::string sceneError;
+    std::optional<renderer::SceneDesc> scene = renderer::MakeScene(sceneName, &sceneError);
+    if (!scene && !sceneError.empty())
+    {
+        AIR_LOG(Error, "aircli", "{}", sceneError);
+        return kExitUsage;
+    }
     if (args.error || outputPath.empty() || !scene)
     {
         return Usage();
     }
+    if (!sceneOptions.AddModels(*scene))
+    {
+        return kExitUsage;
+    }
     sceneOptions.Apply(*scene);
+    if (!sceneOptions.ApplyNeuralTextures(*scene, nullptr))
+    {
+        return kExitUsage;
+    }
+    if (volumeMarch && scene->volumes.empty())
+    {
+        AIR_LOG(Error, "aircli", "--volume-march: scene '{}' has no volumes", sceneName);
+        return kExitUsage;
+    }
+    if (settings.samplesPerPixel == 0)
+    {
+        settings.samplesPerPixel = volumeMarch ? 16 : 256;
+    }
     TaskSystem tasks;
     settings.tasks = &tasks;
     const auto start = std::chrono::steady_clock::now();
-    const Image image = pt::RenderReference(*scene, scene->camera, settings);
+    const Image image = volumeMarch ? pt::RenderVolumeMarchReference(*scene, scene->camera, settings, march)
+                                    : pt::RenderReference(*scene, scene->camera, settings);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     const bool ppm = outputPath.ends_with(".ppm");
     if (!(ppm ? WritePpm(outputPath, image) : WritePfm(outputPath, image)))
@@ -416,6 +719,278 @@ int CommandCompare(Args& args)
 }
 
 // ---------------------------------------------------------------------------
+// vdb: what an OpenVDB file holds, and what a volume reads of a grid
+// ---------------------------------------------------------------------------
+int CommandVdb(Args& args)
+{
+    std::string path;
+    std::optional<std::string> read;
+    u32 maxResolution = renderer::Volume{}.maxResolution;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--read")
+        {
+            read = std::string(args.Next());
+        }
+        else if (arg == "--max-resolution")
+        {
+            maxResolution = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (path.empty() && !arg.starts_with("--"))
+        {
+            path = arg;
+        }
+        else
+        {
+            AIR_LOG(Error, "aircli", "unknown option '{}'", arg);
+            return Usage();
+        }
+    }
+    if (args.error || path.empty())
+    {
+        return Usage();
+    }
+    std::string error;
+    const std::optional<renderer::VdbFileInfo> info = renderer::ReadVdbInfo(path, &error);
+    if (!info)
+    {
+        AIR_LOG(Error, "aircli", "{}", error);
+        return kExitCheckFailed;
+    }
+    auto vec3 = [](const auto* v)
+    {
+        json::Value out = json::Value::MakeArray();
+        for (int i = 0; i < 3; ++i)
+        {
+            out.Push(double(v[i]));
+        }
+        return out;
+    };
+    json::Value out = json::Value::MakeObject();
+    out["file"] = path;
+    out["version"] = info->version;
+    out["library"] = std::format("{}.{}", info->libraryMajor, info->libraryMinor);
+    json::Value grids = json::Value::MakeArray();
+    for (const renderer::VdbGridInfo& g : info->grids)
+    {
+        json::Value item = json::Value::MakeObject();
+        item["name"] = g.name;
+        item["valueType"] = g.valueType;
+        item["nodes"] = g.nodes;
+        item["halfFloat"] = g.halfFloat;
+        item["class"] = g.gridClass;
+        if (g.hasBounds)
+        {
+            item["boundsMin"] = vec3(g.boundsMin);
+            item["boundsMax"] = vec3(g.boundsMax);
+        }
+        item["activeVoxels"] = g.activeVoxels;
+        item["map"] = g.map;
+        item["voxelSize"] = vec3(g.voxelSize);
+        item["translation"] = vec3(g.translation);
+        item["readable"] = g.readable;
+        if (!g.readable)
+        {
+            item["why"] = g.why;
+        }
+        grids.Push(std::move(item));
+    }
+    out["grids"] = std::move(grids);
+    int exit = kExitOk;
+    if (read)
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const std::optional<renderer::VolumeGrid> grid = renderer::ReadVdbGrid(path, *read, maxResolution, &error);
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        json::Value item = json::Value::MakeObject();
+        if (grid)
+        {
+            double sum = 0.0;
+            float largest = 0.0f;
+            u64 occupied = 0;
+            for (float d : grid->density)
+            {
+                sum += d;
+                largest = std::max(largest, d);
+                occupied += d > 0.0f ? 1u : 0u;
+            }
+            const u32 size[3] = {grid->sizeX, grid->sizeY, grid->sizeZ};
+            item["size"] = vec3(size);
+            item["voxelSize"] = grid->voxelSize;
+            const float origin[3] = {grid->origin.x, grid->origin.y, grid->origin.z};
+            item["origin"] = vec3(origin);
+            item["meanDensity"] = grid->density.empty() ? 0.0 : sum / double(grid->density.size());
+            item["maxDensity"] = largest;
+            item["occupiedFraction"] = grid->density.empty() ? 0.0 : double(occupied) / double(grid->density.size());
+            item["seconds"] = seconds;
+        }
+        else
+        {
+            item["error"] = error;
+            exit = kExitCheckFailed;
+        }
+        out["read"] = std::move(item);
+    }
+    std::puts(out.Dump().c_str());
+    return exit;
+}
+
+// ---------------------------------------------------------------------------
+// mlp-check
+// ---------------------------------------------------------------------------
+int CommandMlpCheck(Args& args)
+{
+    rhi::Backend backend = rhi::Backend::D3D12;
+    std::filesystem::path shaderRoot = renderer::FrameRunnerDesc{}.shaderRoot;
+    u32 samples = 1024;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--backend")
+        {
+            const std::string_view b = args.Next();
+            backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
+        }
+        else if (arg == "--shaders")
+        {
+            shaderRoot = std::string(args.Next());
+        }
+        else if (arg == "--samples")
+        {
+            samples = u32(std::stoul(std::string(args.Next())));
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    if (args.error)
+    {
+        return Usage();
+    }
+    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = true});
+    if (!device)
+    {
+        AIR_LOG(Error, "aircli", "could not create a {} device", rhi::ToString(backend));
+        return kExitUsage;
+    }
+    json::Value report = renderer::CheckNeuralNetwork(*device, shaderRoot / "renderer", samples, 1);
+    report["adapter"] = device->GetCapabilities().adapterName;
+    const bool passed = report["passed"].AsBool();
+    std::puts(report.Dump().c_str());
+    return passed ? kExitOk : kExitCheckFailed;
+}
+
+// ---------------------------------------------------------------------------
+// coat-check
+// ---------------------------------------------------------------------------
+int CommandCoatCheck(Args& args)
+{
+    std::string sceneName = "coated";
+    u32 directions = 256;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--scene")
+        {
+            sceneName = args.Next();
+        }
+        else if (arg == "--directions")
+        {
+            directions = u32(std::stoul(std::string(args.Next())));
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    std::string sceneError;
+    std::optional<renderer::SceneDesc> scene = renderer::MakeScene(sceneName, &sceneError);
+    if (!scene && !sceneError.empty())
+    {
+        AIR_LOG(Error, "aircli", "{}", sceneError);
+        return kExitUsage;
+    }
+    if (args.error || !scene)
+    {
+        return Usage();
+    }
+    TaskSystem tasks;
+    const std::vector<pt::CoatMaterialSample> materials = pt::CollectCoatMaterials(*scene);
+    if (materials.empty())
+    {
+        AIR_LOG(Error, "aircli", "scene '{}' has no coated materials", sceneName);
+        return kExitUsage;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const pt::NeuralCoatResult coat = pt::TrainNeuralCoat(materials, {}, &tasks);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    json::Value report = pt::CheckNeuralCoat(materials, coat.parameters, directions, &tasks);
+    report["scene"] = sceneName;
+    report["trainingLoss"] = coat.loss;
+    report["trainingSeconds"] = seconds;
+    report["cached"] = coat.cached;
+    std::puts(report.Dump().c_str());
+    return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
+// ntc-check
+// ---------------------------------------------------------------------------
+int CommandNtcCheck(Args& args)
+{
+    rhi::Backend backend = rhi::Backend::D3D12;
+    std::filesystem::path shaderRoot = renderer::FrameRunnerDesc{}.shaderRoot;
+    renderer::NeuralTextureOptions options;
+    options.steps = 20000;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--backend")
+        {
+            const std::string_view b = args.Next();
+            backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
+        }
+        else if (arg == "--shaders")
+        {
+            shaderRoot = std::string(args.Next());
+        }
+        else if (arg == "--bpp")
+        {
+            options.bitsPerPixel = std::stof(std::string(args.Next()));
+        }
+        else if (arg == "--steps")
+        {
+            options.steps = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--ntc-cache")
+        {
+            options.cache = std::string(args.Next());
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    if (args.error)
+    {
+        return Usage();
+    }
+    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = true});
+    if (!device)
+    {
+        AIR_LOG(Error, "aircli", "could not create a {} device", rhi::ToString(backend));
+        return kExitUsage;
+    }
+    json::Value report = renderer::CheckNeuralTextures(*device, shaderRoot / "renderer", options);
+    report["adapter"] = device->GetCapabilities().adapterName;
+    const bool passed = report["passed"].AsBool();
+    std::puts(report.Dump().c_str());
+    return passed ? kExitOk : kExitCheckFailed;
+}
+
+// ---------------------------------------------------------------------------
 // render
 // ---------------------------------------------------------------------------
 int CommandRender(Args& args)
@@ -431,6 +1006,8 @@ int CommandRender(Args& args)
     std::string htmlPath;
     std::string sceneName = "cornell_box";
     std::string outputPath;
+    u32 outputFrames = 0;
+    std::vector<float> cameraMotion; // per frame: metres right, up, forward; degrees of yaw, pitch
     SceneOptions sceneOptions;
     bool dumpCommands = false;
 
@@ -441,6 +1018,19 @@ int CommandRender(Args& args)
         {
             const std::string_view b = args.Next();
             backend = b == "d3d12" ? rhi::Backend::D3D12 : b == "vulkan" ? rhi::Backend::Vulkan : rhi::Backend::Null;
+        }
+        else if (arg == "--camera-motion")
+        {
+            cameraMotion.clear();
+            for (const std::string& value : Split(args.Next(), ','))
+            {
+                cameraMotion.push_back(std::stof(value));
+            }
+            cameraMotion.resize(5, 0.0f);
+        }
+        else if (arg == "--output-frames")
+        {
+            outputFrames = u32(std::stoul(std::string(args.Next())));
         }
         else if (arg == "--features")
         {
@@ -550,15 +1140,24 @@ int CommandRender(Args& args)
         renderer::FeatureRegistry registry;
         renderer::RegisterBuiltinFeatures(registry);
         renderer::FrameRunner runner(*device, tasks, desc);
-        std::optional<renderer::SceneDesc> sceneDesc = renderer::MakeBuiltinScene(sceneName);
+        std::string sceneError;
+        std::optional<renderer::SceneDesc> sceneDesc = renderer::MakeScene(sceneName, &sceneError);
         if (!sceneDesc)
         {
-            AIR_LOG(Error, "aircli", "unknown scene '{}'", sceneName);
+            AIR_LOG(Error, "aircli", "{}", sceneError);
+            return kExitUsage;
+        }
+        if (!sceneOptions.AddModels(*sceneDesc))
+        {
             return kExitUsage;
         }
         sceneOptions.Apply(*sceneDesc);
+        if (!sceneOptions.ApplyNeuralTextures(*sceneDesc, &report))
+        {
+            return kExitUsage;
+        }
         renderer::Scene scene(*device, std::move(*sceneDesc));
-        const renderer::Camera camera = scene.Desc().camera;
+        renderer::Camera camera = scene.Desc().camera;
         report["scene"] = sceneName;
 
         for (const std::string& name : featureNames)
@@ -591,6 +1190,23 @@ int CommandRender(Args& args)
             return kExitUsage;
         }
 
+        // Writes the frame's output; the frame output is left in SRVCompute by FrameRunner.
+        auto writeOutput = [&](const std::string& path)
+        {
+            const std::optional<Image> image =
+                renderer::ReadbackTexture(*device, runner.GetOutput(), rhi::Access::SRVCompute);
+            const bool ppm = path.ends_with(".ppm");
+            if (!image || !(ppm ? WritePpm(path, *image) : WritePfm(path, *image)))
+            {
+                AIR_LOG(Error, "aircli", "could not write '{}'", path);
+                errors.Push("could not write " + path);
+                failed = true;
+                return false;
+            }
+            AIR_LOG(Info, "aircli", "wrote {}", path);
+            return true;
+        };
+
         json::Value frameReports = json::Value::MakeArray();
         json::Value commands = json::Value::MakeArray();
         std::shared_ptr<const renderer::FrameCapture> capture; // the last frame's, for --html
@@ -600,10 +1216,26 @@ int CommandRender(Args& args)
             {
                 runner.RequestCapture();
             }
+            if (frame > 0 && !cameraMotion.empty())
+            {
+                // Along the camera's own axes, then turned.
+                camera.position += camera.Right() * cameraMotion[0] + camera.Up() * cameraMotion[1] +
+                                   camera.Forward() * cameraMotion[2];
+                camera.yaw += cameraMotion[3] * 3.14159265f / 180.0f;
+                camera.pitch += cameraMotion[4] * 3.14159265f / 180.0f;
+            }
             Profiler::Get().BeginFrame();
             scene.Update();
             renderer::FrameResult result = runner.RenderFrame(scene.Get(), camera);
             Profiler::Get().EndFrame();
+            if (!outputPath.empty() && frame + outputFrames >= frames && frame + 1 < frames)
+            {
+                // The frames before the last: name.<frame>.ext next to --output.
+                const std::filesystem::path path(outputPath);
+                writeOutput((path.parent_path() /
+                             std::format("{}.{:04}{}", path.stem().string(), frame, path.extension().string()))
+                                .string());
+            }
             if (result.capture)
             {
                 capture = result.capture;
@@ -631,23 +1263,9 @@ int CommandRender(Args& args)
             frameReports.Push(result.ToJson());
         }
         report["frames"] = std::move(frameReports);
-        if (!outputPath.empty())
+        if (!outputPath.empty() && writeOutput(outputPath))
         {
-            // The frame output is left in SRVCompute by FrameRunner.
-            const std::optional<Image> image =
-                renderer::ReadbackTexture(*device, runner.GetOutput(), rhi::Access::SRVCompute);
-            const bool ppm = outputPath.ends_with(".ppm");
-            if (!image || !(ppm ? WritePpm(outputPath, *image) : WritePfm(outputPath, *image)))
-            {
-                AIR_LOG(Error, "aircli", "could not write '{}'", outputPath);
-                errors.Push("could not write " + outputPath);
-                failed = true;
-            }
-            else
-            {
-                AIR_LOG(Info, "aircli", "wrote {}", outputPath);
-                report["output"] = outputPath;
-            }
+            report["output"] = outputPath;
         }
         report["features"] = runner.DescribeFeatures();
         if (desc.profile)
@@ -754,6 +1372,22 @@ int main(int argc, char** argv)
     if (command == "compare")
     {
         return CommandCompare(args);
+    }
+    if (command == "mlp-check")
+    {
+        return CommandMlpCheck(args);
+    }
+    if (command == "ntc-check")
+    {
+        return CommandNtcCheck(args);
+    }
+    if (command == "coat-check")
+    {
+        return CommandCoatCheck(args);
+    }
+    if (command == "vdb")
+    {
+        return CommandVdb(args);
     }
     return Usage();
 }

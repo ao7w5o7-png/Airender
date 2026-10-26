@@ -134,10 +134,6 @@ bool FrameRunner::AddFeature(const std::string& name, std::unique_ptr<RenderFeat
         AIR_LOG(Error, "FrameRunner", "feature '{}' failed to initialize", name);
         return false;
     }
-    for (std::string_view slot : feature->ConsumedSlots())
-    {
-        mConsumedSlots.emplace(slot);
-    }
     // Keep the list ordered by stage; within a stage, in the order features were added.
     const FeatureStage stage = feature->GetStage();
     const auto position =
@@ -212,6 +208,15 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
         context.renderWidth = mRenderWidth;
         context.renderHeight = mRenderHeight;
         context.sceneColor = output;
+        // Asked every frame: a feature switched off by a parameter stops consuming.
+        mConsumedSlots.clear();
+        for (const Entry& e : mFeatures)
+        {
+            for (std::string_view slot : e.feature->ConsumedSlots())
+            {
+                mConsumedSlots.emplace(slot);
+            }
+        }
         context.consumedSlots = &mConsumedSlots;
         const bool upscaling = mUpscalePipeline.IsValid();
         if (upscaling)

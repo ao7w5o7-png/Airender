@@ -28,4 +28,38 @@ rhi::ShaderBlob LoadShader(const rhi::Device& device, const std::filesystem::pat
     return blob;
 }
 
+void LazyComputePipeline::Load(const rhi::Device& device, const std::filesystem::path& dir, const std::string& stem,
+                               std::string debugName, u32 pushConstantBytes)
+{
+    const std::filesystem::path path = dir / (stem + (device.GetBackend() == rhi::Backend::Vulkan ? ".spv" : ".dxil"));
+    mAvailable = device.GetBackend() == rhi::Backend::Null || std::filesystem::exists(path);
+    if (mAvailable)
+    {
+        mDesc.shader = LoadShader(device, dir, stem, "Main");
+    }
+    mDesc.pushConstantBytes = pushConstantBytes;
+    mDesc.debugName = std::move(debugName);
+}
+
+rhi::PipelineHandle LazyComputePipeline::Get(rhi::Device& device)
+{
+    if (!mPipeline.IsValid() && mAvailable)
+    {
+        mPipeline = device.CreateComputePipeline(mDesc);
+        mAvailable = mPipeline.IsValid();
+        mDesc.shader.bytecode = {}; // the driver has it now
+    }
+    return mPipeline;
+}
+
+void LazyComputePipeline::Destroy(rhi::Device& device)
+{
+    if (mPipeline.IsValid())
+    {
+        device.DestroyPipeline(mPipeline);
+    }
+    mPipeline = {};
+    mAvailable = false;
+}
+
 } // namespace air::renderer

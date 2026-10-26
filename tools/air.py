@@ -13,6 +13,7 @@ unambiguous answer (every step prints `ok` / `FAIL`, the exit code is non-zero o
     python3 tools/air.py golden-update      # rewrite tests/golden/* after an intended change
     python3 tools/air.py new-feature bloom  # scaffold src/features/bloom from the example feature
     python3 tools/air.py format [--check] | tidy | layers
+    python3 tools/air.py fetch-scenes [picapica sponza ...]  # download the assets of file scenes
 """
 
 from __future__ import annotations
@@ -328,10 +329,98 @@ def compile_shaders(preset: str, name_filter: str | None) -> bool:
             continue
         compiled += 1
         output = scratch / name.replace("/", "_")
-        command = [manifest["compiler"], *shader["args"], shader["source"], "-Fo", str(output)]
+        compiler = shader.get("compiler") or manifest["compiler"]  # Shader Model 6.10: the preview dxc
+        command = [compiler, *shader["args"], shader["source"], "-Fo", str(output)]
         if not run_step(f"shader {name}", command, tail=40):
             failed += 1
     return record("shaders", compiled > 0 and failed == 0, f"{compiled} compiled, {failed} failed")
+
+
+# Scenes made from downloaded assets (docs/architecture.md §8.18). Nothing of them is committed: they
+# are fetched from pinned commits into .deps/scenes/<scene>/, where SceneFiles.cpp looks for them.
+KHRONOS_ASSETS = "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/8f492390ddc7a2ae221a1369ef560589cf8c70fb"
+SCENE_ASSETS = {
+    "picapica": [("zip", "https://github.com/SEED-EA/pica-pica-assets/archive/b433c2edc0c3120b6d61a9c64daa2d24ebc677a9.zip",
+                  "def7bd10a185d5695be0a7c58315e5f78c00883feb8e5b7f2e0099e85cee1722")],
+    "sponza": [("gltf", f"{KHRONOS_ASSETS}/Models/Sponza/glTF/Sponza.gltf", "Sponza")],
+    "helmets": [("gltf", f"{KHRONOS_ASSETS}/Models/{name}/glTF/{name}.gltf", name)
+                for name in ("FlightHelmet", "DamagedHelmet", "SciFiHelmet")],
+}
+
+
+def download(url: str, dest: Path, sha256: str | None = None) -> bool:
+    import hashlib
+    import urllib.request
+
+    if dest.exists():
+        return True
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response, open(part, "wb") as out:
+            shutil.copyfileobj(response, out, 1 << 20)
+    except OSError as error:
+        part.unlink(missing_ok=True)
+        return record("fetch", False, f"{url}: {error}")
+    if sha256:
+        digest = hashlib.sha256(part.read_bytes()).hexdigest()
+        if digest != sha256:
+            part.unlink()
+            return record("fetch", False, f"{url}: sha256 {digest}, expected {sha256}")
+    part.replace(dest)
+    return True
+
+
+def fetch_scene(name: str, root: Path) -> bool:
+    import urllib.parse
+    import zipfile
+
+    target = root / name
+    if (target / ".complete").exists():
+        return record(f"fetch {name}", True, "already there")
+    for kind, url, extra in SCENE_ASSETS[name]:
+        if kind == "zip":  # a repository archive at a commit: unpacked without its top directory
+            archive = root / f"{name}.zip"
+            if not download(url, archive, extra):
+                return False
+            with zipfile.ZipFile(archive) as zf:
+                for member in zf.infolist():
+                    parts = Path(member.filename).parts[1:]
+                    if member.is_dir() or not parts or ".." in parts:
+                        continue
+                    out = target.joinpath(*parts)
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    out.write_bytes(zf.read(member))
+            archive.unlink()
+        else:  # a glTF file and the buffers and images it names, next to it
+            folder = target / extra
+            gltf = folder / Path(urllib.parse.urlparse(url).path).name
+            if not download(url, gltf):
+                return False
+            document = json.loads(gltf.read_text(encoding="utf-8"))
+            base = url.rsplit("/", 1)[0]
+            for item in document.get("buffers", []) + document.get("images", []):
+                uri = item.get("uri")
+                if not uri or uri.startswith("data:"):
+                    continue
+                relative = urllib.parse.unquote(uri)
+                if ".." in Path(relative).parts:
+                    return record(f"fetch {name}", False, f"{uri}: outside its folder")
+                if not download(f"{base}/{urllib.parse.quote(relative)}", folder / relative):
+                    return False
+    (target / ".complete").touch()
+    return record(f"fetch {name}", True, str(target.relative_to(ROOT)) if target.is_relative_to(ROOT) else str(target))
+
+
+def fetch_scenes(names: list[str]) -> bool:
+    unknown = [n for n in names if n not in SCENE_ASSETS]
+    if unknown:
+        return record("fetch", False, f"unknown scene(s) {', '.join(unknown)}; known: {', '.join(SCENE_ASSETS)}")
+    root = Path(os.environ.get("AIR_SCENE_ASSETS", ROOT / ".deps" / "scenes"))
+    ok = True
+    for name in names or list(SCENE_ASSETS):
+        ok = fetch_scene(name, root) and ok
+    return ok
 
 
 def check(full: bool) -> bool:
@@ -372,6 +461,8 @@ def main() -> int:
     p.add_argument("--full", action="store_true", help="also run clang-tidy and the TSAN test run")
     p = sub.add_parser("new-feature")
     p.add_argument("name")
+    p = sub.add_parser("fetch-scenes", help="download the assets of scenes made from files (all without names)")
+    p.add_argument("names", nargs="*")
 
     argv = sys.argv[1:]
     want_json = "--json" in argv  # accepted anywhere on the command line
@@ -397,6 +488,8 @@ def main() -> int:
         ok = check_layers()
     elif args.command == "check":
         ok = check(args.full)
+    elif args.command == "fetch-scenes":
+        ok = fetch_scenes(args.names)
     else:
         ok = new_feature(args.name)
 

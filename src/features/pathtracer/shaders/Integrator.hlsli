@@ -10,6 +10,12 @@
 //   uint          LoadIndex(InstanceData instance, uint index)
 //   Vertex        LoadVertex(InstanceData instance, uint index)
 //   MaterialData  LoadMaterial(uint material)
+//   TextureSetData LoadTextureSet(uint table, uint set)  a material's textures (IntegratorParams::textureSets)
+//   float4        MaterialTextureSample(uint texture, float2 uv)  one of them, bilinear, repeating
+// and, compiled with AIR_PT_NTC (the GPU's AIR_PT_NEURAL kernels, where LibNTC's shaders were found):
+//   void          NeuralTextureSample(TextureSetData t, float2 uv, float2 u, out float4 color, out float4 surface)
+//                                                     a neural set's (TextureSetData::latents) texels, the
+//                                                     texel stochastic filtering picks with u
 //   LightTriangle LoadLight(uint light)
 //   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
@@ -18,6 +24,22 @@
 //                                                     the aerial perspective tables (SkyLookup.hlsli)
 //   float         CloudBaseSample(CloudData c, float3 uvw), CloudDetailSample(...),
 //   float         CloudMajorantLoad(CloudData c, uint cell)   the clouds (CloudLookup.hlsli)
+//   float         CloudShadowSample(CloudData c, float2 uv), float4 CloudSkySample(CloudData c, float2 uv)
+//                                                     the real-time clouds' maps (CloudMaps.hlsli)
+//   VolumeData    LoadVolume(uint table, uint index)  the scene's volumes (IntegratorParams::volumeTable)
+//   float         VolumeDensitySample(VolumeData v, float3 uvw), VolumeMajorantLoad(VolumeData v, uint cell)
+//                                                     a volume's voxels (VolumeLookup.hlsli)
+// and, compiled with AIR_PT_VOLUME_SHADOWS (the real-time volumes' kernels, VolumeMarchShared.h):
+//   float         VolumeSunShadow(float3 p), VolumeGroupShadow(uint group, float3 p, float3 lightPoint)
+//                                                     what the volumes let through of the sun's / a light
+//                                                     group's light at p (their moment shadow maps; from
+//                                                     lightPoint on the group's emitter)
+// and, compiled with AIR_PT_PROBE (their probes' kernel):
+//   bool          VolumeExplicitGroup(uint group)     the ray march lights the volumes with this group
+// and, compiled with AIR_PT_NRC (the neural radiance cache's kernels, NrcShared.h):
+//   float3        NrcPredict(NrcQuery q)              the radiance the cache predicts a vertex reflects
+//   NrcTrainingRecord NrcReadRecord(uint slot), void NrcWriteRecord(uint slot, NrcTrainingRecord r)
+//   void          NrcDeferQuery(NrcQuery q, float3 throughput)   a training path's render query
 // HitInfo, CameraData and the kFlag* constants come from PathTracerShared.h.
 //
 // Estimator: emitted radiance is gathered at path vertices 1 .. maxBounces + 1 (vertex 1 is the
@@ -33,35 +55,91 @@
 // walk through them gathers the light they scatter (EscapeRadiance), and the sun's light reaching a
 // surface is dimmed by their transmittance. The clouds lie above all geometry, so the only other
 // segment that can meet them is a camera ray from above their base.
+// Volumes among the surfaces (VolumeLookup.hlsli: smoke, clouds from files) are crossed by every
+// ray: delta tracking may stop a ray inside one, where the path scatters (Henyey-Greenstein) with
+// next event estimation of the lights and the sun weighed against phase sampling, like at a surface;
+// NEE from surfaces and from inside them multiplies the light by their transmittance (ratio
+// tracking). Volumes may overlap: each is tracked on its own, the nearest collision wins (the first
+// collision in a sum of media is the nearest of each medium's first collision, and the medium it is
+// in is the one that scattered), and transmittances multiply. Scattering events are path vertices
+// too, but they do not count as bounces: a path takes up to volumeEvents of them on top of its
+// maxBounces surfaces (a walk through a bright medium needs hundreds), and Russian roulette only ends
+// a walk once its throughput is low, as in the clouds. Compiled only with AIR_PT_VOLUME
+// (PathTracerVolume.hlsl, the CPU reference); ReSTIR and the radiance cache stay off while the scene
+// has volumes (PathTracer.cpp).
 // The air (aerial perspective, SkyLookup.hlsli) dims and adds to what a camera ray sees on its
 // surface (AddAerialPerspective, applied by the caller) and what any ray sees on the clouds; the sky
 // table includes it already. Segments between surfaces of the scene, metres to hundreds of metres
 // long, are taken as clear.
 // With kFlagReSTIR the direct light from emissive triangles at the first surface is left out
 // entirely: ReSTIR DI (ReSTIRDI.hlsli) estimates it.
+// With kFlagNrc (AIR_PT_NRC kernels) a path ends at the first vertex where its footprint has spread
+// past nrcSpread times the primary vertex's (Mueller et al. 2021), or at its last vertex: the light that
+// vertex reflects comes from the neural radiance cache, predicted once the path is done (every thread
+// of a wave then queries together). A training path (kFlagNrcTrain) defers its render query, goes on
+// for a suffix that ends the same way (self-training; never with kFlagNrcUnbiased), and records every
+// vertex as a training sample of what it reflected.
 #ifndef AIR_PT_INTEGRATOR_HLSLI
 #define AIR_PT_INTEGRATOR_HLSLI
 
 #include "Bsdf.hlsli"
+#include "Camera.hlsli"
 #include "Sampling.hlsli"
+#include "CloudMaps.hlsli"
 #include "air/renderer/shader/CloudLookup.hlsli"
 #include "air/renderer/shader/SkyLookup.hlsli"
+#include "air/renderer/shader/VolumeLookup.hlsli"
 
 // ReSTIR GI's candidate recording (kFlagReSTIRGI) is compiled only where it is used (PathTracerGi.hlsl):
 // its state halves the speed of the plain kernel through register pressure.
 #ifndef AIR_PT_RESTIR_GI
 #define AIR_PT_RESTIR_GI 0
 #endif
+// The neural radiance cache: 1 with linear algebra (PathTracerNrc.hlsl), 2 in float32
+// (PathTracerNrcPortable.hlsl), 0 compiled out.
+#ifndef AIR_PT_NRC
+#define AIR_PT_NRC 0
+#endif
+// The scene's volume likewise (PathTracerVolume.hlsl): tracking it, even past a volume that is not
+// there, costs the plain kernel about 5%.
+#ifndef AIR_PT_VOLUME
+#define AIR_PT_VOLUME 0
+#endif
+// The real-time volumes (PathTracerVolumeShadows.hlsl, docs/architecture.md §8.13): the volumes are
+// not tracked, a ray march renders them over the surfaces (VolumeMarch.hlsli), and the light reaching
+// a surface through them comes from their moment shadow maps.
+#ifndef AIR_PT_VOLUME_SHADOWS
+#define AIR_PT_VOLUME_SHADOWS 0
+#endif
+// Their probes (VolumeProbes.hlsl, with AIR_PT_VOLUME): paths with kFlagProbe gather the light that
+// arrives at a point in a volume through the volumes, except what the march adds itself: the sunlight
+// and the light of its light groups that reach the point without scattering on the way.
+#ifndef AIR_PT_PROBE
+#define AIR_PT_PROBE 0
+#endif
+// Neural texture sets decoded on sample (SceneAccess.hlsli, AIR_PT_NEURAL kernels).
+#ifndef AIR_PT_NTC
+#define AIR_PT_NTC 0
+#endif
 
 struct IntegratorParams
 {
     SkyData sky;      // the sky's radiance (a table or uniform) and the sun's disc
     CloudData clouds; // enabled == 0: none
+    uint volumeCount; // the scene's volumes, read with LoadVolume(volumeTable, i)
+    uint volumeTable; // bindless StructuredBuffer<VolumeData> on the GPU
+    uint textureSets; // the materials' textures: bindless StructuredBuffer<TextureSetData> on the GPU
+    uint textureSeed; // the frame's: neural texture sets filter stochastically
+    uint coatModel;   // kCoat*: how coated materials evaluate their coat's inner part
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
     uint lightTreeBounces; // vertices 0 .. lightTreeBounces - 1 choose lights with the light tree
     uint cloudEvents;      // scattering events a walk through the clouds may take
+    uint volumeEvents;     // scattering events a path may take in the volume, besides its bounces
+    float nrcSpread;       // kFlagNrc: NrcData::spread
+    uint nrcSlot;          // kFlagNrcTrain: the path's first training record
+    uint nrcRecords;       // training records per path
 };
 
 struct Surface
@@ -114,12 +192,13 @@ struct PathSample
     uint primitive;
     float2 barycentrics;
     GiPath gi; // with kFlagRecordGi
+    // With kFlagSignals, for denoisers: the indirect light the first vertex reflects, split by the lobe
+    // that reflects it (its own emission, its direct light and the sky a miss sees are in neither), and
+    // how far its reflected ray went (0: none).
+    float3 diffuseRadiance;
+    float3 specularRadiance;
+    float reflectionDistance;
 };
-
-float3 Xyz(float4 v)
-{
-    return float3(v.x, v.y, v.z);
-}
 
 float3 TransformRow3(float4 r0, float4 r1, float4 r2, float3 p, float w)
 {
@@ -134,29 +213,6 @@ float3 OffsetRayOrigin(float3 p, float3 n)
     return p + n * scale;
 }
 
-// --- Camera --------------------------------------------------------------------------------------
-
-// Direction through pixel position `pixel` (0 .. size, y down).
-float3 CameraRayDirection(CameraData c, float2 pixel, float2 size)
-{
-    float ndcX = pixel.x / size.x * 2.0f - 1.0f;
-    float ndcY = 1.0f - pixel.y / size.y * 2.0f;
-    float tanHalf = c.position.w;
-    float aspect = c.forward.w;
-    return normalize(Xyz(c.forward) + Xyz(c.right) * (ndcX * tanHalf * aspect) + Xyz(c.up) * (ndcY * tanHalf));
-}
-
-// Pixel position of a world point (or of a direction when w = 0), inverse of CameraRayDirection.
-float2 CameraProject(CameraData c, float3 p, float w, float2 size)
-{
-    float3 d = p - Xyz(c.position) * w;
-    float z = max(dot(d, Xyz(c.forward)), 1e-6f);
-    float tanHalf = c.position.w;
-    float aspect = c.forward.w;
-    float ndcX = dot(d, Xyz(c.right)) / (z * tanHalf * aspect);
-    float ndcY = dot(d, Xyz(c.up)) / (z * tanHalf);
-    return float2((ndcX + 1.0f) * 0.5f * size.x, (1.0f - ndcY) * 0.5f * size.y);
-}
 
 // --- Lights --------------------------------------------------------------------------------------
 
@@ -352,7 +408,15 @@ float LightTreePmf(uint light, float3 p, float3 n)
 
 // --- Surfaces ------------------------------------------------------------------------------------
 
-Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
+// What LoadSurface reads of a material's textures. A neural texture set (TextureSetData::latents) is
+// decoded on sample only for the detail of the surfaces the camera sees; deeper vertices read its
+// coarse copy (a quarter of its resolution, NeuralTextures.h), as their wide footprints would choose a
+// coarse level anyway. Other sets read the same textures either way.
+AIR_CONST uint kSurfaceGeometry = 0u; // none: the material's constants and the interpolated normal
+AIR_CONST uint kSurfaceDetail = 1u;
+AIR_CONST uint kSurfaceCoarse = 2u;
+
+Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params, uint textures)
 {
     InstanceData instance = LoadInstance(hit.instance);
     uint i0 = LoadIndex(instance, hit.primitive * 3u);
@@ -383,10 +447,73 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
     s.material.baseColor = m.baseColor;
     s.material.roughness = m.roughness;
     s.material.metallic = m.metallic;
+    s.material.coat = m.coat != 0u ? params.coatModel : kCoatNone;
+    s.material.coatRoughness = m.coatRoughness;
+    s.material.coatColor = m.coatColor;
+    // The coat's random walks (kCoatRandomWalk): new for every hit and frame, the same wherever the
+    // frame loads the hit again.
+    s.material.coatSeed = Pcg(hit.instance * 0x9e3779b9u ^ Pcg(hit.primitive ^ Pcg(asuint(hit.barycentrics.x) ^
+                                                                                Pcg(asuint(hit.barycentrics.y) +
+                                                                                    params.textureSeed))));
+    if (m.textureSet != kInvalidIndex && textures != kSurfaceGeometry)
+    {
+        // The textures at the hit's texture coordinates (level 0: a path has no footprint to filter by).
+        float2 uv0 = float2(v0.u, v0.v) * m.uvScale;
+        float2 uv1 = float2(v1.u, v1.v) * m.uvScale;
+        float2 uv2 = float2(v2.u, v2.v) * m.uvScale;
+        TextureSetData set = LoadTextureSet(params.textureSets, m.textureSet);
+        float2 uv = uv0 * b0 + uv1 * b1 + uv2 * b2;
+        float4 color;
+        float4 surface;
+#if AIR_PT_NTC
+        if (textures == kSurfaceDetail && set.latents != kInvalidIndex)
+        {
+            // Stochastic filtering's choice by the hit and the frame: the same wherever the frame loads
+            // the hit again (ReSTIR's passes), different every frame.
+            uint h = Pcg(asuint(hit.barycentrics.x) ^ Pcg(asuint(hit.barycentrics.y) ^
+                                                          Pcg(hit.primitive ^ Pcg(hit.instance + params.textureSeed))));
+            float2 u = float2(float(h & 0xFFFFu), float(h >> 16)) / 65536.0f;
+            NeuralTextureSample(set, uv, u, color, surface);
+        }
+        else
+#endif
+        {
+            color = MaterialTextureSample(set.color, uv);
+            surface = MaterialTextureSample(set.surface, uv);
+        }
+        s.material.baseColor *= float3(color.x, color.y, color.z);
+        s.material.roughness = saturate(s.material.roughness * surface.z);
+        s.material.metallic = saturate(s.material.metallic * surface.w);
+        // The normal map in the triangle's tangent frame (along increasing u and v), around the
+        // shading normal.
+        float2 d1 = uv1 - uv0;
+        float2 d2 = uv2 - uv0;
+        float det = d1.x * d2.y - d1.y * d2.x;
+        float2 bend = float2(surface.x, surface.y) * 2.0f - 1.0f;
+        if (abs(det) > 1e-12f && (bend.x != 0.0f || bend.y != 0.0f))
+        {
+            float3 tangent = ((p1 - p0) * d2.y - (p2 - p0) * d1.y) / det;
+            float3 bitangent = ((p2 - p0) * d1.x - (p1 - p0) * d2.x) / det;
+            float3 n = s.shadingNormal;
+            float3 t = tangent - n * dot(n, tangent);
+            if (dot(t, t) > 1e-20f)
+            {
+                t = normalize(t);
+                float3 b = cross(n, t);
+                b = dot(b, bitangent) < 0.0f ? -b : b;
+                float3 bent = normalize(t * bend.x + b * bend.y + n * sqrt(saturate(1.0f - dot(bend, bend))));
+                if (dot(bent, s.geometricNormal) > 0.0f)
+                {
+                    s.shadingNormal = bent;
+                }
+            }
+        }
+    }
     s.emission = frontFace ? m.emission : float3(0.0f, 0.0f, 0.0f);
     if ((params.flags & kFlagFurnace) != 0u)
     {
         s.material.baseColor = float3(1.0f, 1.0f, 1.0f);
+        s.material.coatColor = float3(1.0f, 1.0f, 1.0f);
         s.emission = float3(0.0f, 0.0f, 0.0f);
     }
     s.lightIndex = any(s.emission) ? LoadInstanceLight(hit.instance) + hit.primitive : kInvalidIndex;
@@ -411,13 +538,35 @@ struct Escape
     bool surface;
 };
 
-Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, float tMax, AIR_INOUT(uint) seed)
+// With the real-time clouds' maps (kFlagCloudMaps) a camera ray (`camera`) sees the sky alone: the clouds
+// over it come from FrameData::cloudLayer (TracePixel). Any other ray takes them from the sky map.
+Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, float tMax, bool camera,
+                      AIR_INOUT(uint) seed)
 {
     Escape escape;
     escape.sun = float3(0.0f, 0.0f, 0.0f);
     escape.rest = float3(0.0f, 0.0f, 0.0f);
     escape.surface = false;
     CloudData c = params.clouds;
+    if ((params.flags & kFlagCloudMaps) != 0u)
+    {
+        escape.surface = tMax < 1e30f;
+        if (!escape.surface)
+        {
+            if (HasSun(params.sky) && dot(direction, params.sky.sunDirection) >= params.sky.sunCosRadius)
+            {
+                escape.sun = params.sky.sunRadiance;
+            }
+            escape.rest = SkyRadiance(params.sky, direction);
+            if (!camera)
+            {
+                float4 clouds = CloudSkyMapLookup(c, direction);
+                escape.sun *= clouds.w;
+                escape.rest = float3(clouds.x, clouds.y, clouds.z) + escape.rest * clouds.w;
+            }
+        }
+        return escape;
+    }
     float albedo = (params.flags & kFlagFurnace) != 0u ? 1.0f : c.albedo;
     bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
     float sunPdf = sunNee ? 1.0f / SunSolidAngle(params.sky) : 0.0f;
@@ -499,7 +648,101 @@ void AddAerialPerspective(IntegratorParams params, float3 direction, AIR_INOUT(P
         Aerial air = AerialPerspective(params.sky, direction, s.hitDistance);
         s.radiance = air.inscatter + air.transmittance * s.radiance;
         s.directRadiance = air.inscatter + air.transmittance * s.directRadiance;
+        s.diffuseRadiance *= air.transmittance;
+        s.specularRadiance *= air.transmittance;
     }
+}
+
+// --- Neural radiance cache -----------------------------------------------------------------------
+
+#if AIR_PT_NRC
+// The cache's view of a vertex the light leaves towards wo.
+NrcQuery NrcMakeQuery(Surface s, float3 wo)
+{
+    float3 n = dot(s.shadingNormal, wo) > 0.0f ? s.shadingNormal : s.geometricNormal;
+    NrcQuery q;
+    q.position = s.position;
+    q.normal = NrcPackDirection(n);
+    q.direction = NrcPackDirection(wo);
+    q.roughness = NrcPackUnorm16x2(s.material.roughness, 0.0f);
+    float3 diffuse;
+    float3 specular;
+    GuideAlbedos(s.material, dot(n, wo), diffuse, specular);
+    q.diffuse = NrcPackColor(diffuse);
+    q.specular = NrcPackColor(specular);
+    return q;
+}
+#endif
+
+#if AIR_PT_VOLUME
+// The nearest real collision with any of the volumes along o + t d within [0, tMax], and the volume
+// it is in. Each volume is tracked only up to the nearest collision found so far.
+bool VolumesCollision(IntegratorParams params, float3 o, float3 d, float tMax, AIR_INOUT(uint) seed,
+                      AIR_OUT(float) tHit, AIR_OUT(VolumeData) hitVolume)
+{
+    tHit = tMax;
+    hitVolume = LoadVolume(params.volumeTable, 0u);
+    bool found = false;
+    for (uint i = 0u; i < params.volumeCount; ++i)
+    {
+        VolumeData v = LoadVolume(params.volumeTable, i);
+        float t;
+        if (VolumeCollision(v, o, d, tHit, seed, t))
+        {
+            tHit = t;
+            hitVolume = v;
+            found = true;
+        }
+    }
+    return found;
+}
+
+// The transmittance through every volume along o + t d over [0, tMax]: the product of each one's
+// estimate.
+float VolumesTransmittance(IntegratorParams params, float3 o, float3 d, float tMax, AIR_INOUT(uint) seed)
+{
+    float transmittance = 1.0f;
+    for (uint i = 0u; i < params.volumeCount && transmittance > 0.0f; ++i)
+    {
+        transmittance *= VolumeTransmittance(LoadVolume(params.volumeTable, i), o, d, tMax, seed);
+    }
+    return transmittance;
+}
+#endif
+
+// The volumes' transmittance along a shadow ray from a surface towards a triangle light, and towards
+// the sun: tracked, from their moment shadow maps, or 1 in kernels without volumes.
+float LightTransmittance(IntegratorParams params, LightTriangle light, float3 origin, float3 direction, float tMax,
+                         AIR_INOUT(uint) seed)
+{
+#if AIR_PT_VOLUME
+    return VolumesTransmittance(params, origin, direction, tMax, seed);
+#elif AIR_PT_VOLUME_SHADOWS
+    return VolumeGroupShadow(light.group, origin, origin + direction * tMax);
+#else
+    return 1.0f;
+#endif
+}
+
+// The sun's light through the clouds: from their shadow map (kFlagCloudMaps), else ratio tracking.
+float CloudSunTransmittance(IntegratorParams params, float3 origin, float3 direction, AIR_INOUT(uint) seed)
+{
+    if ((params.flags & kFlagCloudMaps) != 0u)
+    {
+        return CloudShadowMapTransmittance(params.clouds, origin, direction);
+    }
+    return CloudTransmittance(params.clouds, origin, direction, 1e30f, seed);
+}
+
+float SunTransmittance(IntegratorParams params, float3 origin, float3 direction, AIR_INOUT(uint) seed)
+{
+#if AIR_PT_VOLUME
+    return VolumesTransmittance(params, origin, direction, 1e30f, seed);
+#elif AIR_PT_VOLUME_SHADOWS
+    return VolumeSunShadow(origin);
+#else
+    return 1.0f;
+#endif
 }
 
 // --- Path ----------------------------------------------------------------------------------------
@@ -532,6 +775,16 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.gi.radianceFixed = float3(0.0f, 0.0f, 0.0f);
     result.gi.lightPdf = 0.0f;
     result.gi.weight = 0.0f;
+    result.diffuseRadiance = float3(0.0f, 0.0f, 0.0f);
+    result.specularRadiance = float3(0.0f, 0.0f, 0.0f);
+    result.reflectionDistance = 0.0f;
+    // The split: the path beyond the first vertex (from `reflectedFrom` on) by the parts of the BSDF
+    // sample it continued with. The first vertex's next event estimation is in neither: the direct
+    // light passes the denoiser (docs/architecture.md §8.14).
+    bool signals = (params.flags & kFlagSignals) != 0u;
+    bool reflected = false;
+    float3 reflectedFrom = float3(0.0f, 0.0f, 0.0f);
+    float3 diffuseShare = float3(0.0f, 0.0f, 0.0f);
 
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
     bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
@@ -563,27 +816,171 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     float3 continuationRest = float3(0.0f, 0.0f, 0.0f);
     float3 restThroughput = float3(1.0f, 1.0f, 1.0f); // from x3 on, relative to the radiance reaching x2
 
+#if AIR_PT_NRC
+    bool nrc = (params.flags & kFlagNrc) != 0u;
+    bool nrcTrain = nrc && (params.flags & kFlagNrcTrain) != 0u;
+    bool nrcUnbiased = (params.flags & kFlagNrcUnbiased) != 0u;
+    float nrcBudget = 0.0f;       // nrcSpread times the primary vertex's spread
+    float nrcSpreadRoot = 0.0f;   // sum of the square roots of the segments' spreads since then
+    float nrcSuffixRoot = 0.0f;   // the same since a training path's render query
+    bool nrcRenderDone = false;   // the pixel's radiance is complete (a training path goes on)
+    float3 nrcRenderRadiance = float3(0.0f, 0.0f, 0.0f);
+    float3 nrcRenderDirect = float3(0.0f, 0.0f, 0.0f);
+    bool nrcHasQuery = false; // the path ends in the cache: at nrcQuery, times nrcQueryThroughput
+    NrcQuery nrcQuery;
+    nrcQuery.position = float3(0.0f, 0.0f, 0.0f);
+    nrcQuery.normal = 0u;
+    nrcQuery.direction = 0u;
+    nrcQuery.roughness = 0u;
+    nrcQuery.diffuse = 0u;
+    nrcQuery.specular = 0u;
+    float3 nrcQueryThroughput = float3(0.0f, 0.0f, 0.0f);
+    uint nrcRecordCount = 0u;
+#endif
+
     float3 throughput = float3(1.0f, 1.0f, 1.0f);
     float previousBsdfPdf = 0.0f; // solid angle pdf of the BSDF sample that produced `direction`
     // The vertex that produced `direction` and how NEE chose lights there (for MIS).
     float3 previousPosition = origin;
     float3 previousNormal = float3(0.0f, 0.0f, 0.0f);
     bool previousTree = false;
+    uint events = 0u; // scattering events in the volumes so far; `bounce` counts them as vertices
 
-    for (uint bounce = 0u; bounce <= params.maxBounces; ++bounce)
+    for (uint bounce = 0u; bounce <= params.maxBounces + events; ++bounce)
     {
         HitInfo hit = TraceClosest(origin, direction, bounce);
         bool direct = bounce <= 1u;
+        if (bounce == 1u && reflected)
+        {
+            result.reflectionDistance = hit.hit ? hit.t : kMissReflectionDistance;
+        }
         bool beyondX2 = gi && bounce >= 2u; // light found here is the continuation candidate's
+
+#if AIR_PT_VOLUME
+        // The volumes: a real collision before the surface (or before the ray leaves the scene)
+        // scatters the path there, as the volume it is in does.
+        float tVolume = 0.0f;
+        VolumeData volume;
+        if (params.volumeCount > 0u &&
+            VolumesCollision(params, origin, direction, hit.hit ? hit.t : 1e30f, seed, tVolume, volume))
+        {
+            float3 p = origin + direction * tVolume;
+            float albedo = (params.flags & kFlagFurnace) != 0u ? 1.0f : volume.albedo;
+            if (bounce == 0u)
+            {
+                result.hit = true;
+                result.hitDistance = tVolume;
+                result.position = p;
+                result.normal = -direction;
+                result.material.baseColor = float3(albedo, albedo, albedo);
+                result.material.roughness = 1.0f;
+                result.material.metallic = 0.0f;
+                result.diffuseAlbedo = result.material.baseColor;
+            }
+            if (events == params.volumeEvents)
+            {
+                break; // the walk is too long: its light is lost
+            }
+            ++events;
+            result.bounces = bounce + 1u;
+            throughput *= albedo;
+            bool lightTree = bounce < params.lightTreeBounces;
+            if (useNee)
+            {
+                // One point on one emissive triangle, through the volumes and past the surfaces.
+                float uLight = Rand(seed);
+                float uAlias = Rand(seed);
+                float2 uPoint = Rand2(seed);
+                LightTriangle light = LoadLight(0u);
+                float pmf = 0.0f;
+                if (lightTree)
+                {
+                    LightChoice choice = SampleLightTree(p, float3(0.0f, 0.0f, 0.0f), uLight);
+                    if (choice.light != kInvalidIndex)
+                    {
+                        light = LoadLight(choice.light);
+                        pmf = choice.pmf;
+                    }
+                }
+                else
+                {
+                    light = SampleLight(uLight, uAlias, params.lightCount);
+                    pmf = light.probability;
+                }
+                float2 b = SampleTriangle(uPoint);
+                float3 toLight = light.p0 + light.e1 * b.x + light.e2 * b.y - p;
+                float dist = length(toLight);
+                float3 wi = toLight / dist;
+                float cosLight = dot(-wi, normalize(cross(light.e1, light.e2)));
+                float lightPdf = pmf > 0.0f ? LightPdf(pmf, light.area, dist, cosLight) : 0.0f;
+                if (lightPdf > 0.0f && TraceVisible(p, wi, dist * (1.0f - 1e-4f)))
+                {
+                    float phase = VolumePhase(volume, dot(direction, wi));
+                    float transmittance = VolumesTransmittance(params, p, wi, dist, seed);
+                    float3 contribution =
+                        throughput * light.radiance * (phase * transmittance * PowerHeuristic(lightPdf, phase) / lightPdf);
+                    result.radiance += contribution;
+                    if (bounce == 0u)
+                    {
+                        result.directRadiance += contribution;
+                    }
+                }
+            }
+            if (sunNee)
+            {
+                float3 wi = SampleSunDirection(params.sky, Rand2(seed));
+                if (TraceVisible(p, wi, 1e30f))
+                {
+                    float phase = VolumePhase(volume, dot(direction, wi));
+                    // One estimate after the other: the operands of * are unsequenced in C++.
+                    float transmittance = VolumesTransmittance(params, p, wi, 1e30f, seed);
+                    transmittance *= CloudSunTransmittance(params, p, wi, seed);
+                    float3 contribution = throughput * params.sky.sunRadiance *
+                                          (phase * transmittance * PowerHeuristic(sunPdf, phase) / sunPdf);
+                    result.radiance += contribution;
+                    if (bounce == 0u)
+                    {
+                        result.directRadiance += contribution;
+                    }
+                }
+            }
+            // Continue along a direction the phase function chose.
+            float3 next = SampleVolumePhase(volume, direction, Rand2(seed));
+            if (bounce == 0u)
+            {
+                reflected = true; // a medium reflects like a diffuse surface
+                reflectedFrom = result.radiance;
+                diffuseShare = float3(1.0f, 1.0f, 1.0f);
+            }
+            previousBsdfPdf = VolumePhase(volume, dot(direction, next));
+            previousPosition = p;
+            previousNormal = float3(0.0f, 0.0f, 0.0f);
+            previousTree = lightTree;
+            origin = p;
+            direction = next;
+            float survive = MaxComponent(throughput) * 4.0f;
+            if (survive < 1.0f)
+            {
+                if (Rand(seed) >= survive)
+                {
+                    break;
+                }
+                throughput /= survive;
+            }
+            continue;
+        }
+#endif
         // Misses go on through the clouds; a ray from above their base (only the camera's) may meet
         // them before its surface.
         Escape escape;
         escape.sun = float3(0.0f, 0.0f, 0.0f);
         escape.rest = float3(0.0f, 0.0f, 0.0f);
         escape.surface = true;
-        if (!hit.hit || (params.clouds.enabled != 0u && origin.y > params.clouds.bottom))
+        bool cloudMaps = (params.flags & kFlagCloudMaps) != 0u;
+        if (!hit.hit || (params.clouds.enabled != 0u && origin.y > params.clouds.bottom && !cloudMaps))
         {
-            escape = EscapeRadiance(params, origin, direction, hit.hit ? hit.t : 1e30f, seed);
+            bool camera = bounce == 0u && (params.flags & kFlagProbe) == 0u;
+            escape = EscapeRadiance(params, origin, direction, hit.hit ? hit.t : 1e30f, camera, seed);
         }
         if (!hit.hit || !escape.surface)
         {
@@ -601,6 +998,12 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             else
             {
                 float sunWeight = bounce > 0u ? PowerHeuristic(previousBsdfPdf, sunPdf) : 1.0f;
+#if AIR_PT_PROBE
+                if (bounce == 0u && (params.flags & kFlagProbe) != 0u)
+                {
+                    sunWeight = 0.0f; // a probe's direct sunlight: the march's own
+                }
+#endif
                 float3 environment = sky + sun * sunWeight;
                 if (beyondX2)
                 {
@@ -617,7 +1020,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             }
             break;
         }
-        Surface s = LoadSurface(hit, direction, params);
+        Surface s = LoadSurface(hit, direction, params, bounce == 0u ? kSurfaceDetail : kSurfaceCoarse);
         if (bounce == 0u)
         {
             result.hit = true;
@@ -625,8 +1028,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             result.position = s.position;
             result.normal = s.shadingNormal;
             result.material = s.material;
-            result.diffuseAlbedo = DiffuseAlbedo(s.material);
-            result.specularAlbedo = SpecularAlbedo(s.material, saturate(dot(s.shadingNormal, -direction)));
+            GuideAlbedos(s.material, dot(s.shadingNormal, -direction), result.diffuseAlbedo, result.specularAlbedo);
             result.instance = hit.instance;
             result.primitive = hit.primitive;
             result.barycentrics = hit.barycentrics;
@@ -641,7 +1043,14 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
 
         // Emission found by the BSDF sample, weighted against NEE having found it.
-        if (any(s.emission) && !(restir && bounce == 1u))
+        bool emits = any(s.emission) && !(restir && bounce == 1u);
+#if AIR_PT_PROBE
+        if (emits && bounce == 0u && (params.flags & kFlagProbe) != 0u)
+        {
+            emits = !VolumeExplicitGroup(LoadLight(s.lightIndex).group); // the march's own light
+        }
+#endif
+        if (emits)
         {
             float weight = 1.0f;
             float lightPdf = 0.0f;
@@ -673,7 +1082,70 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 }
             }
         }
-        if (bounce == params.maxBounces || (gi && !recordGi && bounce == 1u))
+#if AIR_PT_NRC
+        if (nrc)
+        {
+            // The footprint's spread (Mueller et al. 2021, section 3.4): at the primary vertex as if the
+            // camera emitted uniformly in all directions, beyond it the square of the sum of every
+            // segment's square root.
+            float cosHit = max(abs(dot(direction, s.geometricNormal)), 1e-4f);
+            if (bounce == 0u)
+            {
+                nrcBudget = params.nrcSpread * hit.t * hit.t / (4.0f * kPi * cosHit);
+            }
+            else
+            {
+                float root = sqrt(hit.t * hit.t / (max(previousBsdfPdf, 1e-12f) * cosHit));
+                nrcSpreadRoot += root;
+                nrcSuffixRoot += root;
+            }
+            bool last = bounce == params.maxBounces + events;
+            float3 wo = -direction;
+            bool tail = false;
+            if (!nrcRenderDone && (last || (bounce > 0u && nrcSpreadRoot * nrcSpreadRoot > nrcBudget)))
+            {
+                nrcRenderDone = true;
+                if (!nrcTrain)
+                {
+                    nrcQuery = NrcMakeQuery(s, wo);
+                    nrcQueryThroughput = throughput;
+                    nrcHasQuery = true;
+                    break;
+                }
+                NrcDeferQuery(NrcMakeQuery(s, wo), throughput);
+                nrcRenderRadiance = result.radiance;
+                nrcRenderDirect = result.directRadiance;
+                nrcSuffixRoot = 0.0f;
+                tail = last;
+            }
+            else if (nrcRenderDone && (last || (!nrcUnbiased && nrcSuffixRoot * nrcSuffixRoot > nrcBudget)))
+            {
+                tail = true;
+            }
+            if (tail)
+            {
+                // The training suffix ends in the cache too (self-training).
+                nrcQuery = NrcMakeQuery(s, wo);
+                nrcQueryThroughput = throughput;
+                nrcHasQuery = true;
+                break;
+            }
+            // What this vertex reflects is a training sample (at the first vertex only when its
+            // direct light is part of the path, not ReSTIR DI's).
+            if (nrcTrain && nrcRecordCount < params.nrcRecords && (bounce > 0u || !restir))
+            {
+                NrcTrainingRecord record;
+                record.query = NrcMakeQuery(s, wo);
+                record.value = result.radiance;
+                record.valid = 0u;
+                record.throughput = throughput;
+                record.pad = 0u;
+                NrcWriteRecord(params.nrcSlot + nrcRecordCount, record);
+                ++nrcRecordCount;
+            }
+        }
+#endif
+        if (bounce == params.maxBounces + events || (gi && !recordGi && bounce == 1u))
         {
             break;
         }
@@ -690,6 +1162,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         // The BSDF is prepared per call below: keeping a BsdfContext alive across the shadow ray
         // costs registers, which measured slower than repeating its cached LUT lookups.
         float3 woLocal = ToLocal(frame, wo);
+        float3 ngLocal = ToLocal(frame, ng);
         float3 rayOrigin = OffsetRayOrigin(s.position, ng);
         bool lightTree = bounce < params.lightTreeBounces;
 
@@ -724,11 +1197,12 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             float cosLight = dot(-wi, lightNormal);
             if (pmf > 0.0f && cosLight > 0.0f && dot(wi, ng) > 0.0f)
             {
-                BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
+                BsdfEval e = EvaluateSurfaceBsdf(s.material, woLocal, ngLocal, ToLocal(frame, wi));
                 float lightPdf = LightPdf(pmf, light.area, dist, cosLight);
                 if (any(e.fCos) && lightPdf > 0.0f && TraceVisible(rayOrigin, wi, dist * (1.0f - 1e-4f)))
                 {
-                    float weight = PowerHeuristic(lightPdf, e.pdf);
+                    float weight =
+                        PowerHeuristic(lightPdf, e.pdf) * LightTransmittance(params, light, rayOrigin, wi, dist, seed);
                     float3 contribution = throughput * e.fCos * light.radiance * (weight / lightPdf);
                     if (gi && bounce == 1u)
                     {
@@ -766,11 +1240,13 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             float3 wi = SampleSunDirection(params.sky, uSun);
             if (dot(wi, ng) > 0.0f)
             {
-                BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
+                BsdfEval e = EvaluateSurfaceBsdf(s.material, woLocal, ngLocal, ToLocal(frame, wi));
                 if (any(e.fCos) && TraceVisible(rayOrigin, wi, 1e30f))
                 {
-                    float3 sunRadiance =
-                        params.sky.sunRadiance * CloudTransmittance(params.clouds, rayOrigin, wi, 1e30f, seed);
+                    // One estimate after the other: the operands of * are unsequenced in C++.
+                    float transmittance = CloudSunTransmittance(params, rayOrigin, wi, seed);
+                    transmittance *= SunTransmittance(params, rayOrigin, wi, seed);
+                    float3 sunRadiance = params.sky.sunRadiance * transmittance;
                     float weight = PowerHeuristic(sunPdf, e.pdf);
                     float3 contribution = throughput * e.fCos * sunRadiance * (weight / sunPdf);
                     if (gi && bounce == 1u)
@@ -804,7 +1280,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         // Continue the path by sampling the BSDF.
         float uLobe = Rand(seed);
         float2 u = Rand2(seed);
-        BsdfSample bs = SampleBsdf(s.material, woLocal, uLobe, u);
+        BsdfSample bs = SampleSurfaceBsdf(s.material, woLocal, ngLocal, uLobe, u);
         if (!bs.valid)
         {
             break;
@@ -815,6 +1291,13 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             break; // shading normal sent the ray into the surface
         }
         throughput *= bs.weight;
+        if (bounce == 0u)
+        {
+            reflected = true;
+            reflectedFrom = result.radiance;
+            // diffuseWeight is 0 wherever weight is.
+            diffuseShare = bs.diffuseWeight / max(bs.weight, float3(1e-30f, 1e-30f, 1e-30f));
+        }
         if (gi && bounce == 0u)
         {
             firstBsdfPdf = bs.pdf;
@@ -885,6 +1368,45 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 result.gi.weight = total / (wContinuation * x2AreaPdf * continuationPdf);
             }
         }
+    }
+#if AIR_PT_NRC
+    // Every thread predicts, those without a query on a dummy one: the matrix units then see whole
+    // waves, and the linear algebra driver tested here returned NaN for some threads of a call made
+    // only by the threads with a query (after this loop's breaks).
+    float3 nrcPrediction = NrcPredict(nrcQuery);
+    if (nrcHasQuery)
+    {
+        result.radiance += nrcQueryThroughput * nrcPrediction;
+    }
+    if (nrcTrain)
+    {
+        // Every record's target: what the rest of the path found (the cache's prediction at its end
+        // included) per unit of throughput up to the vertex. Records the path did not reach are
+        // marked invalid (the slots hold an earlier frame's).
+        for (uint i = 0u; i < params.nrcRecords; ++i)
+        {
+            NrcTrainingRecord record = NrcReadRecord(params.nrcSlot + i);
+            float3 t = record.throughput;
+            bool valid = i < nrcRecordCount && min(t.x, min(t.y, t.z)) > 1e-12f;
+            float3 reflected = result.radiance - record.value;
+            record.value = valid ? float3(max(reflected.x, 0.0f) / t.x, max(reflected.y, 0.0f) / t.y,
+                                          max(reflected.z, 0.0f) / t.z)
+                                 : float3(0.0f, 0.0f, 0.0f);
+            record.valid = valid ? 1u : 0u;
+            NrcWriteRecord(params.nrcSlot + i, record);
+        }
+        if (nrcRenderDone)
+        {
+            result.radiance = nrcRenderRadiance;
+            result.directRadiance = nrcRenderDirect;
+        }
+    }
+#endif
+    if (signals && reflected)
+    {
+        float3 rest = result.radiance - reflectedFrom;
+        result.diffuseRadiance += rest * diffuseShare;
+        result.specularRadiance += rest * (1.0f - diffuseShare);
     }
     return result;
 }

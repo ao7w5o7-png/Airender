@@ -6,10 +6,15 @@
 #
 #   SDK                         Version         Override               Used by
 #   DirectX 12 Agility SDK      1.619.6         AIR_AGILITY_SDK_DIR    D3D12 backend (headers + D3D12Core.dll)
+#     preview (AIR_D3D12_PREVIEW) 1.721.3-preview                      the same, with SM 6.10 linear algebra
 #   DirectX Shader Compiler     1.9.2609.5      AIR_DXC_EXECUTABLE     HLSL -> DXIL / SPIR-V at build time
+#     preview (AIR_D3D12_PREVIEW) 1.10.2605.37-preview AIR_DXC_PREVIEW_EXECUTABLE  cs_6_10 shaders only
 #   Dear ImGui (docking)        1.93.0          AIR_IMGUI_DIR          editor
 #   NVIDIA DLSS SDK             310.9.1         AIR_DLSS_SDK_DIR       dlss feature (Ray Reconstruction)
+#   NVIDIA NRD (+ ShaderMake, MathLib) 4.18.0   AIR_NRD_DIR            nrd feature (denoisers), built from source
+#   NVIDIA RTXNTC (LibNTC)      0.10.0 beta                            neural texture compression (loaded at run time)
 #   Microsoft WebView2 SDK      1.0.4314.35     AIR_WEBVIEW2_SDK_DIR   editor's HTML profiler panel (Windows)
+#   ufbx, cgltf, stb_image      0.23.1, 1.15                           scenes made from model files (FBX, OBJ, glTF)
 #
 # Targets / functions defined here:
 #   air_agility_sdk               INTERFACE: Agility SDK headers (must win over the Windows SDK ones)
@@ -26,8 +31,23 @@ set(AIR_AGILITY_SDK_VERSION 1.619.6)
 set(AIR_AGILITY_SDK_SHA256 08f0489281401aa430fc37322d6c3fc98a8025175aacd714c10d562f4963f1e9)
 set(AIR_DXC_VERSION 1.9.2609.5)
 set(AIR_DXC_SHA256 73cfa082245918c2cc1ec6740250eb7377e83a757b3b3a3e16e0d71535bfbfc3)
+# Shader Model 6.10 (dx/linalg.h) is preview only: the preview runtime, an experimental feature that
+# needs Windows Developer Mode, and the preview compiler for the shaders that use it.
+set(AIR_AGILITY_SDK_PREVIEW_VERSION 1.721.3-preview)
+set(AIR_AGILITY_SDK_PREVIEW_SHA256 0131bce1e4bace3fc08c03018c29a09ede2570b263721c6449b0ec75762ab22d)
+set(AIR_DXC_PREVIEW_VERSION 1.10.2605.37-preview)
+set(AIR_DXC_PREVIEW_SHA256 8cf5ec1a8abb832de43251bae1ffcec89b22240677c599c38d30a18dee2f4de6)
 set(AIR_IMGUI_TAG v1.93.0-docking)
 set(AIR_DLSS_TAG v310.9.1)
+set(AIR_NRD_TAG v4.18.0)
+set(AIR_SHADERMAKE_COMMIT 3f01623a76b092ac127d2debd79a672f55d77665) # NRD v4.18.0's
+set(AIR_MATHLIB_TAG v11)                                             # NRD v4.18.0's
+set(AIR_NTC_TAG v0.10.0-beta)
+set(AIR_NTC_RELEASE v0.10.0b)
+set(AIR_NTC_LIBRARY_COMMIT 35ec039503ef5e151c661beccc82390948dd5218) # RTXNTC v0.10.0-beta's
+set(AIR_UFBX_TAG v0.23.1)
+set(AIR_CGLTF_TAG v1.15)
+set(AIR_STB_COMMIT a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d)
 set(AIR_WEBVIEW2_VERSION 1.0.4314.35)
 set(AIR_WEBVIEW2_SHA256 90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4)
 
@@ -92,13 +112,23 @@ endfunction()
 # ---------------------------------------------------------------------------
 if(AIR_RHI_D3D12)
     set(AIR_AGILITY_SDK_DIR "" CACHE PATH "Local Agility SDK (unpacked Microsoft.Direct3D.D3D12 package)")
-    if(NOT AIR_AGILITY_SDK_DIR)
-        air_fetch_nuget(Microsoft.Direct3D.D3D12 ${AIR_AGILITY_SDK_VERSION} ${AIR_AGILITY_SDK_SHA256} agilityDir)
+    # Only a directory outside the download cache overrides the download (earlier configures cached the
+    # downloaded one here, which must follow AIR_D3D12_PREVIEW).
+    set(agilityDir "${AIR_AGILITY_SDK_DIR}")
+    string(FIND "${agilityDir}" "${AIR_DEPS_DIR}/" inDeps)
+    if(NOT agilityDir OR inDeps EQUAL 0)
+        if(AIR_D3D12_PREVIEW)
+            air_fetch_nuget(Microsoft.Direct3D.D3D12 ${AIR_AGILITY_SDK_PREVIEW_VERSION}
+                            ${AIR_AGILITY_SDK_PREVIEW_SHA256} agilityDir)
+        else()
+            air_fetch_nuget(Microsoft.Direct3D.D3D12 ${AIR_AGILITY_SDK_VERSION} ${AIR_AGILITY_SDK_SHA256} agilityDir)
+        endif()
         if(NOT agilityDir)
             message(FATAL_ERROR "Airender: could not download the Agility SDK; set AIR_AGILITY_SDK_DIR")
         endif()
         set(AIR_AGILITY_SDK_DIR "${agilityDir}" CACHE PATH "" FORCE)
     endif()
+    message(STATUS "Airender: Agility SDK ${AIR_AGILITY_SDK_DIR}")
     add_library(air_agility_sdk INTERFACE)
     target_include_directories(air_agility_sdk BEFORE INTERFACE "${AIR_AGILITY_SDK_DIR}/build/native/include")
 
@@ -110,7 +140,11 @@ if(AIR_RHI_D3D12)
 #include <d3d12.h>
 extern "C"
 {
+#ifdef D3D12_PREVIEW_SDK_VERSION // a preview runtime announces its own version
+__declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_PREVIEW_SDK_VERSION;
+#else
 __declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION;
+#endif
 __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 }
 ]])
@@ -152,6 +186,24 @@ if(AIR_DXC_EXECUTABLE)
     message(STATUS "Airender: shaders compiled with ${AIR_DXC_EXECUTABLE}")
 else()
     message(STATUS "Airender: dxc not found, shaders are not compiled (the Null backend does not need them)")
+endif()
+
+# The preview compiler, for the shaders that target Shader Model 6.10 (`// air-shader-target: cs_6_10`);
+# without it they are not built and the features that use them fall back to their portable kernels.
+set(AIR_DXC_PREVIEW_EXECUTABLE "" CACHE FILEPATH "dxc for Shader Model 6.10 shaders (empty: download with AIR_D3D12_PREVIEW)")
+set(AIR_DXC_PREVIEW_INCLUDE "" CACHE PATH "Directory holding dx/linalg.h for the preview dxc")
+if(AIR_D3D12_PREVIEW AND NOT AIR_DXC_PREVIEW_EXECUTABLE AND CMAKE_HOST_WIN32)
+    air_fetch_nuget(Microsoft.Direct3D.DXC ${AIR_DXC_PREVIEW_VERSION} ${AIR_DXC_PREVIEW_SHA256} dxcPreviewDir)
+    if(dxcPreviewDir)
+        set(AIR_DXC_PREVIEW_EXECUTABLE "${dxcPreviewDir}/build/native/bin/x64/dxc.exe" CACHE FILEPATH "" FORCE)
+        set(AIR_DXC_PREVIEW_INCLUDE "${dxcPreviewDir}/build/native/include/hlsl" CACHE PATH "" FORCE)
+    endif()
+endif()
+if(NOT AIR_D3D12_PREVIEW OR NOT AIR_RHI_D3D12)
+    set(AIR_DXC_PREVIEW_EXECUTABLE "") # the shaders it compiles need the preview runtime
+endif()
+if(AIR_DXC_PREVIEW_EXECUTABLE)
+    message(STATUS "Airender: Shader Model 6.10 shaders compiled with ${AIR_DXC_PREVIEW_EXECUTABLE}")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -247,6 +299,148 @@ if(AIR_WITH_DLSS)
         set(AIR_WITH_DLSS OFF CACHE BOOL "" FORCE)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# NVIDIA Real-time Denoisers (NRD), built from source with its shaders compiled to DXIL by ShaderMake
+# with our dxc. Its own dependencies (ShaderMake, MathLib) are downloaded here too, at the commits its
+# CMakeLists.txt names, and handed to its FetchContent declarations.
+# ---------------------------------------------------------------------------
+# Downloads a GitHub archive (a zip of one top-level folder) and extracts it. Sets <outVar> to that
+# folder or "".
+function(air_fetch_github_archive url name outVar)
+    set(dir "${AIR_DEPS_DIR}/${name}")
+    if(NOT EXISTS "${dir}/.complete")
+        file(MAKE_DIRECTORY "${AIR_DEPS_DIR}")
+        air_download("${url}" "${dir}.zip" ok)
+        if(NOT ok)
+            set(${outVar} "" PARENT_SCOPE)
+            return()
+        endif()
+        file(REMOVE_RECURSE "${dir}")
+        file(ARCHIVE_EXTRACT INPUT "${dir}.zip" DESTINATION "${dir}")
+        file(TOUCH "${dir}/.complete")
+    endif()
+    file(GLOB top LIST_DIRECTORIES true "${dir}/*")
+    list(FILTER top EXCLUDE REGEX "\\.complete$")
+    list(GET top 0 root)
+    set(${outVar} "${root}" PARENT_SCOPE)
+endfunction()
+
+if(AIR_WITH_NRD)
+    set(AIR_NRD_DIR "" CACHE PATH "Local NRD source (github.com/NVIDIA-RTX/NRD)")
+    set(nrdDir "${AIR_NRD_DIR}")
+    if(NOT nrdDir)
+        air_fetch_github_archive("https://github.com/NVIDIA-RTX/NRD/archive/refs/tags/${AIR_NRD_TAG}.zip"
+                                 nrd-${AIR_NRD_TAG} nrdDir)
+    endif()
+    air_fetch_github_archive(
+        "https://github.com/NVIDIA-RTX/ShaderMake/archive/${AIR_SHADERMAKE_COMMIT}.zip"
+        shadermake-${AIR_SHADERMAKE_COMMIT} shaderMakeDir)
+    air_fetch_github_archive("https://github.com/NVIDIA-RTX/MathLib/archive/refs/tags/${AIR_MATHLIB_TAG}.zip"
+                             mathlib-${AIR_MATHLIB_TAG} mathLibDir)
+    if(nrdDir AND shaderMakeDir AND mathLibDir AND AIR_DXC_EXECUTABLE AND EXISTS "${nrdDir}/Include/NRD.h")
+        set(FETCHCONTENT_SOURCE_DIR_SHADERMAKE "${shaderMakeDir}" CACHE PATH "" FORCE)
+        set(FETCHCONTENT_SOURCE_DIR_MATHLIB "${mathLibDir}" CACHE PATH "" FORCE)
+        set(SHADERMAKE_FIND_COMPILERS OFF CACHE BOOL "" FORCE)
+        set(SHADERMAKE_DXC_PATH "${AIR_DXC_EXECUTABLE}" CACHE INTERNAL "")
+        set(NRD_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_DXIL_SHADERS ON CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_SPIRV_SHADERS OFF CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_DXBC_SHADERS OFF CACHE BOOL "" FORCE)
+        # NRD's recommended encoding (octahedral R10G10B10A2, linear roughness): the nrd feature packs the
+        # path tracer's guide into it (the RGBA16 encodings do not compile with this dxc).
+        set(NRD_NORMAL_ENCODING 2 CACHE STRING "" FORCE)
+        set(NRD_ROUGHNESS_ENCODING 1 CACHE STRING "" FORCE)
+        set(NRD_SHADERS_PATH "${CMAKE_BINARY_DIR}/nrd/Shaders" CACHE STRING "" FORCE)
+        add_subdirectory("${nrdDir}" "${CMAKE_BINARY_DIR}/nrd" EXCLUDE_FROM_ALL SYSTEM)
+        set(AIR_NRD_SHADER_INCLUDE "${nrdDir}/Shaders" CACHE INTERNAL "") # NRD.hlsli, for our own passes
+        message(STATUS "Airender: NRD ${nrdDir}")
+    else()
+        message(WARNING "Airender: NRD not available, building without the nrd feature")
+        set(AIR_WITH_NRD OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# NVIDIA RTX Neural Texture Compression (LibNTC): the prebuilt library of the SDK release (its
+# compression runs on CUDA through the driver: no CUDA toolkit needed), and its headers and inference
+# shaders from RTXNTC-Library at the commit that release pins. The library is loaded at run time
+# (renderer/NeuralTextures.cpp), so nothing links against it.
+# ---------------------------------------------------------------------------
+if(AIR_WITH_NTC)
+    set(ntcDir "${AIR_DEPS_DIR}/rtxntc-${AIR_NTC_TAG}")
+    if(NOT EXISTS "${ntcDir}/.complete")
+        air_download("https://github.com/NVIDIA-RTX/RTXNTC/releases/download/${AIR_NTC_TAG}/RTXNTC_windows_x64_${AIR_NTC_RELEASE}.zip"
+                     "${ntcDir}.zip" ok)
+        if(ok)
+            file(ARCHIVE_EXTRACT INPUT "${ntcDir}.zip" DESTINATION "${ntcDir}"
+                 PATTERNS "bin/windows-x64/libntc.dll" "LICENSE.txt")
+            file(REMOVE "${ntcDir}.zip") # 180 MB of samples and assets besides the library
+            file(TOUCH "${ntcDir}/.complete")
+        endif()
+    endif()
+    air_fetch_github_files(NVIDIA-RTX/RTXNTC-Library ${AIR_NTC_LIBRARY_COMMIT} ntc-library ntcLibraryDir
+        include/libntc/ntc.h include/libntc/wrappers.h include/libntc/shaders/InferenceConstants.h
+        include/libntc/shaders/Inference.hlsli include/libntc/shaders/InferenceCoopVec.hlsli
+        include/libntc/shaders/ColorSpaces.hlsli)
+    if(EXISTS "${ntcDir}/bin/windows-x64/libntc.dll" AND ntcLibraryDir)
+        add_library(air_ntc INTERFACE)
+        target_include_directories(air_ntc SYSTEM INTERFACE "${ntcLibraryDir}/include")
+        target_compile_definitions(air_ntc INTERFACE AIR_WITH_NTC=1)
+        set(AIR_NTC_DLL "${ntcDir}/bin/windows-x64/libntc.dll" CACHE INTERNAL "")
+        set(AIR_NTC_SHADER_INCLUDE "${ntcLibraryDir}/include" CACHE INTERNAL "") # libntc/shaders/*.hlsli
+        message(STATUS "Airender: LibNTC ${AIR_NTC_TAG}")
+    else()
+        message(WARNING "Airender: LibNTC not available, building without neural texture compression")
+        set(AIR_WITH_NTC OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Model files (renderer/SceneFiles.cpp: the scenes made from downloaded assets, docs/architecture.md
+# §8.18): ufbx reads FBX and OBJ, cgltf glTF, stb_image the PNG, JPEG and TGA textures. Single-file
+# libraries compiled into one static library without our warnings.
+# ---------------------------------------------------------------------------
+if(AIR_WITH_MODEL_FILES)
+    air_fetch_github_files(ufbx/ufbx ${AIR_UFBX_TAG} ufbx ufbxDir ufbx.c ufbx.h)
+    air_fetch_github_files(jkuhlmann/cgltf ${AIR_CGLTF_TAG} cgltf cgltfDir cgltf.h)
+    air_fetch_github_files(nothings/stb ${AIR_STB_COMMIT} stb stbDir stb_image.h)
+    if(ufbxDir AND cgltfDir AND stbDir)
+        set(implementation "${CMAKE_BINARY_DIR}/generated/ModelLibraries.c")
+        file(WRITE "${implementation}.in" [[
+// Generated by cmake/AirThirdParty.cmake: the implementations of the single-file model libraries.
+#define CGLTF_IMPLEMENTATION
+#include "cgltf.h"
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_TGA
+#include "stb_image.h"
+]])
+        configure_file("${implementation}.in" "${implementation}" COPYONLY)
+        add_library(air_model_files STATIC "${ufbxDir}/ufbx.c" "${implementation}")
+        target_include_directories(air_model_files SYSTEM PUBLIC "${ufbxDir}" "${cgltfDir}" "${stbDir}")
+        target_compile_definitions(air_model_files PUBLIC AIR_WITH_MODEL_FILES=1)
+        if(MSVC)
+            target_compile_options(air_model_files PRIVATE /W0)
+        else()
+            target_compile_options(air_model_files PRIVATE -w)
+        endif()
+        set_target_properties(air_model_files PROPERTIES POSITION_INDEPENDENT_CODE ON)
+        message(STATUS "Airender: model files with ufbx ${AIR_UFBX_TAG}, cgltf ${AIR_CGLTF_TAG}, stb_image")
+    else()
+        message(WARNING "Airender: could not download the model file libraries; building without file scenes")
+        set(AIR_WITH_MODEL_FILES OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
+function(air_target_ntc_runtime target)
+    if(TARGET air_ntc)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AIR_NTC_DLL}" "$<TARGET_FILE_DIR:${target}>/"
+            VERBATIM)
+    endif()
+endfunction()
 
 function(air_target_dlss_runtime target)
     if(TARGET air_dlss)

@@ -43,8 +43,11 @@ struct CloudData
     float wDraine;
     uint majorants;  // bindless StructuredBuffer<float> (GPU only)
     float sharpness; // the eroded density times this, clamped to 1: crisp outlines, even interiors
-    uint pad0;
-    uint pad1;
+    // The real-time clouds' maps (GPU only; pathtracer's CloudMaps.hlsli): the optical depth along the
+    // sun from the base up (Texture2D<float> over the tile, wrapping), and what the clouds add to and
+    // leave of the sky seen from the camera (Texture2D<float4>, the upper hemisphere).
+    uint shadowMap;
+    uint skyMap;
 };
 
 #ifdef __cplusplus

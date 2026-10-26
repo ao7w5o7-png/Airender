@@ -17,7 +17,7 @@ Resources:
   tex FrameOutput (imported) passes [1, 1] final SRVCompute
   tex Example.Pattern (transient) passes [0, 1] heap offset 0 size 65536
 === frame 0 commands
-[Compute] Wait Graphics fence 2
+[Compute] Wait Graphics fence 3
 [Compute] Barrier [tex 'Example.Pattern' None -> UAVCompute discard]
 [Compute] BeginEvent 'Example.Generate'
 [Compute] SetPipeline pipeline 'Example.Generate'

@@ -66,6 +66,7 @@ private:
     struct Shader
     {
         std::string name; // "<feature>/<output file>"
+        std::filesystem::path compiler;
         std::filesystem::path source;
         std::filesystem::path output;
         std::vector<std::string> arguments;
@@ -81,7 +82,6 @@ private:
     void StartCompile();
     void Compile(std::vector<size_t> shaders, bool sharedChanged);
 
-    std::filesystem::path mCompiler;
     std::vector<Shader> mShaders;
     std::vector<WatchedFile> mFiles;
     std::string mUnavailableReason;

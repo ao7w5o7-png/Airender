@@ -71,6 +71,7 @@ struct NullBuffer
     bool placed = false;
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
+    BindlessIndex cbv = kInvalidBindless;
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
@@ -154,7 +155,7 @@ public:
 
     void Barriers(std::span<const Barrier> barriers) override;
     void CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size) override;
-    void CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) override;
+    void CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset) override;
     void CopyTexture(TextureHandle dst, TextureHandle src) override;
     void CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) override;
     void ClearTexture(TextureHandle texture, const float color[4]) override;
@@ -176,6 +177,7 @@ public:
     }
     void BuildBlas(AccelStructHandle blas, BufferHandle scratch) override;
     void BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) override;
+    void ConvertMatrices(std::span<const MatrixConversion> conversions) override;
     void BeginRenderPass(TextureHandle target, const float* clearColor) override;
     void EndRenderPass() override
     {
@@ -256,7 +258,8 @@ class NullDevice final : public Device
 public:
     explicit NullDevice(const DeviceDesc& desc) : mDesc(desc), mAllocator(mHeapProvider)
     {
-        mCaps.rayTracing = true; // pretend, so ray tracing code paths can be exercised headless
+        mCaps.rayTracing = true;    // pretend, so ray tracing code paths can be exercised headless
+        mCaps.linearAlgebra = true; // likewise for the matrix conversions of neural network passes
         mCaps.bindless = true;
         mCaps.rebar = true;
         mCaps.dedicatedVideoMemory = 8ull << 30;
@@ -314,6 +317,7 @@ public:
                 }
                 ReleaseBindless(buffer->srv);
                 ReleaseBindless(buffer->uav);
+                ReleaseBindless(buffer->cbv);
                 ForgetState(StateKey(handle));
                 mBuffers.Free(handle);
             });
@@ -464,6 +468,16 @@ public:
         AIR_CHECK(b, "GetBindlessUAV: invalid buffer");
         return LazyBindless(b->uav);
     }
+    BindlessIndex GetBindlessCBV(BufferHandle handle) override
+    {
+        NullBuffer* b = mBuffers.Get(handle);
+        AIR_CHECK(b, "GetBindlessCBV: invalid buffer");
+        AIR_CHECK(Any(b->desc.usage & BufferUsage::Constant) && b->desc.size % 256 == 0 && b->desc.size <= 65536,
+                  "buffer '{}' needs Constant usage and a size of a multiple of 256 up to 64 KiB for a constant buffer "
+                  "view",
+                  b->desc.debugName);
+        return LazyBindless(b->cbv);
+    }
     BindlessIndex GetBindlessSRV(AccelStructHandle handle) override
     {
         NullAccelStruct* as = mAccelStructs.Get(handle);
@@ -511,6 +525,10 @@ public:
                 }
                 mAccelStructs.Free(handle);
             });
+    }
+    u64 GetMatrixSize(u32 rows, u32 columns, MatrixType type, MatrixLayout layout, u32 stride) override
+    {
+        return PackedMatrixSize(rows, columns, type, layout, stride);
     }
     u64 GetAccelStructScratchSize(AccelStructHandle handle) override
     {
@@ -990,10 +1008,12 @@ void NullCommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle s
     Record(std::format("CopyBuffer {}+{} <- {}+{} ({} bytes)", mDevice.Describe(dst), dstOffset, mDevice.Describe(src),
                        srcOffset, size));
 }
-void NullCommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset)
+void NullCommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset)
 {
-    Record(std::format("CopyBufferToTexture {} mip {} <- {}+{}", mDevice.Describe(dst), mip, mDevice.Describe(src),
-                       srcOffset));
+    Record(layer == 0 ? std::format("CopyBufferToTexture {} mip {} <- {}+{}", mDevice.Describe(dst), mip,
+                                    mDevice.Describe(src), srcOffset)
+                      : std::format("CopyBufferToTexture {} mip {} layer {} <- {}+{}", mDevice.Describe(dst), mip,
+                                    layer, mDevice.Describe(src), srcOffset));
 }
 void NullCommandList::CopyTexture(TextureHandle dst, TextureHandle src)
 {
@@ -1033,6 +1053,18 @@ void NullCommandList::BuildTlas(AccelStructHandle tlas, std::span<const TlasInst
 {
     Record(std::format("BuildTlas {} instances {} scratch {}", mDevice.Describe(tlas), instances.size(),
                        mDevice.Describe(scratch)));
+}
+void NullCommandList::ConvertMatrices(std::span<const MatrixConversion> conversions)
+{
+    for (const MatrixConversion& c : conversions)
+    {
+        AIR_CHECK(mDevice.IsValid(c.src) && mDevice.IsValid(c.dst), "ConvertMatrices: invalid buffer");
+        AIR_CHECK(c.srcOffset % 128 == 0 && c.dstOffset % 128 == 0,
+                  "ConvertMatrices: offsets must be 128-byte aligned");
+        Record(std::format("ConvertMatrix {}x{} {}+{} {} <- {}+{} {}", c.rows, c.columns, mDevice.Describe(c.dst),
+                           c.dstOffset, ToString(c.dstLayout), mDevice.Describe(c.src), c.srcOffset,
+                           ToString(c.srcLayout)));
+    }
 }
 
 // --- NullSwapchain ---------------------------------------------------------------------------

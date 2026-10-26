@@ -23,6 +23,7 @@
 #define AIR_OUT(T) T&
 #define AIR_CONST static constexpr
 #define AIR_INLINE inline // functions defined in shared headers, outside a class
+#define AIR_UNROLL        // HLSL [unroll]: loops over register arrays must not index them dynamically
 
 // HLSL spells its intrinsics in lower case; the C++ mirror keeps the same names.
 // NOLINTBEGIN(readability-identifier-naming)
@@ -167,6 +168,8 @@ inline bool isfinite(float v)
 using std::abs;
 using std::acos;
 using std::asin;
+using std::atan2;
+using std::ceil;
 using std::cos;
 using std::exp;
 using std::floor;
@@ -189,6 +192,21 @@ inline float asfloat(uint u)
     float v;
     std::memcpy(&v, &u, 4);
     return v;
+}
+// The half float in the low 16 bits of h.
+inline float f16tof32(uint h)
+{
+    const uint sign = (h & 0x8000u) << 16;
+    const uint exponent = (h >> 10) & 0x1Fu;
+    const uint mantissa = h & 0x3FFu;
+    if (exponent == 0)
+    {
+        const float subnormal = float(mantissa) * 5.9604644775390625e-8f; // 2^-24
+        return sign != 0 ? -subnormal : subnormal;
+    }
+    const uint bits =
+        exponent == 31 ? sign | 0x7F800000u | (mantissa << 13) : sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    return asfloat(bits);
 }
 
 // Vector intrinsics.
@@ -274,6 +292,7 @@ inline bool any(float3 v)
 #define AIR_OUT(T) out T
 #define AIR_CONST static const
 #define AIR_INLINE
+#define AIR_UNROLL [unroll]
 
 #endif
 

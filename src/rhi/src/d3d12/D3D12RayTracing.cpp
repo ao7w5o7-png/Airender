@@ -250,7 +250,9 @@ void D3D12CommandList::BuildTlas(AccelStructHandle handle, std::span<const TlasI
         desc.InstanceID = in.instanceId & 0xFFFFFF;
         desc.InstanceMask = in.mask & 0xFF;
         desc.InstanceContributionToHitGroupIndex = in.hitGroupOffset & 0xFFFFFF;
-        desc.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
+        desc.Flags =
+            D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE |
+            (in.opaque ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE : D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE);
         desc.AccelerationStructure = blas->address;
         descs[i] = desc;
     }

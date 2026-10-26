@@ -602,4 +602,200 @@ SceneDesc MakeCumulus()
     return scene;
 }
 
+// Smoke rising from a brazier in a walled yard in the evening (Volume.h): the low sun behind the
+// plume lights it above the wall's shadow (forward scattering), the embers light it from below and
+// the sky from everywhere. Next event estimation of triangles and the sun from inside the medium,
+// its transmittance on the surfaces' NEE and multiple scattering all show.
+SceneDesc MakeSmoke()
+{
+    SceneDesc scene;
+    scene.name = "smoke";
+    const u32 paving = AddMaterial(scene, {.name = "Paving", .baseColor = {0.32f, 0.3f, 0.27f}, .roughness = 0.85f});
+    const u32 plaster = AddMaterial(scene, {.name = "Plaster", .baseColor = {0.7f, 0.66f, 0.6f}, .roughness = 0.8f});
+    const u32 iron =
+        AddMaterial(scene, {.name = "Iron", .baseColor = {0.35f, 0.33f, 0.3f}, .roughness = 0.55f, .metallic = 1.0f});
+    const u32 embers = AddMaterial(scene, {.name = "Embers",
+                                           .baseColor = {0.05f, 0.05f, 0.05f},
+                                           .roughness = 0.9f,
+                                           .emissionColor = {1.0f, 0.32f, 0.06f},
+                                           .emissionNits = 6000.0f});
+    constexpr float kHalf = 20.0f;
+    AddInstance(scene, "Yard",
+                AddMesh(scene, MakeQuad("Yard", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                paving);
+    AddBox(scene, "BackWall", {0.0f, 1.3f, -2.6f}, {6.0f, 1.3f, 0.15f}, plaster);
+    AddBox(scene, "SideWall", {-4.5f, 1.75f, 0.4f}, {0.15f, 1.75f, 2.9f}, plaster);
+    AddBox(scene, "Brazier", {0.0f, 0.28f, 0.0f}, {0.38f, 0.28f, 0.38f}, iron);
+    const float e = 0.32f;
+    AddInstance(scene, "Embers",
+                AddMesh(scene, MakeQuad("Embers", {-e, 0.565f, e}, {e, 0.565f, e}, {e, 0.565f, -e}, {-e, 0.565f, -e},
+                                        {0.0f, 1.0f, 0.0f})),
+                embers);
+    scene.volumes = {{.enabled = true,
+                      .position = {0.0f, 0.58f, 0.0f},
+                      .extinction = 24.0f,
+                      .albedo = 0.85f,
+                      .anisotropy = 0.35f,
+                      .seed = 3}};
+    AddSky(scene, 20.0f, 140.0f);
+    LookAt(scene.camera, {0.5f, 1.6f, 6.0f}, {0.0f, 1.7f, 0.0f});
+    scene.camera.verticalFov = 0.84f;
+    scene.camera.ev100 = 14.0f;
+    return scene;
+}
+
+// Three braziers smoking side by side at dusk (Volume.h): their plumes overlap and drift into each
+// other, lit by the sun just above the horizon, by their embers from below and by a lantern hanging
+// among them. Several volumes at once (each tracked on its own, or marched by segments), light groups
+// near and inside the smoke, the shadows they cast on one another and on the yard.
+SceneDesc MakeBraziers()
+{
+    SceneDesc scene;
+    scene.name = "braziers";
+    const u32 paving = AddMaterial(scene, {.name = "Paving", .baseColor = {0.3f, 0.29f, 0.27f}, .roughness = 0.85f});
+    const u32 plaster = AddMaterial(scene, {.name = "Plaster", .baseColor = {0.68f, 0.64f, 0.58f}, .roughness = 0.8f});
+    const u32 iron =
+        AddMaterial(scene, {.name = "Iron", .baseColor = {0.35f, 0.33f, 0.3f}, .roughness = 0.55f, .metallic = 1.0f});
+    const u32 embers = AddMaterial(scene, {.name = "Embers",
+                                           .baseColor = {0.05f, 0.05f, 0.05f},
+                                           .roughness = 0.9f,
+                                           .emissionColor = {1.0f, 0.32f, 0.06f},
+                                           .emissionNits = 5000.0f});
+    const u32 lantern = AddMaterial(scene, {.name = "Lantern",
+                                            .baseColor = {0.8f, 0.8f, 0.8f},
+                                            .roughness = 0.5f,
+                                            .emissionColor = {1.0f, 0.75f, 0.45f},
+                                            .emissionNits = 20000.0f});
+    constexpr float kHalf = 20.0f;
+    AddInstance(scene, "Yard",
+                AddMesh(scene, MakeQuad("Yard", {-kHalf, 0.0f, kHalf}, {kHalf, 0.0f, kHalf}, {kHalf, 0.0f, -kHalf},
+                                        {-kHalf, 0.0f, -kHalf}, {0.0f, 1.0f, 0.0f})),
+                paving);
+    AddBox(scene, "BackWall", {0.0f, 1.6f, -3.0f}, {7.0f, 1.6f, 0.15f}, plaster);
+    AddBox(scene, "SideWall", {-5.0f, 1.9f, 0.5f}, {0.15f, 1.9f, 3.5f}, plaster);
+    const float3 braziers[] = {{-1.1f, 0.0f, 0.1f}, {0.05f, 0.0f, -0.7f}, {1.15f, 0.0f, 0.25f}};
+    const u32 seeds[] = {3, 8, 13};
+    const float e = 0.3f;
+    for (size_t i = 0; i < std::size(braziers); ++i)
+    {
+        const float3 b = braziers[i];
+        AddBox(scene, std::format("Brazier{}", i), b + float3(0.0f, 0.28f, 0.0f), {0.36f, 0.28f, 0.36f}, iron);
+        AddInstance(
+            scene, std::format("Embers{}", i),
+            AddMesh(scene, MakeQuad(std::format("Embers{}", i), b + float3(-e, 0.565f, e), b + float3(e, 0.565f, e),
+                                    b + float3(e, 0.565f, -e), b + float3(-e, 0.565f, -e), {0.0f, 1.0f, 0.0f})),
+            embers);
+        scene.volumes.push_back({.enabled = true,
+                                 .position = b + float3(0.0f, 0.58f, 0.0f),
+                                 .extinction = 18.0f + 4.0f * float(i),
+                                 .albedo = 0.88f - 0.04f * float(i),
+                                 .anisotropy = 0.3f,
+                                 .seed = seeds[i]});
+    }
+    SetTransform(AddInstance(scene, "Lantern", AddMesh(scene, MakeSphere("Lantern", 0.1f, 24)), lantern),
+                 {0.55f, 2.3f, 0.9f});
+    AddSky(scene, 4.0f, 120.0f);
+    LookAt(scene.camera, {0.3f, 1.7f, 6.5f}, {0.1f, 1.8f, 0.0f});
+    scene.camera.verticalFov = 0.9f;
+    scene.camera.ev100 = 11.0f;
+    return scene;
+}
+
+// A courtyard corner of textured materials (MaterialTextures.cpp) in the afternoon sun: tiled floor,
+// brick walls and a bench, a sphere of riveted metal plates and one of tiles. Normal maps, glossy
+// glaze and metal, textures repeating at a few per metre.
+SceneDesc MakeTextured()
+{
+    SceneDesc scene;
+    scene.name = "textured";
+    scene.textureSets.push_back(MakeTileTextures(512));
+    scene.textureSets.push_back(MakeBrickTextures(512));
+    scene.textureSets.push_back(MakeMetalPlateTextures(512));
+    auto textured = [&](const char* name, u32 set, float uvScale)
+    {
+        return AddMaterial(scene, {.name = name,
+                                   .baseColor = {1.0f, 1.0f, 1.0f},
+                                   .roughness = 1.0f,
+                                   .metallic = 1.0f,
+                                   .textures = set,
+                                   .uvScale = uvScale});
+    };
+    const u32 tiles = textured("Tiles", 0, 1.0f);
+    const u32 bricks = textured("Bricks", 1, 1.0f);
+    const u32 plates = textured("MetalPlates", 2, 2.0f);
+    const u32 tileBall = textured("TileBall", 0, 3.0f);
+    // A quad whose texture coordinates run in metres (one texture repeat per `metresPerRepeat`).
+    auto surface = [&](const char* name, float3 p0, float3 p1, float3 p2, float3 p3, float3 normal, u32 material,
+                       float metresPerRepeat)
+    {
+        Mesh mesh = MakeQuad(name, p0, p1, p2, p3, normal);
+        const float width = hlsl::length(p1 - p0) / metresPerRepeat;
+        const float height = hlsl::length(p3 - p0) / metresPerRepeat;
+        for (gpu::Vertex& v : mesh.vertices)
+        {
+            v.u *= width;
+            v.v *= height;
+        }
+        AddInstance(scene, name, AddMesh(scene, std::move(mesh)), material);
+    };
+    surface("Floor", {-4.0f, 0.0f, 4.0f}, {4.0f, 0.0f, 4.0f}, {4.0f, 0.0f, -4.0f}, {-4.0f, 0.0f, -4.0f},
+            {0.0f, 1.0f, 0.0f}, tiles, 1.2f);
+    surface("BackWall", {-4.0f, 0.0f, -2.0f}, {4.0f, 0.0f, -2.0f}, {4.0f, 3.0f, -2.0f}, {-4.0f, 3.0f, -2.0f},
+            {0.0f, 0.0f, 1.0f}, bricks, 1.6f);
+    surface("SideWall", {-2.5f, 0.0f, 4.0f}, {-2.5f, 0.0f, -2.0f}, {-2.5f, 3.0f, -2.0f}, {-2.5f, 3.0f, 4.0f},
+            {1.0f, 0.0f, 0.0f}, bricks, 1.6f);
+    AddBox(scene, "Bench", {0.9f, 0.25f, -1.3f}, {1.2f, 0.25f, 0.35f}, bricks);
+    SetTransform(AddInstance(scene, "PlateBall", AddMesh(scene, MakeSphere("PlateBall", 0.55f, 64)), plates),
+                 {-0.9f, 0.55f, -0.3f});
+    SetTransform(AddInstance(scene, "TileBall", AddMesh(scene, MakeSphere("TileBall", 0.4f, 64)), tileBall),
+                 {0.6f, 0.9f, -1.1f});
+    AddSky(scene, 32.0f, 125.0f);
+    LookAt(scene.camera, {1.6f, 1.5f, 3.4f}, {-0.4f, 0.6f, -1.0f});
+    scene.camera.verticalFov = 0.85f;
+    scene.camera.ev100 = 14.0f;
+    return scene;
+}
+
+// The courtyard with clear coats (Material::coat): the metal plates under a clear coat, the tiled
+// ball lacquered amber, and two new balls in front: red car paint (a rough metallic base under a
+// smooth coat) and a dark blue diffuse base under a slightly rough one.
+SceneDesc MakeCoated()
+{
+    SceneDesc scene = MakeTextured();
+    scene.name = "coated";
+    for (Material& m : scene.materials)
+    {
+        if (m.name == "MetalPlates")
+        {
+            m.coat = true;
+            m.coatRoughness = 0.04f;
+        }
+        else if (m.name == "TileBall")
+        {
+            m.coat = true;
+            m.coatRoughness = 0.1f;
+            m.coatColor = {0.92f, 0.78f, 0.5f};
+        }
+    }
+    const u32 carPaint = AddMaterial(scene, {.name = "CarPaint",
+                                             .baseColor = {0.75f, 0.06f, 0.05f},
+                                             .roughness = 0.4f,
+                                             .metallic = 1.0f,
+                                             .coat = true,
+                                             .coatRoughness = 0.03f});
+    const u32 lacquer = AddMaterial(scene, {.name = "Lacquer",
+                                            .baseColor = {0.04f, 0.12f, 0.45f},
+                                            .roughness = 0.9f,
+                                            .metallic = 0.0f,
+                                            .coat = true,
+                                            .coatRoughness = 0.12f,
+                                            .coatColor = {0.97f, 0.97f, 0.97f}});
+    SetTransform(AddInstance(scene, "CarPaintBall", AddMesh(scene, MakeSphere("CarPaintBall", 0.35f, 64)), carPaint),
+                 {0.3f, 0.35f, 0.6f});
+    SetTransform(AddInstance(scene, "LacquerBall", AddMesh(scene, MakeSphere("LacquerBall", 0.3f, 64)), lacquer),
+                 {-0.6f, 0.3f, 1.2f});
+    return scene;
+}
+
 } // namespace air::renderer::detail

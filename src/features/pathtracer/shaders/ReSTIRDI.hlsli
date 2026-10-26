@@ -64,7 +64,7 @@ LightPoint EvaluateLightPoint(Receiver r, LightTriangle light, float2 b)
     {
         return lp;
     }
-    BsdfEval e = EvaluateBsdf(r.bsdf, ToLocal(r.frame, lp.wi));
+    BsdfEval e = EvaluateSurfaceBsdf(r.bsdf, r.ngLocal, ToLocal(r.frame, lp.wi));
     lp.bsdfPdf = e.pdf;
     lp.contribution = e.fCos * light.radiance * (lp.cosLight / dist2);
     return lp;
@@ -231,7 +231,7 @@ void InitialPass(uint2 pixel)
         {
             float uLobe = Rand(seed);
             float2 u = Rand2(seed);
-            BsdfSample bs = SampleBsdf(r.bsdf, uLobe, u);
+            BsdfSample bs = SampleSurfaceBsdf(r.bsdf, r.ngLocal, uLobe, u);
             float3 wi = ToWorld(r.frame, bs.wi);
             if (!bs.valid || dot(wi, r.ng) <= 0.0f)
             {
@@ -411,7 +411,9 @@ void SpatialPass(uint2 pixel)
     if ((g.flags & kReSTIRShade) != 0u && any(direct > 0.0f) && all(isfinite(direct)))
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
-        accumulation[pixel] += float4(direct * CameraAirTransmittance(f, r.position) * float(f.samplesPerPixel), 0.0f);
+        float3 air = CameraAirTransmittance(f, r.position);
+        // Not to the denoiser signals: the direct light passes the denoiser (docs/architecture.md §8.14).
+        accumulation[pixel] += float4(direct * air * float(f.samplesPerPixel), 0.0f);
     }
     history[index] = Pack(result);
 }

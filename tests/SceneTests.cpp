@@ -78,6 +78,8 @@ TEST(Scene_TestScenesContainWhatTheyTest)
         EXPECT(sky.physical && sky.sunElevation > 0.0f); // daylight from the physical sky
     }
     EXPECT(renderer::MakeBuiltinScene("cumulus")->clouds.enabled);
+    const renderer::SceneDesc braziers = *renderer::MakeBuiltinScene("braziers");
+    EXPECT(braziers.volumes.size() == 3 && EmissiveInstances(braziers) == 4); // 3 embers and the lantern
     // Generated with a fixed seed: building twice gives the same scene.
     const renderer::SceneDesc again = *renderer::MakeBuiltinScene("sphere_field");
     EXPECT(again.instances.size() == field.instances.size());
@@ -111,6 +113,47 @@ TEST(Scene_LightListHoldsOnlyEmitters)
         EXPECT(scene.Get().lightCount > 2);
     }
     device->WaitIdle();
+}
+
+// Every emissive instance is one light group over its consecutive triangles: the Cornell box's panel
+// (0.5 x 0.4 m at 3000 nits, facing down), and in the many-light hall one group per emitter whose
+// triangles all name it.
+TEST(Scene_LightGroupsGatherEachEmitter)
+{
+    const renderer::SceneDesc cornell = *renderer::MakeBuiltinScene("cornell_box");
+    const std::vector<gpu::LightTriangle> lights = renderer::BuildLightTriangles(cornell);
+    const std::vector<gpu::LightGroup> groups = renderer::BuildLightGroups(lights, cornell);
+    EXPECT(groups.size() == 1);
+    const gpu::LightGroup& panel = groups[0];
+    EXPECT(panel.firstLight == 0 && panel.lightCount == 2);
+    EXPECT(std::abs(panel.area - 0.2f) < 1e-5f);
+    EXPECT(std::abs(panel.centre.x) < 1e-5f && std::abs(panel.centre.y - 1.995f) < 1e-5f &&
+           std::abs(panel.centre.z) < 1e-5f);
+    EXPECT(std::abs(panel.normalArea.y + 0.2f) < 1e-5f && std::abs(panel.normalArea.x) < 1e-6f);
+    EXPECT(std::abs(panel.radius - std::sqrt(0.25f * 0.25f + 0.2f * 0.2f)) < 1e-5f);
+    EXPECT(std::abs(panel.power - 3000.0f * 0.2f * 3.14159265f) < 0.1f);
+    EXPECT(cornell.instances[panel.instance].name == "Light");
+
+    const renderer::SceneDesc hall = *renderer::MakeBuiltinScene("many_lights");
+    const std::vector<gpu::LightTriangle> hallLights = renderer::BuildLightTriangles(hall);
+    const std::vector<gpu::LightGroup> hallGroups = renderer::BuildLightGroups(hallLights, hall);
+    EXPECT(hallGroups.size() == EmissiveInstances(hall));
+    double area = 0.0;
+    for (u32 g = 0; g < hallGroups.size(); ++g)
+    {
+        const gpu::LightGroup& group = hallGroups[g];
+        area += group.area;
+        for (u32 i = group.firstLight; i < group.firstLight + group.lightCount; ++i)
+        {
+            EXPECT(hallLights[i].group == g);
+        }
+    }
+    double lightArea = 0.0;
+    for (const gpu::LightTriangle& light : hallLights)
+    {
+        lightArea += light.area;
+    }
+    EXPECT(std::abs(area / lightArea - 1.0) < 1e-6);
 }
 
 // The light list's alias table selects every light with exactly its probability: entry i is drawn
@@ -178,4 +221,58 @@ TEST(Scene_CloudResourcesFollowEdits)
     }
     device->WaitIdle();
     EXPECT(device->GetMemoryStats().liveBuffers == 0 && device->GetMemoryStats().liveTextures == 0);
+}
+
+// Volumes are built and uploaded when they change and released when they go, each on its own: one
+// that did not change keeps its resources. A file that cannot be read leaves none and says why; the
+// GPU's table holds the volumes that loaded, with their bindless indices.
+TEST(Scene_VolumeResourcesFollowEdits)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    {
+        renderer::Scene scene(*device, *renderer::MakeBuiltinScene("smoke"));
+        scene.Update();
+        const renderer::GpuScene& gpu = scene.Get();
+        EXPECT(gpu.volumes.size() == 1 && gpu.volumes[0].enabled == 1 && gpu.volumeTable.IsValid() &&
+               scene.VolumeError(0).empty());
+        EXPECT(gpu.volumes[0].density != gpu.volumes[0].majorants); // bindless indices of two resources
+        renderer::Volume volume = scene.Desc().volumes[0];
+        const u64 version = gpu.version;
+        const u32 density = gpu.volumes[0].density;
+        scene.SetVolume(0, volume); // unchanged
+        scene.Update();
+        EXPECT(gpu.version == version);
+        // A second plume beside the first: the first keeps its resources.
+        renderer::Volume second = volume;
+        second.position.x += 1.0f;
+        second.seed = 7;
+        scene.SetVolumes({volume, second});
+        scene.Update();
+        EXPECT(gpu.version != version && gpu.volumes.size() == 2 && gpu.volumes[0].density == density);
+        EXPECT(std::abs(gpu.volumes[1].origin.x - gpu.volumes[0].origin.x - 1.0f) < 1e-5f);
+        const u64 twoVolumes = gpu.version;
+        second.file = "does/not/exist.vdb";
+        scene.SetVolume(1, second);
+        scene.Update();
+        EXPECT(gpu.version != twoVolumes && gpu.volumes.size() == 1 && gpu.volumes[0].density == density);
+        EXPECT(scene.VolumeError(0).empty() && scene.VolumeError(1).find("does/not/exist.vdb") != std::string::npos);
+        volume.enabled = false;
+        scene.SetVolumes({volume});
+        scene.Update();
+        EXPECT(gpu.volumes.empty() && !gpu.volumeTable.IsValid() && scene.VolumeError(0).empty() &&
+               scene.VolumeError(1).empty());
+    }
+    device->WaitIdle();
+    EXPECT(device->GetMemoryStats().liveBuffers == 0 && device->GetMemoryStats().liveTextures == 0);
+
+    renderer::SceneDesc desc = *renderer::MakeBuiltinScene("smoke");
+    EXPECT(renderer::Validate(desc).empty());
+    desc.volumes[0].albedo = 1.5f;
+    EXPECT(renderer::Validate(desc).find("volume 0") != std::string::npos);
+    desc.volumes[0].albedo = 0.9f;
+    desc.volumes[0].maxResolution = 4096; // beyond a 3D texture's 2048
+    EXPECT(!renderer::Validate(desc).empty());
+    desc.volumes[0].maxResolution = 256;
+    desc.volumes.resize(gpu::kMaxVolumes + 1, desc.volumes[0]);
+    EXPECT(renderer::Validate(desc).find("at most") != std::string::npos);
 }

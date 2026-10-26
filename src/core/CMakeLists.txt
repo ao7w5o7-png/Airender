@@ -1,4 +1,5 @@
 add_library(air_core
+    src/Compression.cpp
     src/Image.cpp
     src/Json.cpp
     src/Log.cpp

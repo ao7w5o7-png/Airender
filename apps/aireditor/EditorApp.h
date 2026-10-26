@@ -15,6 +15,7 @@
 #include "air/core/Image.h"
 #include "air/core/TaskSystem.h"
 #include "air/renderer/FrameRunner.h"
+#include "air/renderer/NeuralTextures.h"
 #include "air/renderer/Scene.h"
 #include "air/renderer/ShaderHotReload.h"
 
@@ -47,7 +48,9 @@ struct EditorOptions
 {
     std::filesystem::path shaderRoot = AIR_DEFAULT_SHADER_DIR;
     std::string scene = "cornell_box";
-    std::vector<std::string> features = {"pathtracer", "tonemap"}; // "dlss" is inserted when available
+    // NRD denoises real-time frames and TAA smooths their edges by default (where they run: D3D12);
+    // "dlss" is inserted in their place when chosen.
+    std::vector<std::string> features = {"pathtracer", "nrd", "taa", "tonemap"};
     u32 width = 1280; // initial render resolution; follows the viewport afterwards
     u32 height = 720;
     bool vsync = true; // off: present as fast as possible (uncapped frame rate, tearing when supported)
@@ -59,6 +62,11 @@ struct EditorOptions
     std::function<std::unique_ptr<HtmlView>()> createHtmlView;
     float htmlProfilerInterval = 1.0f; // seconds between the panel's live captures
     std::string focusWindow;           // a window brought to front at startup (selects its dock tab)
+    // Feature parameters set at startup ("feature.parameter", value), as aircli's --set.
+    std::vector<std::pair<std::string, std::string>> parameters;
+    // Neural texture compression of the scenes' texture sets (renderer/NeuralTextures.h), applied as a
+    // scene loads.
+    renderer::NeuralTextureOptions neuralTextures;
 };
 
 inline constexpr const char* kHtmlProfilerWindow = "Profiler (HTML)";
@@ -108,6 +116,12 @@ public:
     // Applies a resolution change now (the UI otherwise waits until the viewport stops resizing).
     void Resize(u32 width, u32 height);
     bool LoadScene(const std::string& name);
+    // Neural texture compression of the scene's texture sets: reloads the scene. Without LibNTC (or a
+    // CUDA device) it loads the plain textures and GetNeuralTextureError() says why.
+    void SetNeuralTextureMode(renderer::NeuralTextureMode mode);
+    renderer::NeuralTextureMode GetNeuralTextureMode() const { return mOptions.neuralTextures.mode; }
+    const std::vector<renderer::NeuralTextureReport>& GetNeuralTextureReport() const { return mNeuralReport; }
+    const std::string& GetNeuralTextureError() const { return mNeuralError; }
     // Inserts or removes the dlss feature after pathtracer. Enabling switches the path tracer to
     // jittered single frames (accumulate=false, spp=1); disabling restores what was set before.
     void SetDlssEnabled(bool enabled);
@@ -115,6 +129,16 @@ public:
     // Index into kDlssModes; recreates the runner at the mode's render scale while dlss is enabled.
     void SetDlssMode(u32 mode);
     u32 GetDlssMode() const { return mOptions.dlssMode; }
+    // What turns the path tracer's samples into the image: accumulation over frames (progressive, no
+    // denoiser), NRD on real-time frames (with TAA), or DLSS Ray Reconstruction.
+    enum class Denoiser
+    {
+        Accumulate,
+        Nrd,
+        Dlss
+    };
+    Denoiser GetDenoiser() const;
+    void SetDenoiser(Denoiser denoiser);
     // A feature parameter as text ("" if the feature or parameter is missing).
     std::string GetParameter(std::string_view feature, std::string_view name) const;
     // Shader hot reload: polled every BuildUi(); a successful compile recreates the runner.
@@ -141,6 +165,8 @@ private:
     EditorOptions mOptions;
     std::unique_ptr<renderer::Scene> mScene;
     std::string mSceneName;
+    std::vector<renderer::NeuralTextureReport> mNeuralReport; // of the loaded scene
+    std::string mNeuralError;
     renderer::Camera mCamera;
     std::unique_ptr<renderer::FrameRunner> mRunner;
     std::vector<std::string> mActiveFeatures;
@@ -157,13 +183,16 @@ private:
     u32 mSettlingHeight = 0;
     bool mLockResolution = false;
     float mResolutionScale = 1.0f;
-    float mMoveSpeed = 1.5f; // metres per second
+    float mRenderScale = 0.67f; // of the path tracer under NRD, upsampled by TAA
+    float mMoveSpeed = 1.5f;    // metres per second
     bool mViewportHovered = false;
     // The sky as being edited: applied to the scene when a control is released, since every change
     // rebuilds the sky table (Scene::SetSky).
     std::optional<renderer::Sky> mSkyEdit;
     // Likewise the clouds (Scene::SetClouds rebakes them), whose base stays above mSceneTop.
     std::optional<renderer::Clouds> mCloudsEdit;
+    // And the volumes (Scene::SetVolumes rebuilds the ones that changed).
+    std::optional<std::vector<renderer::Volume>> mVolumesEdit;
     float mSceneTop = 0.0f;
     // Path tracer settings from before DLSS was enabled, restored when it is disabled.
     std::string mPreDlssAccumulate;

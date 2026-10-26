@@ -3,14 +3,19 @@
 #include "air/core/Assert.h"
 #include "air/core/Log.h"
 #include "air/features/pathtracer/Bsdf.h"
+#include "air/features/pathtracer/NeuralCoat.h"
 #include "air/renderer/ShaderLoader.h"
 #include "air/renderer/Transfer.h"
 
+#include "CloudMarcher.h"
 #include "PathTracerShared.h"
+#include "RadianceCache.h"
 #include "ReSTIR.h"
 #include "ReSTIRShared.h"
+#include "VolumeMarcher.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -27,8 +32,9 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
 {
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
-           a.cloudEvents == b.cloudEvents && a.restir == b.restir && a.furnace == b.furnace &&
-           a.debugView == b.debugView && a.debugScale == b.debugScale;
+           a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
+           a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && a.cloudMarch == b.cloudMarch && a.furnace == b.furnace &&
+           a.debugView == b.debugView && a.debugScale == b.debugScale && a.coatModel == b.coatModel;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -56,7 +62,8 @@ float Halton(u32 index, u32 base)
 
 bool IsDisplayDebugView(u32 view)
 {
-    return view != gpu::kDebugNone && view != gpu::kDebugDirect && view != gpu::kDebugIndirect;
+    return view != gpu::kDebugNone && view != gpu::kDebugDirect && view != gpu::kDebugIndirect &&
+           view != gpu::kDebugNrcCache;
 }
 
 } // namespace
@@ -75,14 +82,18 @@ PathTracer::~PathTracer()
             mDevice.DestroyTexture(texture);
         }
     }
-    for (rhi::BufferHandle buffer : {mBsdfLut, mFrameRing})
+    for (rhi::BufferHandle buffer : {mBsdfLut, mFrameRing, mNeuralCoat})
     {
         if (buffer.IsValid())
         {
             mDevice.DestroyBuffer(buffer);
         }
     }
-    for (rhi::PipelineHandle pipeline : {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mResolvePipeline})
+    mTraceNrc.Destroy(mDevice);
+    mTraceNrcPortable.Destroy(mDevice);
+    for (rhi::PipelineHandle pipeline :
+         {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mTracePipelineVolume, mTracePipelineVolumeShadows,
+          mTracePipelineNeural, mTracePipelineGiNeural, mResolvePipeline})
     {
         if (pipeline.IsValid())
         {
@@ -121,10 +132,33 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
         AIR_LOG(Info, "PathTracer", "shader execution reordering {}",
                 mTracePipelineSer.IsValid() ? "available" : "unavailable (PathTracerSer.lib missing)");
     }
-    // The kernel that records ReSTIR GI's candidates (AIR_PT_RESTIR_GI).
+    // The plain kernel with the neural parts (AIR_PT_NEURAL), created the first time a scene needs them.
+    mTraceNeuralDesc = trace;
+    mTraceNeuralDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerNeural.lib", "");
+    mTraceNeuralDesc.debugName = "PathTracer.TraceNeural";
+    // The kernel that records ReSTIR GI's candidates (AIR_PT_RESTIR_GI), and its twin with AIR_PT_NEURAL.
     trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGi.lib", "");
     trace.debugName = "PathTracer.TraceGi";
     mTracePipelineGi = mDevice.CreateRayTracingPipeline(trace);
+    mTraceGiNeuralDesc = trace;
+    mTraceGiNeuralDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGiNeural.lib", "");
+    mTraceGiNeuralDesc.debugName = "PathTracer.TraceGiNeural";
+    // The kernel that tracks the scene's volume (AIR_PT_VOLUME), created the first time a scene has one.
+    mTraceVolumeDesc = trace;
+    mTraceVolumeDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerVolume.lib", "");
+    mTraceVolumeDesc.debugName = "PathTracer.TraceVolume";
+    // The kernel under real-time volumes (AIR_PT_VOLUME_SHADOWS), likewise.
+    mTraceVolumeShadowsDesc = trace;
+    mTraceVolumeShadowsDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerVolumeShadows.lib", "");
+    mTraceVolumeShadowsDesc.debugName = "PathTracer.TraceVolumeShadows";
+    // The kernels whose paths end in the neural radiance cache, compute shaders with inline ray
+    // queries: on the matrix units (Shader Model 6.10, built with the preview compiler) and in float32.
+    if (mDevice.GetCapabilities().linearAlgebra)
+    {
+        mTraceNrc.Load(mDevice, shaderDir, "PathTracerNrc.cs", "PathTracer.TraceNrc", sizeof(gpu::TraceConstants));
+    }
+    mTraceNrcPortable.Load(mDevice, shaderDir, "PathTracerNrcPortable.cs", "PathTracer.TraceNrcPortable",
+                           sizeof(gpu::TraceConstants));
 
     rhi::ComputePipelineDesc resolve;
     resolve.shader = renderer::LoadShader(mDevice, shaderDir, "Resolve.cs", "Main");
@@ -149,6 +183,12 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     // Optional: without their shaders the path tracer estimates all the light itself.
     mReSTIR = std::make_unique<ReSTIR>(mDevice);
     mReSTIR->Initialize(shaderDir);
+    mRadianceCache = std::make_unique<RadianceCache>(mDevice);
+    mRadianceCache->Initialize(shaderDir);
+    mVolumeMarcher = std::make_unique<VolumeMarcher>(mDevice);
+    mVolumeMarcher->Initialize(shaderDir);
+    mCloudMarcher = std::make_unique<CloudMarcher>(mDevice);
+    mCloudMarcher->Initialize(shaderDir);
 
     mFrameRingSize = mDevice.GetFramesInFlight() + 1;
     mFrameRing = mDevice.CreateBuffer({.size = mFrameRingSize * sizeof(gpu::FrameData),
@@ -159,6 +199,61 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
 
     return mTracePipeline.IsValid() && mResolvePipeline.IsValid() && mAccumulation.IsValid() && mBsdfLut.IsValid() &&
            mFrameRing.IsValid();
+}
+
+bool PathTracer::RadianceCacheUsesLinearAlgebra() const
+{
+    return mUsedNrc && mRadianceCache->UsesLinearAlgebra();
+}
+
+u32 PathTracer::GetRadianceCacheSteps() const
+{
+    return mRadianceCache ? mRadianceCache->GetStep() : 0;
+}
+
+u32 PathTracer::GetVolumeMarchLights() const
+{
+    return mVolumeMarcher ? mVolumeMarcher->GetLightCount() : 0u;
+}
+
+void PathTracer::UpdateNeuralCoat(const renderer::GpuScene& scene)
+{
+    const std::vector<CoatMaterialSample> materials =
+        scene.desc ? CollectCoatMaterials(*scene.desc) : std::vector<CoatMaterialSample>{};
+    u64 key = 0xcbf29ce484222325ull;
+    const auto* bytes = reinterpret_cast<const u8*>(materials.data());
+    for (size_t i = 0; i < materials.size() * sizeof(CoatMaterialSample); ++i)
+    {
+        key = (key ^ bytes[i]) * 0x100000001b3ull;
+    }
+    if (key == mNeuralCoatKey && (materials.empty() || mNeuralCoat.IsValid()))
+    {
+        return;
+    }
+    mNeuralCoatKey = key;
+    if (mNeuralCoat.IsValid())
+    {
+        mDevice.WaitIdle(); // frames in flight may still read the old network
+        mDevice.DestroyBuffer(mNeuralCoat);
+        mNeuralCoat = {};
+    }
+    mNeuralCoatLoss = 0.0f;
+    if (materials.empty())
+    {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const NeuralCoatResult coat = TrainNeuralCoat(materials, {}, mTasks);
+    mNeuralCoatLoss = coat.loss;
+    std::vector<float> padded = coat.parameters; // a constant buffer: 256-byte multiples
+    padded.resize((padded.size() + 63) / 64 * 64, 0.0f);
+    static_assert(gpu::kNeuralCoatParameterVectors * 4 == 852, "PathTracerShared.h: kNeuralCoatParameters / 4");
+    mNeuralCoat = renderer::CreateBufferWithData(
+        mDevice, {.usage = rhi::BufferUsage::Constant, .debugName = "PathTracer.NeuralCoat"}, padded.data(),
+        padded.size() * sizeof(float));
+    AIR_LOG(Info, "PathTracer", "neural coat for {} coated material samples: loss {:.4f}, {} ({:.1f} s)",
+            materials.size(), coat.loss, coat.cached ? "cached" : "trained",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
 }
 
 void PathTracer::ResetAccumulation()
@@ -182,10 +277,27 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     }
     const renderer::Camera previousCamera = mLastCamera.value_or(camera);
     mLastCamera = camera;
+    // The neural coat follows the coated materials: at once when there is none yet, else once the scene
+    // has stopped changing for a while (an editor dragging a slider keeps the last network until then).
+    if (scene.version != mLastSceneVersion)
+    {
+        mNeuralCoatPending = true;
+        mNeuralCoatStableFrames = 0;
+    }
+    else
+    {
+        ++mNeuralCoatStableFrames;
+    }
+    if (mNeuralCoatPending && (!mNeuralCoat.IsValid() || mNeuralCoatStableFrames >= kNeuralCoatSettleFrames))
+    {
+        mNeuralCoatPending = false;
+        UpdateNeuralCoat(scene);
+    }
     mLastSceneVersion = scene.version;
     mLastSettings = mSettings;
     blackboard.SetValue(slots::kHistoryReset, historyInvalid ? 1.0 : 0.0);
     blackboard.SetValue(slots::kOutputIsDisplay, IsDisplayDebugView(mSettings.debugView) ? 1.0 : 0.0);
+    blackboard.SetValue(slots::kRealTime, mSettings.accumulate ? 0.0 : 1.0);
 
     // Converged: keep showing the result without tracing more samples.
     const bool trace = !IsConverged();
@@ -197,23 +309,77 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     // surface, for the lit and direct / indirect views.
     const u32 view = mSettings.debugView;
     const bool lightView = view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect;
+    // Volumes in the scene: ray marched over the surfaces (real-time volumes), or tracked by a kernel of
+    // their own. Either way paths do all the work (ReSTIR's first surface and the cache's queries do not
+    // know about media).
+    const bool volume = !scene.volumes.empty();
     auto on = [&](u32 mode) { return mode == kReSTIRAlways || (mode == kReSTIRRealTime && !mSettings.accumulate); };
+    const bool marchWanted = volume && on(mSettings.volumeMarch.mode) && mVolumeMarcher->IsAvailable();
+    if (marchWanted && !mTracePipelineVolumeShadows.IsValid())
+    {
+        mTracePipelineVolumeShadows = mDevice.CreateRayTracingPipeline(mTraceVolumeShadowsDesc);
+        AIR_CHECK(mTracePipelineVolumeShadows.IsValid(), "PathTracer: the real-time volumes' kernel did not compile");
+    }
+    const bool march = marchWanted && mTracePipelineVolumeShadows.IsValid();
+    if (volume && !march && !mTracePipelineVolume.IsValid() && !mTraceVolumeDesc.library.bytecode.empty())
+    {
+        mTracePipelineVolume = mDevice.CreateRayTracingPipeline(mTraceVolumeDesc);
+        AIR_CHECK(mTracePipelineVolume.IsValid(), "PathTracer: the volume kernel did not compile");
+    }
+    // Neural texture sets decoded on sample and coated materials' coat models: by the plain and ReSTIR GI
+    // kernels' twins (and ReSTIR's); the others read the sets' coarse copies and the coats'
+    // approximation.
+    const bool neural = (scene.neuralTextures || scene.coatedMaterials) && !volume;
+    auto create = [&](rhi::PipelineHandle& pipeline, const rhi::RayTracingPipelineDesc& desc)
+    {
+        if (neural && !pipeline.IsValid())
+        {
+            pipeline = mDevice.CreateRayTracingPipeline(desc);
+            AIR_CHECK(pipeline.IsValid(), "PathTracer: {} did not compile", desc.debugName);
+        }
+    };
+    create(mTracePipelineNeural, mTraceNeuralDesc);
+    create(mTracePipelineGiNeural, mTraceGiNeuralDesc);
     const bool diWanted = on(mSettings.restir.di) && mSettings.nextEventEstimation && !mSettings.furnace &&
-                          scene.lightCount > 0 && lightView && mReSTIR->IsDiAvailable();
-    const bool giWanted =
-        on(mSettings.restir.gi) && lightView && mReSTIR->IsGiAvailable() && mTracePipelineGi.IsValid();
+                          scene.lightCount > 0 && lightView && !volume && mReSTIR->IsDiAvailable();
+    // The neural radiance cache: its own kernel variant, which leaves the indirect light to the cache
+    // (no ReSTIR GI). On the matrix units when asked for and available, else in float32.
+    const bool nrcView = lightView || view == gpu::kDebugNrcCache;
+    const bool nrcOn =
+        mSettings.nrc.mode == kNrcAlways || (mSettings.nrc.mode == kNrcRealTime && !mSettings.accumulate);
+    const bool nrcLinearAlgebra =
+        mSettings.nrc.linearAlgebra && mTraceNrc.IsAvailable() && mRadianceCache->IsAvailable(true);
+    // The trace kernel is created the first time the cache runs.
+    const rhi::PipelineHandle nrcPipeline = !nrcOn || !nrcView || volume         ? rhi::PipelineHandle{}
+                                            : nrcLinearAlgebra                   ? mTraceNrc.Get(mDevice)
+                                            : mRadianceCache->IsAvailable(false) ? mTraceNrcPortable.Get(mDevice)
+                                                                                 : rhi::PipelineHandle{};
+    const bool nrcWanted = nrcPipeline.IsValid();
+    const bool giWanted = on(mSettings.restir.gi) && lightView && !nrcWanted && !volume && mReSTIR->IsGiAvailable() &&
+                          mTracePipelineGi.IsValid();
     const bool restirDi = diWanted && spp > 0;
     const bool restirGi = giWanted && spp > 0;
+    const bool nrc = nrcWanted && spp > 0;
     AIR_CHECK(!restirDi || scene.lightCount <= gpu::kReSTIRMaxLight,
               "ReSTIR DI: {} lights exceed the reservoirs' 24 bits", scene.lightCount);
     if (!diWanted && !giWanted)
     {
         mReSTIR->Invalidate();
     }
+    // The real-time clouds: their maps instead of walks through them (not in the furnace, where the
+    // walks check that the clouds conserve energy, nor with real-time volumes, whose shadow maps do not
+    // know the clouds).
+    const bool cloudMarch = scene.clouds.enabled != 0 && on(mSettings.cloudMarch.mode) && !mSettings.furnace &&
+                            !march && mCloudMarcher->IsAvailable();
     if (spp > 0)
     {
+        mUsedCloudMarch = cloudMarch;
         mUsedReSTIRDI = restirDi;
         mUsedReSTIRGI = restirGi;
+        mUsedNrc = nrc;
+        mUsedVolumeMarch = march;
+        mUsedNeuralKernels =
+            neural && !nrc && (restirGi ? mTracePipelineGiNeural.IsValid() : mTracePipelineNeural.IsValid());
     }
 
     const float aspect = float(mSettings.width) / float(mSettings.height);
@@ -253,18 +419,37 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         frame.clouds.majorants = mDevice.GetBindlessSRV(scene.cloudMajorants);
     }
     frame.cloudEvents = mSettings.cloudEvents;
+    frame.volumeEvents = mSettings.volumeEvents;
+    frame.volumeCount = u32(scene.volumes.size());
+    frame.volumeTable = volume ? mDevice.GetBindlessSRV(scene.volumeTable) : 0u;
+    frame.textureSets = mDevice.GetBindlessSRV(scene.textureSetTable);
+    // Bsdf.hlsli kCoat* (the setting + 1); without a network the neural coat is the approximation.
+    frame.coatModel = mSettings.coatModel == kCoatModelNeural && !mNeuralCoat.IsValid()
+                          ? kCoatModelApproximate + 1
+                          : std::min(mSettings.coatModel, kCoatModelApproximate) + 1;
+    frame.neuralCoat = mNeuralCoat.IsValid() ? mDevice.GetBindlessCBV(mNeuralCoat) : 0u;
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;
         frame.jitter = {Halton(phase, 2) - 0.5f, Halton(phase, 3) - 0.5f};
     }
+    else if (march)
+    {
+        // The march follows the trace's camera rays: all of a frame's samples take the frame's jitter,
+        // which runs through the Halton sequence as samples accumulate.
+        frame.jitter = {Halton(mAccumulatedSamples + 1, 2) - 0.5f, Halton(mAccumulatedSamples + 1, 3) - 0.5f};
+    }
     blackboard.SetValue(slots::kJitterX, frame.jitter.x);
     blackboard.SetValue(slots::kJitterY, frame.jitter.y);
     frame.frameIndex = mFrameIndex++;
+    // The first surface's light split by lobe, for a denoiser of the surfaces (real time, lit view).
+    const bool signals = mSettings.signals && mSettings.guides && !mSettings.accumulate && view == gpu::kDebugNone;
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
                   (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restirDi ? gpu::kFlagReSTIR : 0u) |
-                  (restirGi ? gpu::kFlagReSTIRGI : 0u);
+                  (restirGi ? gpu::kFlagReSTIRGI : 0u) | (nrc ? gpu::kFlagNrc : 0u) |
+                  (march ? gpu::kFlagVolumeMarch | gpu::kFlagGlobalJitter : 0u) | (signals ? gpu::kFlagSignals : 0u) |
+                  (cloudMarch ? gpu::kFlagCloudMaps : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -273,6 +458,21 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.lightCount = scene.lightCount;
     frame.debugView = mSettings.debugView;
     frame.debugScale = std::max(mSettings.debugScale, 1e-6f);
+    if (nrc)
+    {
+        mRadianceCache->BeginFrame(graph, scene, mSettings.nrc, nrcLinearAlgebra, mSettings.width, mSettings.height,
+                                   exposure, frame.frameIndex, frame.nrc);
+    }
+    if (march && spp > 0)
+    {
+        mVolumeMarcher->BeginFrame(graph, scene, mSettings.volumeMarch, frame.volumeShadows);
+    }
+    frame.cloudLayer = air::gpu::kInvalidIndex;
+    frame.cloudDepth = air::gpu::kInvalidIndex;
+    if (cloudMarch && spp > 0)
+    {
+        mCloudMarcher->BeginFrame(scene, mSettings.width, mSettings.height, !historyInvalid, frame);
+    }
 
     const u32 slot = frame.frameIndex % mFrameRingSize;
     auto* ring = static_cast<gpu::FrameData*>(mDevice.GetMappedPointer(mFrameRing));
@@ -298,15 +498,16 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     constants.bsdfLut = mDevice.GetBindlessSRV(mBsdfLut);
     constants.skyTable = mDevice.GetBindlessSRV(scene.skyTable);
 
+    // Under real-time volumes with a denoiser: the trace's samples and the frame resolved without the
+    // volumes (slots::kColorBeforeTransparency).
+    rdg::TextureRef frameSamples;
+    rdg::TextureRef colorBefore;
     if (spp > 0)
     {
         mResetPending = false;
         mAccumulatedSamples += spp;
 
-        struct Guides
-        {
-            rdg::TextureRef diffuseAlbedo, specularAlbedo, normalRoughness, viewDepth, motionVectors;
-        } guides;
+        DenoiserGuides guides;
         if (mSettings.guides)
         {
             auto make = [&](rhi::Format format, const char* name)
@@ -329,6 +530,24 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             blackboard.SetTexture(slots::kViewDepth, guides.viewDepth);
             blackboard.SetTexture(slots::kMotionVectors, guides.motionVectors);
         }
+        rdg::TextureRef diffuseSignal;
+        rdg::TextureRef specularSignal;
+        if (signals)
+        {
+            auto make = [&](const char* name)
+            {
+                return graph.CreateTexture(
+                    {.format = rhi::Format::RGBA16_FLOAT,
+                     .width = width,
+                     .height = height,
+                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                     .debugName = name});
+            };
+            diffuseSignal = make("PathTracer.DiffuseSignal");
+            specularSignal = make("PathTracer.SpecularSignal");
+            blackboard.SetTexture(slots::kDiffuseSignal, diffuseSignal);
+            blackboard.SetTexture(slots::kSpecularSignal, specularSignal);
+        }
 
         ReSTIR::TraceOutputs restirOutputs;
         if (restirDi || restirGi)
@@ -339,12 +558,56 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const rdg::BufferRef giReservoirs = restirOutputs.giReservoirs;
 
         const rhi::PipelineHandle pipeline =
-            restirGi ? mTracePipelineGi : (UsesShaderExecutionReordering() ? mTracePipelineSer : mTracePipeline);
+            nrc        ? nrcPipeline
+            : restirGi ? (mUsedNeuralKernels ? mTracePipelineGiNeural : mTracePipelineGi)
+            : march    ? mTracePipelineVolumeShadows
+            : volume && mTracePipelineVolume.IsValid() ? mTracePipelineVolume
+                                                       : (mUsedNeuralKernels                ? mTracePipelineNeural
+                                                          : UsesShaderExecutionReordering() ? mTracePipelineSer
+                                                                                            : mTracePipeline);
+        RadianceCache* cache = nrc ? mRadianceCache.get() : nullptr;
+        // Under real-time volumes the trace writes the frame's samples here, and the march accumulates.
+        rdg::TextureRef target = accumulation;
+        if (march)
+        {
+            target =
+                graph.CreateTexture({.format = rhi::Format::RGBA32_FLOAT,
+                                     .width = width,
+                                     .height = height,
+                                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                                     .debugName = "PathTracer.FrameSamples"});
+            if (mSettings.transparencyGuides && !mSettings.accumulate)
+            {
+                frameSamples = target;
+                colorBefore = graph.CreateTexture(
+                    {.format = rhi::Format::RGBA16_FLOAT, // as sceneColor: the denoiser compares the two
+                     .width = width,
+                     .height = height,
+                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                     .debugName = "PathTracer.ColorBeforeVolumes"});
+                blackboard.SetTexture(slots::kColorBeforeTransparency, colorBefore);
+            }
+        }
+        VolumeMarcher* marcher = march ? mVolumeMarcher.get() : nullptr;
+        CloudMarcher* clouds = cloudMarch ? mCloudMarcher.get() : nullptr;
+        if (clouds)
+        {
+            clouds->AddPasses(graph, scene, mSettings.cloudMarch, constants.frameData, constants.frameSlot,
+                              constants.skyTable, frame.frameIndex);
+        }
         graph.AddPass(
-            "PathTracer.Trace", rdg::PassFlags::RayTracing,
+            "PathTracer.Trace", nrc ? rdg::PassFlags::Compute : rdg::PassFlags::RayTracing,
             [&](rdg::PassBuilder& b)
             {
-                b.Write(accumulation, Access::UAVCompute);
+                b.Write(target, Access::UAVCompute);
+                if (marcher)
+                {
+                    marcher->DeclareShadowReads(b);
+                }
+                if (clouds)
+                {
+                    clouds->DeclareReads(b);
+                }
                 for (rdg::BufferRef buffer : {primaryHits, giReservoirs})
                 {
                     if (buffer.IsValid())
@@ -353,17 +616,21 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     }
                 }
                 for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
-                                          guides.viewDepth, guides.motionVectors})
+                                          guides.viewDepth, guides.motionVectors, diffuseSignal, specularSignal})
                 {
                     if (t.IsValid())
                     {
                         b.Write(t, Access::UAVCompute);
                     }
                 }
+                if (cache)
+                {
+                    cache->DeclareTrace(b);
+                }
             },
             [=](rdg::PassContext& ctx) mutable
             {
-                constants.accumulation = ctx.UAV(accumulation);
+                constants.accumulation = ctx.UAV(target);
                 if (guides.diffuseAlbedo.IsValid())
                 {
                     constants.diffuseAlbedo = ctx.UAV(guides.diffuseAlbedo);
@@ -371,6 +638,11 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     constants.normalRoughness = ctx.UAV(guides.normalRoughness);
                     constants.viewDepth = ctx.UAV(guides.viewDepth);
                     constants.motionVectors = ctx.UAV(guides.motionVectors);
+                }
+                if (diffuseSignal.IsValid())
+                {
+                    constants.diffuseSignal = ctx.UAV(diffuseSignal);
+                    constants.specularSignal = ctx.UAV(specularSignal);
                 }
                 if (primaryHits.IsValid())
                 {
@@ -382,8 +654,50 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                 }
                 ctx.cmd.SetPipeline(pipeline);
                 ctx.cmd.PushConstants(&constants, sizeof(constants));
-                ctx.cmd.DispatchRays(width, height, 1);
+                if (cache)
+                {
+                    ctx.cmd.Dispatch((width + 7) / 8, (height + 7) / 8, 1);
+                }
+                else
+                {
+                    ctx.cmd.DispatchRays(width, height, 1);
+                }
             });
+
+        if (march)
+        {
+            // What the volumes leave of the surfaces' light, for a denoiser of the surfaces.
+            rdg::TextureRef surfaceTransmittance;
+            if (signals)
+            {
+                surfaceTransmittance = graph.CreateTexture(
+                    {.format = rhi::Format::R16_FLOAT,
+                     .width = width,
+                     .height = height,
+                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                     .debugName = "PathTracer.SurfaceTransmittance"});
+                blackboard.SetTexture(slots::kSurfaceTransmittance, surfaceTransmittance);
+            }
+            // A denoiser of the whole frame wants the guides to describe the volumes where they hide the
+            // surfaces; one of the surfaces alone wants them as they are.
+            const DenoiserGuides marchGuides = mSettings.transparencyGuides ? guides : DenoiserGuides{};
+            VolumeMarcher::Frame marchFrame;
+            marchFrame.width = width;
+            marchFrame.height = height;
+            marchFrame.samplesPerPixel = spp;
+            marchFrame.debugView = view;
+            marchFrame.reset = (frame.flags & gpu::kFlagReset) != 0u;
+            marchFrame.accumulating = mSettings.accumulate;
+            marchFrame.furnace = mSettings.furnace;
+            // In real time the volumes' layer changes from frame to frame; a denoiser of the whole frame
+            // filters it, otherwise the march does (the lit views).
+            marchFrame.temporal = mSettings.volumeMarch.temporal && !mSettings.accumulate &&
+                                  !mSettings.transparencyGuides &&
+                                  (view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect);
+            marchFrame.historyValid = !historyInvalid;
+            mVolumeMarcher->AddPasses(graph, scene, constants, target, accumulation, marchGuides, surfaceTransmittance,
+                                      marchFrame);
+        }
 
         if (restirDi || restirGi)
         {
@@ -398,8 +712,14 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.lightTree = constants.lightTree;
             restirScene.bsdfLut = constants.bsdfLut;
             restirScene.skyTable = constants.skyTable;
-            mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, view != gpu::kDebugIndirect,
-                               view != gpu::kDebugDirect);
+            mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, diffuseSignal, specularSignal,
+                               view != gpu::kDebugIndirect, view != gpu::kDebugDirect, neural && scene.coatedMaterials);
+        }
+        if (nrc)
+        {
+            // The training paths' pixels get their cache lookups in the views that show indirect light.
+            mRadianceCache->AddPasses(graph, constants.frameData, constants.frameSlot, accumulation,
+                                      view == gpu::kDebugNone || view == gpu::kDebugIndirect);
         }
     }
 
@@ -411,6 +731,11 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         {
             b.Read(accumulation, Access::SRVCompute);
             b.Write(output, Access::UAVCompute);
+            if (colorBefore.IsValid())
+            {
+                b.Read(frameSamples, Access::SRVCompute);
+                b.Write(colorBefore, Access::UAVCompute);
+            }
         },
         [=](rdg::PassContext& ctx)
         {
@@ -419,6 +744,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             resolve.frameSlot = slot;
             resolve.accumulation = ctx.SRV(accumulation);
             resolve.output = ctx.UAV(output);
+            resolve.surface = colorBefore.IsValid() ? ctx.SRV(frameSamples) : air::gpu::kInvalidIndex;
+            resolve.before = colorBefore.IsValid() ? ctx.UAV(colorBefore) : air::gpu::kInvalidIndex;
             ctx.cmd.SetPipeline(resolvePipeline);
             ctx.cmd.PushConstants(&resolve, sizeof(resolve));
             ctx.cmd.Dispatch((width + 7) / 8, (height + 7) / 8, 1);

@@ -48,13 +48,10 @@ ShaderHotReload::ShaderHotReload(const fs::path& shaderRoot)
         mUnavailableReason = std::format("{}: {}", manifestPath.generic_string(), error);
         return;
     }
-    const json::Value* compiler = manifest->Find("compiler");
-    mCompiler = compiler ? fs::path(compiler->AsString()) : fs::path();
-    if (mCompiler.empty() || !fs::exists(mCompiler))
-    {
-        mUnavailableReason = std::format("shader compiler '{}' not found", mCompiler.generic_string());
-        return;
-    }
+    // Each entry names its compiler (Shader Model 6.10 shaders use the preview one); the top-level
+    // one is the default.
+    const json::Value* defaultCompiler = manifest->Find("compiler");
+    const fs::path fallback = defaultCompiler ? fs::path(defaultCompiler->AsString()) : fs::path();
 
     std::map<std::string, size_t> fileIndex;
     const json::Value* shaders = manifest->Find("shaders");
@@ -67,6 +64,13 @@ ShaderHotReload::ShaderHotReload(const fs::path& shaderRoot)
             return value ? *value : kNull;
         };
         Shader shader;
+        const std::string& compiler = field("compiler").AsString();
+        shader.compiler = compiler.empty() ? fallback : fs::path(compiler);
+        if (shader.compiler.empty() || !fs::exists(shader.compiler))
+        {
+            mUnavailableReason = std::format("shader compiler '{}' not found", shader.compiler.generic_string());
+            return;
+        }
         shader.source = field("source").AsString();
         shader.output = field("output").AsString();
         shader.name = std::format("{}/{}", field("name").AsString(), shader.output.filename().string());
@@ -190,7 +194,7 @@ void ShaderHotReload::Compile(std::vector<size_t> shaders, bool sharedChanged)
         fs::create_directories(shader.output.parent_path(), error);
         std::vector<std::string> arguments = shader.arguments;
         arguments.insert(arguments.end(), {shader.source.string(), "-Fo", temporary.string()});
-        const ProcessResult process = RunProcess(mCompiler, arguments);
+        const ProcessResult process = RunProcess(shader.compiler, arguments);
         if (!process.output.empty())
         {
             result.log += process.output;
@@ -204,7 +208,7 @@ void ShaderHotReload::Compile(std::vector<size_t> shaders, bool sharedChanged)
             failed = true;
             if (process.exitCode == -1)
             {
-                result.log += std::format("{}: could not start {}\n", shader.name, mCompiler.string());
+                result.log += std::format("{}: could not start {}\n", shader.name, shader.compiler.string());
             }
         }
         temporaries.push_back(std::move(temporary));

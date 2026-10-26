@@ -12,8 +12,16 @@ add_executable(air_tests
     ProfileReportTests.cpp
     ShaderHotReloadTests.cpp
     SceneTests.cpp
+    SceneFilesTests.cpp
+    MaterialTexturesTests.cpp
+    NeuralTexturesTests.cpp
     SkyTests.cpp
     CloudTests.cpp
+    VolumeTests.cpp
+    VdbTests.cpp
+    MomentTests.cpp
+    VolumeBricksTests.cpp
+    MlpTests.cpp
     ${feature_tests}
 )
 target_include_directories(air_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -22,6 +30,7 @@ target_compile_definitions(air_tests PRIVATE AIR_SOURCE_DIR="${PROJECT_SOURCE_DI
 target_link_libraries(air_tests PRIVATE air_builtin_features)
 air_target_defaults(air_tests)
 air_target_d3d12_runtime(air_tests)
+air_target_ntc_runtime(air_tests)
 add_test(NAME air_tests COMMAND air_tests)
 
 # The editor UI runs headless on the Null device (no window, no ImGui backends).

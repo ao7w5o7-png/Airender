@@ -13,9 +13,11 @@
 
 #include "air/renderer/Clouds.h"
 #include "air/renderer/Sky.h"
+#include "air/renderer/Volume.h"
 #include "air/renderer/shader/SceneShared.h"
 #include "air/rhi/RHIDevice.h"
 
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -46,6 +48,10 @@ struct Camera
 // 1 / (1.2 * 2^EV100) (saturation-based sensitivity, Lagarde & de Rousiers 2014).
 float ExposureScale(float ev100);
 
+inline constexpr u32 kNoTextures = ~0u;
+
+struct NeuralTextureGpuData; // NeuralTextures.h
+
 struct Material
 {
     std::string name;
@@ -54,9 +60,40 @@ struct Material
     float metallic = 0.0f;
     float3 emissionColor = {1.0f, 1.0f, 1.0f}; // chromaticity; rescaled so its luminance is 1
     float emissionNits = 0.0f;                 // emitted luminance
+    // SceneDesc::textureSets entry (kNoTextures: none): its textures multiply baseColor, roughness and
+    // metallic (set those to 1 to take the textures as they are) and bend the normal; they repeat
+    // uvScale times over the mesh's texture coordinates.
+    u32 textures = kNoTextures;
+    float uvScale = 1.0f;
+    // A clear coat over the material (docs/architecture.md §8.17): a rough dielectric interface of
+    // coatRoughness over a layer that lets coatColor through at normal incidence, one way.
+    bool coat = false;
+    float coatRoughness = 0.05f;
+    float3 coatColor = {1.0f, 1.0f, 1.0f};
+    // A cutout (leaves, chains, decals): where the colour texture's alpha is below this the surface is
+    // a hole that rays pass through; 0: opaque. Its instances are non-opaque in the acceleration
+    // structure, so it is fixed once the scene is uploaded (SetMaterial keeps it).
+    float alphaCutoff = 0.0f;
 
     gpu::MaterialData ToGpu() const;
     bool operator==(const Material&) const = default;
+};
+
+// A material's textures, all of one size, repeating (texel centres at (i + 0.5) / size).
+struct MaterialTextures
+{
+    std::string name;
+    u32 width = 0;
+    u32 height = 0;
+    // RGBA8 texels, x fastest, the red channel in the low byte: the base colour in sRGB, and the
+    // surface: the tangent-space normal's x and y mapped to [0, 1] (z follows), roughness, metallic.
+    std::vector<u32> color;
+    std::vector<u32> surface;
+    // Set when the GPU decodes the texels on sample from neural texture compression's latents and
+    // weights (ApplyNeuralTextures, NeuralTextures.h): `color` and `surface` then hold the same texels
+    // decoded, for the CPU renderers, and are not uploaded.
+    std::shared_ptr<const NeuralTextureGpuData> neural;
+    bool operator==(const MaterialTextures&) const = default;
 };
 
 struct Mesh
@@ -79,11 +116,13 @@ struct SceneDesc
     std::string name;
     std::vector<Mesh> meshes;
     std::vector<Material> materials;
+    std::vector<MaterialTextures> textureSets; // Material::textures indexes these
     std::vector<Instance> instances;
     Camera camera;
     float3 environment = {0.0f, 0.0f, 0.0f}; // uniform environment radiance, nits (sky.physical: unused)
     Sky sky;                                 // physical sky and sun; replaces `environment`
     Clouds clouds;                           // above every instance
+    std::vector<Volume> volumes;             // smoke or clouds among the instances, up to gpu::kMaxVolumes
 };
 
 // Mesh builders. Quads are emitted so that cross(p1 - p0, p2 - p0) points along `normal`.
@@ -108,14 +147,29 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //   sunset         a plain under a low sun: the physical sky's colours, long shadows
 //   cumulus        a meadow under fair-weather cumulus: the clouds' light, shadows and silver
 //                  linings
+//   smoke          smoke rising from a brazier against a wall at sunset (a volume, Volume.h): light
+//                  scattered in a medium from embers, the sun and the sky
+//   braziers       three plumes that overlap, lit by the dusk sun, their embers and a lantern among
+//                  them: several volumes and light groups near and inside them
+//   textured       a courtyard corner of textured materials (tiles, bricks, metal plates) in the
+//                  afternoon sun: normal maps, glazed and metallic texels (MaterialTextures)
+//   coated         the courtyard with clear coats: car paint, lacquered tiles, coated metal plates
+//                  (Material::coat)
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
+// Procedural material textures, size x size texels, repeating (MaterialTextures.cpp): red bricks in
+// mortar, glazed tiles in grout, brushed metal plates with seams and rivets (metallic).
+MaterialTextures MakeBrickTextures(u32 size);
+MaterialTextures MakeTileTextures(u32 size);
+MaterialTextures MakeMetalPlateTextures(u32 size);
 std::vector<std::string> BuiltinSceneNames();
 std::optional<SceneDesc> MakeBuiltinScene(std::string_view name);
 // Checks indices, references and values. Returns the first problem or an empty string.
 std::string Validate(const SceneDesc& desc);
 // The highest y of any instance's vertices: the clouds' base must stay above it.
 float HighestPoint(const SceneDesc& desc);
+// The box around every instance's geometry (lo > hi without any).
+void SceneBounds(const SceneDesc& desc, float3& lo, float3& hi);
 
 // The tables a GpuScene is made of, also used by the CPU reference renderer.
 // The light list holds the triangles of emissive instances only (an instance is emissive when its
@@ -124,6 +178,8 @@ float HighestPoint(const SceneDesc& desc);
 // the materials, which is why they live in per-frame buffers rather than in the instance data.
 std::vector<u32> FirstLightIndices(const SceneDesc& desc);
 std::vector<gpu::LightTriangle> BuildLightTriangles(const SceneDesc& desc, double* totalPower = nullptr);
+// One group per emissive instance (gpu::LightGroup) over BuildLightTriangles' list, in its order.
+std::vector<gpu::LightGroup> BuildLightGroups(const std::vector<gpu::LightTriangle>& lights, const SceneDesc& desc);
 // The light tree over `lights` (gpu::LightTreeNode), which also gets each light's tree trail and
 // depth. Lights without power are left out; with none, the tree is one leaf without power.
 std::vector<gpu::LightTreeNode> BuildLightTree(std::vector<gpu::LightTriangle>& lights);
@@ -135,13 +191,29 @@ struct GpuScene
     rhi::AccelStructHandle tlas;
     rhi::BufferHandle instances; // StructuredBuffer<gpu::InstanceData>, indexed by InstanceID()
     rhi::BufferHandle materials; // StructuredBuffer<gpu::MaterialData>
+    // StructuredBuffer<gpu::TextureSetData> (bindless indices of RGBA8 SRGB / UNORM Texture2Ds, or of a
+    // neural set's latents and data), one per SceneDesc::textureSets entry, at least one element.
+    rhi::BufferHandle textureSetTable;
+    bool neuralTextures = false;  // some set is decoded on sample (TextureSetData::latents)
+    bool coatedMaterials = false; // some material wears a clear coat (Material::coat)
+    // The description the scene was made from, kept current by its edits: for features that need the
+    // materials on the CPU (the path tracer trains the neural coat for the coated ones).
+    const SceneDesc* desc = nullptr;
     rhi::BufferHandle lights;    // StructuredBuffer<gpu::LightTriangle>, at least one element
     rhi::BufferHandle lightTree; // StructuredBuffer<gpu::LightTreeNode> over `lights`, at least one node
     // StructuredBuffer<uint> per instance: its first entry in `lights`, gpu::kInvalidIndex if it does
     // not emit. Written together with `materials` and `lights`, so the three always agree.
     rhi::BufferHandle instanceLights;
     u32 lightCount = 0;
-    float lightPower = 0.0f;    // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
+    float lightPower = 0.0f; // total emitted power of lightCount triangles (watts-like, luminance * area * pi)
+    // StructuredBuffer<gpu::LightGroup>, one per emissive instance (at least one element), written with
+    // `lights`; `lightGroups` is the same on the CPU (empty without emitters), and `lightTriangles`
+    // the triangles of `lights`.
+    rhi::BufferHandle lightGroupTable;
+    std::vector<gpu::LightGroup> lightGroups;
+    std::vector<gpu::LightTriangle> lightTriangles;
+    float3 boundsMin{}; // the box around the geometry (SceneBounds)
+    float3 boundsMax{};
     gpu::SkyData sky{};         // the sun and how to read skyTable (uniform radiance when width == 0)
     rhi::BufferHandle skyTable; // StructuredBuffer<float>: 3 per texel, at least 3
     // The aerial perspective tables (RGBA16F Texture3D, SkyShared.h; none without a physical sky).
@@ -155,6 +227,20 @@ struct GpuScene
     rhi::TextureHandle cloudBase;
     rhi::TextureHandle cloudDetail;
     rhi::BufferHandle cloudMajorants;
+    // The volumes that are enabled and loaded, in the order of SceneDesc::volumes, with the bindless
+    // indices of their density (R16_FLOAT Texture3D) and majorants (StructuredBuffer<float>) filled
+    // in, as VolumeShared.h lays them out; `volumeTable` holds the same on the GPU
+    // (StructuredBuffer<gpu::VolumeData>; none without volumes).
+    std::vector<gpu::VolumeData> volumes;
+    rhi::BufferHandle volumeTable;
+    // Their real-time view (VolumeBricksShared.h), in the same order and with the bindless indices of
+    // the bricks and the occlusion texture filled in: a gpu::VolumeMarchData per volume in
+    // `volumeMarchTable` and its kVolumeLevels gpu::VolumeBrickLevel in `volumeLevelTable`
+    // (StructuredBuffers; none without volumes).
+    std::vector<gpu::VolumeMarchData> volumeMarch;
+    std::vector<gpu::VolumeBrickLevel> volumeLevels;
+    rhi::BufferHandle volumeMarchTable;
+    rhi::BufferHandle volumeLevelTable;
     u64 version = 0; // bumped whenever anything that changes the image changes
 };
 
@@ -175,7 +261,13 @@ public:
     void SetEnvironment(float3 radiance);
     void SetSky(const Sky& sky);          // rebuilds the sky table at the next Update() (about 0.1 s)
     void SetClouds(const Clouds& clouds); // rebakes them at the next Update() (about 0.2 s)
-    // Call once per frame before rendering: uploads pending edits into the next ring slot.
+    // Rebuilds the volumes that changed at the next Update(): one whose source (file, grid, resolution,
+    // seed) changed reads it again, one whose optics or placement changed reuses its voxels.
+    void SetVolumes(std::vector<Volume> volumes);
+    void SetVolume(u32 index, const Volume& volume);
+    // Why SceneDesc::volumes[index]'s file gave no volume at the last Update() (empty when it loaded,
+    // or is disabled).
+    std::string_view VolumeError(size_t index) const;
     void Update();
 
     u64 GetGeometryBytes() const { return mGeometryBytes; }
@@ -183,6 +275,7 @@ public:
 
 private:
     void Upload();
+    void UploadTextures();
     void WriteDynamicData();
 
     struct GpuMesh
@@ -196,6 +289,8 @@ private:
     SceneDesc mDesc;
     GpuScene mGpu;
     std::vector<GpuMesh> mMeshes;
+    std::vector<rhi::TextureHandle> mTextures;  // of the texture sets: two each, or a neural set's latents
+    std::vector<rhi::BufferHandle> mNeuralData; // the neural sets' constants and weights
     rhi::BufferHandle mInstances;
     // Host-visible rings, one slot per frame in flight + 1, so writing a slot never races the GPU.
     std::vector<rhi::BufferHandle> mMaterialRing;
@@ -204,6 +299,8 @@ private:
     std::vector<rhi::BufferHandle> mLightTreeRing;
     std::vector<u32> mLightTreeRingCapacity;
     std::vector<rhi::BufferHandle> mInstanceLightRing;
+    std::vector<rhi::BufferHandle> mLightGroupRing;
+    std::vector<u32> mLightGroupRingCapacity;
     std::vector<rhi::BufferHandle> mSkyRing;
     std::vector<u32> mSkyRingCapacity;
     SkyTable mSkyTable; // of mSkyTableFor
@@ -213,8 +310,31 @@ private:
     // get new ones.
     void DestroyClouds();
     void DestroyAerial();
+    void UpdateVolumes();
     Clouds mCloudsFor;
     bool mCloudsBuilt = false;
+    // One per SceneDesc::volumes entry, built from `desc`; they too never change once uploaded.
+    struct LoadedVolume
+    {
+        Volume desc;
+        gpu::VolumeData data{}; // enabled == 0: none (disabled, or its file could not be read)
+        rhi::TextureHandle density;
+        rhi::BufferHandle majorants;
+        // The bricks: per level its indirection, distances, bricks and ranges, and the occlusion
+        // texture; `march` and `levels` with their bindless indices (march.levels is set with the table).
+        std::vector<rhi::BufferHandle> brickBuffers;
+        rhi::TextureHandle ao;
+        gpu::VolumeMarchData march{};
+        gpu::VolumeBrickLevel levels[gpu::kVolumeLevels]{};
+        std::string error;
+        // The voxels its file or plume gave, kept (up to 512 MiB over all volumes) for edits of the
+        // optics or the placement, which then need no new read of the file; shared by the volumes
+        // with the same source.
+        std::shared_ptr<const VolumeGrid> grid;
+    };
+    void DestroyVolume(LoadedVolume& volume);
+    std::vector<LoadedVolume> mVolumes;
+    bool mVolumesBuilt = false;
     u32 mRingSlot = 0;
     bool mDirty = true;
     u64 mGeometryBytes = 0;

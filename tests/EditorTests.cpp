@@ -76,7 +76,8 @@ TEST(Editor_RunsFramesHeadless)
     {
         HeadlessUi ui;
         editor::EditorApp app(*device, tasks, SmallOptions());
-        EXPECT(app.GetActiveFeatures().size() == 2);
+        // nrd needs D3D12 and declines here: pathtracer, taa, tonemap.
+        EXPECT(app.GetActiveFeatures().size() == 3);
         for (int i = 0; i < 4; ++i)
         {
             ui.Frame(app);
@@ -87,6 +88,22 @@ TEST(Editor_RunsFramesHeadless)
     }
     device->WaitIdle();
     EXPECT(device->GetMemoryStats().liveTextures == 0);
+}
+
+TEST(Editor_StartsWithParameters)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorOptions options = SmallOptions();
+    options.parameters = {{"pathtracer.maxBounces", "5"}, {"pathtracer.nrc", "2"}};
+    editor::EditorApp app(*device, tasks, options);
+    EXPECT(app.GetParameter("pathtracer", "maxBounces") == "5");
+    EXPECT(app.GetParameter("pathtracer", "nrc") == "2");
+    ui.Frame(app);
+    EXPECT(app.GetLastResult().validationErrors.empty());
+    app.Resize(128, 72); // later runners keep the current values
+    EXPECT(app.GetParameter("pathtracer", "nrc") == "2");
 }
 
 TEST(Editor_ResizeKeepsParameters)
@@ -134,6 +151,22 @@ TEST(Editor_SwitchesScenesAndDebugViews)
     const auto path = std::filesystem::temp_directory_path() / "airender_editor_test";
     EXPECT(app.SaveScreenshot(path));
     EXPECT(std::filesystem::exists(path.string() + ".ppm") && std::filesystem::exists(path.string() + ".pfm"));
+}
+
+// The smoke scene: its volume in the Scene panel (and its controls' IDs clash with no others) and
+// in the frames.
+TEST(Editor_ShowsTheSmokeScenesVolume)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorApp app(*device, tasks, SmallOptions());
+    EXPECT(app.LoadScene("smoke"));
+    for (int i = 0; i < 3; ++i)
+    {
+        ui.Frame(app);
+        EXPECT(app.GetLastResult().validationErrors.empty());
+    }
 }
 
 // Paused, the profiler keeps the captured frame while frames keep rendering; Step captures one more.
@@ -282,6 +315,51 @@ TEST(Editor_DlssToggleRestoresAccumulation)
     EXPECT(app.GetParameter("pathtracer", "accumulate") == "true" && app.GetParameter("pathtracer", "spp") == "8");
     ui.Frame(app);
     EXPECT(app.GetLastResult().validationErrors.empty());
+}
+
+// The denoiser choice: without nrd (it declines on the Null device) the editor accumulates; choosing
+// DLSS inserts it and switches to real-time frames, choosing accumulation again restores progressive
+// frames.
+TEST(Editor_DenoiserChoice)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorApp app(*device, tasks, SmallOptions());
+    EXPECT(app.GetDenoiser() == editor::EditorApp::Denoiser::Accumulate);
+    EXPECT(app.GetParameter("pathtracer", "accumulate") == "true");
+    app.SetDenoiser(editor::EditorApp::Denoiser::Dlss);
+    EXPECT(app.GetDenoiser() == editor::EditorApp::Denoiser::Dlss);
+    EXPECT(app.GetParameter("pathtracer", "accumulate") == "false");
+    ui.Frame(app);
+    app.SetDenoiser(editor::EditorApp::Denoiser::Accumulate);
+    EXPECT(!app.IsDlssEnabled());
+    EXPECT(app.GetParameter("pathtracer", "accumulate") == "true");
+    ui.Frame(app);
+    EXPECT(app.GetLastResult().validationErrors.empty());
+}
+
+// The neural texture choice reloads the scene: with LibNTC its sets are compressed and reported, without
+// it the plain textures load and the editor says why; frames run either way.
+TEST(Editor_NeuralTexturesReloadTheScene)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorOptions options = SmallOptions();
+    options.scene = "textured";
+    options.neuralTextures.steps = 500;
+    options.neuralTextures.cache = std::filesystem::temp_directory_path() / "airender-ntc-editor-tests";
+    editor::EditorApp app(*device, tasks, options);
+    EXPECT(app.GetNeuralTextureMode() == renderer::NeuralTextureMode::Off && app.GetNeuralTextureReport().empty());
+    app.SetNeuralTextureMode(renderer::NeuralTextureMode::OnSample);
+    EXPECT(app.GetNeuralTextureMode() == renderer::NeuralTextureMode::OnSample);
+    EXPECT(app.GetNeuralTextureReport().size() == 3 || !app.GetNeuralTextureError().empty());
+    ui.Frame(app);
+    ui.Frame(app);
+    EXPECT(app.GetLastResult().validationErrors.empty());
+    std::error_code ignored;
+    std::filesystem::remove_all(options.neuralTextures.cache, ignored);
 }
 
 // One slow frame (pipelines compiling) must not commit the viewport size of that frame: the render

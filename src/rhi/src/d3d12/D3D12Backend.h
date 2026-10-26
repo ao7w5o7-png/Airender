@@ -105,6 +105,7 @@ struct D3D12Buffer
     D3D12_GPU_VIRTUAL_ADDRESS address = 0;
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
+    BindlessIndex cbv = kInvalidBindless;
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
@@ -191,10 +192,20 @@ struct TimestampFrame
 };
 
 // A command allocator + command list pair. Recycled once the GPU has finished with it.
+// Built against the preview Agility SDK (AIR_D3D12_PREVIEW): Shader Model 6.10 linear algebra.
+#ifdef D3D12_PREVIEW_SDK_VERSION
+#define AIR_D3D12_LINEAR_ALGEBRA 1
+#else
+#define AIR_D3D12_LINEAR_ALGEBRA 0
+#endif
+
 struct CommandContext
 {
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList4> list;
+#if AIR_D3D12_LINEAR_ALGEBRA
+    ComPtr<ID3D12GraphicsCommandListPreview> preview; // ConvertLinearAlgebraMatrix, with linearAlgebra
+#endif
     u64 fence = 0; // fence value on its queue that releases it
 };
 
@@ -222,7 +233,7 @@ public:
 
     void Barriers(std::span<const Barrier> barriers) override;
     void CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size) override;
-    void CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset) override;
+    void CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset) override;
     void CopyTexture(TextureHandle dst, TextureHandle src) override;
     void CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip) override;
     void ClearTexture(TextureHandle texture, const float color[4]) override;
@@ -234,6 +245,7 @@ public:
 
     void BuildBlas(AccelStructHandle blas, BufferHandle scratch) override;
     void BuildTlas(AccelStructHandle tlas, std::span<const TlasInstance> instances, BufferHandle scratch) override;
+    void ConvertMatrices(std::span<const MatrixConversion> conversions) override;
 
     void BeginRenderPass(TextureHandle target, const float* clearColor) override;
     void EndRenderPass() override;
@@ -312,6 +324,7 @@ public:
     BindlessIndex GetBindlessSRV(TextureHandle texture) override;
     BindlessIndex GetBindlessUAV(TextureHandle texture, u32 mip) override;
     BindlessIndex GetBindlessSRV(BufferHandle buffer) override;
+    BindlessIndex GetBindlessCBV(BufferHandle buffer) override;
     BindlessIndex GetBindlessUAV(BufferHandle buffer) override;
     BindlessIndex GetBindlessSRV(AccelStructHandle tlas) override;
     BindlessIndex AllocateBindlessSlot() override;
@@ -322,6 +335,7 @@ public:
     AccelStructHandle CreateTlas(const TlasDesc& desc) override;
     void DestroyAccelStruct(AccelStructHandle as) override;
     u64 GetAccelStructScratchSize(AccelStructHandle as) override;
+    u64 GetMatrixSize(u32 rows, u32 columns, MatrixType type, MatrixLayout layout, u32 stride) override;
 
     PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc) override;
     PipelineHandle CreateRayTracingPipeline(const RayTracingPipelineDesc& desc) override;
@@ -422,6 +436,9 @@ private:
     ComPtr<IDXGIFactory6> mFactory;
     ComPtr<IDXGIAdapter1> mAdapter;
     ComPtr<ID3D12Device5> mDevice;
+#if AIR_D3D12_LINEAR_ALGEBRA
+    ComPtr<ID3D12DevicePreview> mDevicePreview; // with mCaps.linearAlgebra
+#endif
     ComPtr<ID3D12InfoQueue1> mInfoQueue;
     DWORD mInfoQueueCookie = 0;
     bool mGpuUploadHeap = false;
@@ -470,6 +487,25 @@ private:
 
 std::unique_ptr<Swapchain> CreateD3D12Swapchain(D3D12Device& device, const SwapchainDesc& desc);
 D3D12_RESOURCE_STATES ToStates(Access access);
+
+#if AIR_D3D12_LINEAR_ALGEBRA
+inline D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT ToD3D12(MatrixLayout layout)
+{
+    switch (layout)
+    {
+    case MatrixLayout::RowMajor: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_ROW_MAJOR;
+    case MatrixLayout::ColumnMajor: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_COLUMN_MAJOR;
+    case MatrixLayout::MulOptimal: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_MUL_OPTIMAL;
+    case MatrixLayout::OuterProductOptimal: return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_OUTER_PRODUCT_OPTIMAL;
+    }
+    return D3D12_LINEAR_ALGEBRA_MATRIX_LAYOUT_ROW_MAJOR;
+}
+
+inline D3D12_LINEAR_ALGEBRA_DATATYPE ToD3D12(MatrixType type)
+{
+    return type == MatrixType::Float16 ? D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT16 : D3D12_LINEAR_ALGEBRA_DATATYPE_FLOAT32;
+}
+#endif
 
 #define AIR_D3D12_CHECK(expr, ...)                                                                                     \
     do                                                                                                                 \

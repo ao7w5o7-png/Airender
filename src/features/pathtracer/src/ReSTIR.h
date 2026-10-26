@@ -28,8 +28,12 @@ public:
 
     // Loads the ReSTIRDI*.cs and ReSTIRGI*.cs shaders from shaderDir.
     void Initialize(const std::filesystem::path& shaderDir);
-    bool IsDiAvailable() const { return mDiInitial.IsValid() && mDiTemporal.IsValid() && mDiSpatial.IsValid(); }
-    bool IsGiAvailable() const { return mGiTemporal.IsValid() && mGiSpatial.IsValid(); }
+    bool IsDiAvailable() const
+    {
+        const Pipelines& p = mPipelines[0];
+        return p.diInitial.IsValid() && p.diTemporal.IsValid() && p.diSpatial.IsValid();
+    }
+    bool IsGiAvailable() const { return mPipelines[0].giTemporal.IsValid() && mPipelines[0].giSpatial.IsValid(); }
 
     // What PathTracer.Trace writes for the passes this frame.
     struct TraceOutputs
@@ -45,9 +49,11 @@ public:
 
     // Adds the passes of the kinds BeginFrame started. `scene` carries the trace pass's frame and scene
     // indices. The spatial passes add their estimates into `accumulation` when shadeDirect /
-    // shadeIndirect (the views that show that light).
+    // shadeIndirect (the views that show that light), and split by lobe into the denoiser signals when
+    // they are valid (slots::kDiffuseSignal, kSpecularSignal).
     void AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, const gpu::ReSTIRConstants& scene,
-                   rdg::TextureRef accumulation, bool shadeDirect, bool shadeIndirect);
+                   rdg::TextureRef accumulation, rdg::TextureRef diffuseSignal, rdg::TextureRef specularSignal,
+                   bool shadeDirect, bool shadeIndirect, bool coatModels);
 
     // A frame without ReSTIR: the next one starts without history.
     void Invalidate();
@@ -65,11 +71,20 @@ private:
     void Release(History& history);
 
     rhi::Device& mDevice;
-    rhi::PipelineHandle mDiInitial;
-    rhi::PipelineHandle mDiTemporal;
-    rhi::PipelineHandle mDiSpatial;
-    rhi::PipelineHandle mGiTemporal;
-    rhi::PipelineHandle mGiSpatial;
+    // The passes' pipelines: [0] the plain ones, [1] with the clear coats' random walk and network
+    // (ReSTIR*Neural.hlsl, AIR_PT_NEURAL: what the trace's neural kernels shade coated materials with),
+    // created the first time a scene with coated materials comes.
+    struct Pipelines
+    {
+        rhi::PipelineHandle diInitial;
+        rhi::PipelineHandle diTemporal;
+        rhi::PipelineHandle diSpatial;
+        rhi::PipelineHandle giTemporal;
+        rhi::PipelineHandle giSpatial;
+    };
+    Pipelines LoadPipelines(bool coatModels);
+    std::filesystem::path mShaderDir;
+    Pipelines mPipelines[2];
     History mPrimaryHits;
     History mDiHistory; // final reservoirs
     History mGiHistory;

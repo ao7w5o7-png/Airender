@@ -7,6 +7,8 @@
 # [numthreads(...)] are compute shaders with entry point Main (cs_6_6). A line
 # `// air-shader-target: lib_6_9` (or cs_6_x) sets the kind and profile explicitly, for variants that
 # include a shared kernel or need a newer shader model; `// air-shader-dxil-only` skips SPIR-V.
+# Shader Model 6.10 targets (cs_6_10: dx/linalg.h) are compiled by the preview dxc
+# (AIR_DXC_PREVIEW_EXECUTABLE, with 16-bit types) to DXIL only, and skipped without it.
 # Outputs:
 #   <build>/shaders/<feature>/<Stem>.lib.dxil | <Stem>.cs.dxil      (always)
 #   <build>/shaders/<feature>/<Stem>.lib.spv  | <Stem>.cs.spv       (AIR_RHI_VULKAN only)
@@ -14,7 +16,7 @@
 # headers recompiles. Without a dxc (AIR_DXC_EXECUTABLE) this is a no-op.
 #
 # air_write_shader_manifest() (called once at the end of the top-level CMakeLists.txt) writes
-# <build>/shaders/manifest.json: the compiler and, per output, its arguments and the files it
+# <build>/shaders/manifest.json: per output, its compiler, arguments and the files it
 # depends on. renderer::ShaderHotReload and `tools/air.py shaders` compile from it, with exactly the
 # build's command lines.
 
@@ -36,11 +38,12 @@ endfunction()
 # Records one compiled output for the hot reload manifest. ARGS: compiler arguments without the
 # source and -Fo; WATCH: files whose change recompiles it.
 function(air_add_shader_manifest_entry)
-    cmake_parse_arguments(ARG "" "NAME;SOURCE;OUTPUT;FORMAT" "ARGS;WATCH" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME;SOURCE;OUTPUT;FORMAT;COMPILER" "ARGS;WATCH" ${ARGN})
     air_json_strings(args ${ARG_ARGS})
     air_json_strings(watch ${ARG_WATCH})
+    string(REPLACE "\\" "/" compiler "${ARG_COMPILER}")
     set_property(GLOBAL APPEND PROPERTY AIR_SHADER_MANIFEST
-        "{\"name\": \"${ARG_NAME}\", \"format\": \"${ARG_FORMAT}\", \"source\": \"${ARG_SOURCE}\", \"output\": \"${ARG_OUTPUT}\", \"args\": ${args}, \"watch\": ${watch}}")
+        "{\"name\": \"${ARG_NAME}\", \"format\": \"${ARG_FORMAT}\", \"source\": \"${ARG_SOURCE}\", \"output\": \"${ARG_OUTPUT}\", \"compiler\": \"${compiler}\", \"args\": ${args}, \"watch\": ${watch}}")
 endfunction()
 
 function(air_write_shader_manifest)
@@ -89,6 +92,19 @@ function(air_compile_shaders)
         else()
             message(FATAL_ERROR "${source}: no [shader(...)] or [numthreads(...)] entry point found")
         endif()
+        set(compiler "${AIR_DXC_EXECUTABLE}")
+        set(previewArgs "")
+        set(debugArgs -Qembed_debug -Zi)
+        if(profile MATCHES "_6_1[0-9]$")
+            if(NOT AIR_DXC_PREVIEW_EXECUTABLE)
+                continue() # no preview compiler: the feature falls back to its portable kernels
+            endif()
+            set(compiler "${AIR_DXC_PREVIEW_EXECUTABLE}")
+            set(previewArgs -enable-16bit-types -I "${AIR_DXC_PREVIEW_INCLUDE}")
+            # The preview compiler's debug info misplaces inlined functions' scopes, which the
+            # driver's DXIL verifier prints at every pipeline creation: these build without it.
+            set(debugArgs "")
+        endif()
         set(profileArgs -T ${profile})
         if(kind STREQUAL "cs")
             list(APPEND profileArgs -E Main)
@@ -109,20 +125,20 @@ function(air_compile_shaders)
         list(APPEND watch ${commonShaderHeaders})
         list(REMOVE_DUPLICATES watch)
 
-        set(common ${profileArgs} -HV 2021 -WX -Wno-ignored-attributes -Zpr ${includeArgs} -I "${dir}")
+        set(common ${profileArgs} -HV 2021 -WX -Wno-ignored-attributes -Zpr ${previewArgs} ${includeArgs} -I "${dir}")
         set(dxil "${outDir}/${stem}.${kind}.dxil")
         add_custom_command(
             OUTPUT "${dxil}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${outDir}"
-            COMMAND "${AIR_DXC_EXECUTABLE}" ${common} -Qembed_debug -Zi "${source}" -Fo "${dxil}"
+            COMMAND "${compiler}" ${common} ${debugArgs} "${source}" -Fo "${dxil}"
             DEPENDS "${source}" ${localHeaders} ${depends}
             COMMENT "dxc ${ARG_NAME}/${stem}.${kind}.dxil"
             VERBATIM)
         list(APPEND outputs "${dxil}")
         air_add_shader_manifest_entry(NAME ${ARG_NAME} SOURCE "${source}" OUTPUT "${dxil}" FORMAT dxil
-                                      ARGS ${common} -Qembed_debug -Zi WATCH ${watch})
+                                      COMPILER "${compiler}" ARGS ${common} ${debugArgs} WATCH ${watch})
 
-        if(AIR_RHI_VULKAN AND NOT text MATCHES "// air-shader-dxil-only")
+        if(AIR_RHI_VULKAN AND NOT text MATCHES "// air-shader-dxil-only" AND NOT previewArgs)
             set(spv "${outDir}/${stem}.${kind}.spv")
             add_custom_command(
                 OUTPUT "${spv}"
@@ -134,6 +150,7 @@ function(air_compile_shaders)
                 VERBATIM)
             list(APPEND outputs "${spv}")
             air_add_shader_manifest_entry(NAME ${ARG_NAME} SOURCE "${source}" OUTPUT "${spv}" FORMAT spirv
+                                          COMPILER "${AIR_DXC_EXECUTABLE}"
                                           ARGS ${common} -spirv -fspv-target-env=vulkan1.3 -fvk-use-scalar-layout
                                           WATCH ${watch})
         endif()

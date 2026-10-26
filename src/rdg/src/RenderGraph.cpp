@@ -7,6 +7,7 @@
 #include "air/core/Profiler.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <format>
 #include <memory>
@@ -535,8 +536,15 @@ void RenderGraph::BuildBarriers()
         resources.push_back(resource);
     };
 
-    // The batch that used each resource last (any queue); 0 is the prologue, ~0u none yet.
-    std::vector<u32> lastBatch(mResources.size(), ~0u);
+    // Per resource, the batch of its last write or change of state (any queue; 0 is the prologue, ~0u
+    // none yet), and the last batch of every queue that read it since then.
+    constexpr size_t kQueues = size_t(rhi::QueueType::Count);
+    std::vector<u32> lastChange(mResources.size(), ~0u);
+    std::vector<std::array<u32, kQueues>> readsSince(mResources.size());
+    for (std::array<u32, kQueues>& reads : readsSince)
+    {
+        reads.fill(~0u);
+    }
     auto waitFor = [&](u32 batch, u32 other)
     {
         u32& wait = mBatches[batch].waitFor[size_t(mBatches[other].queue)];
@@ -552,12 +560,33 @@ void RenderGraph::BuildBarriers()
         {
             const Resource& r = mResources[a.resource];
             const Access before = state[a.resource];
-            // Any use of a resource last used on another queue waits for that use: covers read after
-            // write, write after read and state changes (two reads in a row also wait: conservative).
-            const u32 previous = lastBatch[a.resource];
-            if (previous != ~0u && mBatches[previous].queue != pass.queue)
+            // A use waits for the last write or change of state on another queue (read after write);
+            // a write or a change of state also for every read since then on the other queues (write
+            // after read). Reads that leave the state as it is run side by side on both queues.
+            // (An imported resource already in the state needs no barrier at its first use either.)
+            const bool read = (touched[a.resource] || r.imported) && before == a.access && !IsWriteAccess(a.access);
+            const u32 changed = lastChange[a.resource];
+            if (changed != ~0u && mBatches[changed].queue != pass.queue)
             {
-                waitFor(pass.batch, previous);
+                waitFor(pass.batch, changed);
+            }
+            if (!read)
+            {
+                for (size_t q = 0; q < kQueues; ++q)
+                {
+                    const u32 reader = readsSince[a.resource][q];
+                    if (reader != ~0u && q != size_t(pass.queue))
+                    {
+                        waitFor(pass.batch, reader);
+                    }
+                }
+            }
+            // The batch that hands a graphics-only state over: the last use there.
+            u32 previous = changed;
+            for (size_t q = 0; q < kQueues; ++q)
+            {
+                const u32 reader = readsSince[a.resource][q];
+                previous = reader != ~0u && (previous == ~0u || reader > previous) ? reader : previous;
             }
             if (!touched[a.resource] && !r.imported)
             {
@@ -588,7 +617,16 @@ void RenderGraph::BuildBarriers()
             }
             touched[a.resource] = true;
             state[a.resource] = a.access;
-            lastBatch[a.resource] = pass.batch;
+            if (read)
+            {
+                u32& reader = readsSince[a.resource][size_t(pass.queue)];
+                reader = reader == ~0u ? pass.batch : std::max(reader, pass.batch);
+            }
+            else
+            {
+                lastChange[a.resource] = pass.batch;
+                readsSince[a.resource].fill(~0u);
+            }
         }
         mStats.barrierCount += u32(pass.barriersBefore.size());
     }

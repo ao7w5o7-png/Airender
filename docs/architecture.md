@@ -111,7 +111,7 @@ Files: `src/rhi/include/air/rhi/`
 | Backend | Status | Notes |
 |---|---|---|
 | Null | ✅ working | No GPU; real memory bookkeeping, command capture and barrier validation. Used by unit tests, CI and GPU-less debugging |
-| D3D12 | ✅ working | Agility SDK 1.619, SM 6.6 bindless, DXR 1.1 pipelines (1.2 shader execution reordering when available), graphics + async compute queues, per-queue GPU timestamps, debug layer and DRED with `enableValidation` |
+| D3D12 | ✅ working | Agility SDK 1.721 preview (1.619 retail without `AIR_D3D12_PREVIEW`), SM 6.6 bindless, DXR 1.1 pipelines (1.2 shader execution reordering when available), Shader Model 6.10 linear algebra (§3.4), graphics + async compute queues, per-queue GPU timestamps, debug layer and DRED with `enableValidation` |
 | Vulkan | 🚧 stub | Plan: Vulkan 1.3 (dynamic rendering, sync2, timeline semaphores), KHR ray tracing pipeline + ray query |
 
 ### 3.3 Queues
@@ -136,6 +136,57 @@ Compute for passes flagged `PassFlags::AsyncCompute` (§5.4).
   some queue was inside a scope (`ComputeBusyMs`). They differ by waits: a queue waiting for
   another, or, at vsync, a submission that writes a swapchain buffer waiting on the GPU for it
   (the editor's last batch, once async compute splits the frame). The editor shows busy time.
+
+### 3.4 Linear algebra (Shader Model 6.10)
+
+Small neural networks (§8.11) multiply on the GPU's matrix units through Shader Model 6.10's
+thread-scope matrices (`dx/linalg.h`, the successor of cooperative vectors): each thread multiplies
+its own vector by a matrix in memory, and the hardware gathers a wave's.
+
+- **Toolchain** (`AIR_D3D12_PREVIEW`, on by default): the preview Agility SDK (its runtime goes to
+  `.\D3D12\`, and the executable exports `D3D12_PREVIEW_SDK_VERSION`) and the preview DXC, which
+  compiles only the shaders marked `// air-shader-target: cs_6_10` (with 16-bit types, DXIL only;
+  the manifest records each shader's compiler for hot reload and `air.py shaders`). Without it
+  those shaders are not built and their features fall back to float32 kernels.
+- **Device**: `DeviceDesc::experimentalShaderModels` enables D3D12's experimental shader models
+  before the device exists (Windows Developer Mode only; a device that fails with them is created
+  again without). `DeviceCaps::linearAlgebra` reports linear algebra tier 1 with what the networks
+  use: float16 matrix x vector products, transposed too, float16 outer products accumulated into
+  float32 matrices in a buffer. The Null device pretends, so the passes run headless.
+- **Layouts**: the optimal layouts (`MatrixLayout::MulOptimal`, `OuterProductOptimal`) are the
+  device's own; `Device::GetMatrixSize` gives their sizes and `CommandList::ConvertMatrices` copies
+  matrices between layouts and types (source in `SRVCompute`, destination in `UAVCompute`, offsets
+  128-byte aligned).
+- **What this driver does** (RTX 5070, driver 617.42, Agility SDK 1.721.3-preview), measured with
+  standalone probes and `aircli mlp-check`:
+  - a ray tracing pipeline whose ray generation shader multiplies crashed when created; the same code
+    in a compute shader runs (the cache's trace kernels are compute shaders with inline ray queries);
+  - multiplications made only by the threads that took a branch after a loop with breaks returned
+    NaN for about 1% of threads, although simple divergence (a branch, an early return, loops of
+    different lengths) was exact: the kernels call them with every thread of the wave;
+  - float16 x float16 products are summed in float16 blocks (about 7e-4 relative error per output,
+    against 1.4e-4 for a single rounding);
+  - the debug layer does not validate Shader Model 6.10 shaders (it says so once per pipeline).
+
+### 3.5 Shader language: HLSL, not Slang
+
+Every shader is HLSL compiled by DXC. Slang (a shading language with automatic differentiation,
+modules and generics, the language of NVIDIA's neural shading samples) was assessed for the neural
+work (§8.11, §8.16, §8.17) and is not needed:
+
+- **What neural rendering needs from the language**: matrix x vector products on the matrix units
+  (DXC's `dx/linalg.h`, §3.4), and gradients for training. The networks are small and of one shape
+  (`MlpShared.h`), so their backward pass is written by hand once (`MlpGradients.hlsli`) and checked
+  against the CPU twin (`aircli mlp-check`); automatic differentiation would save that one file.
+- **Third-party code**: LibNTC's shader headers compile with DXC (`Inference.hlsli`; its
+  cooperative-vector variant includes `dx/linalg.h` unless compiled as Slang); its only Slang shader
+  is compiled into `libntc.dll`. NRD and DLSS ship HLSL or binaries.
+- **What Slang would cost**: a second compiler beside DXC (which the preview linear algebra needs
+  anyway) in the build, hot reload and `air.py shaders`; and the CPU twins compile the integrator's
+  `.hlsli` as C++ (`HlslCompat.h`), which Slang's generics and interfaces would not.
+- **When to revisit**: networks of many shapes whose gradients are a burden to write and check by
+  hand, or a backend DXC does not reach (Metal). Slang reads HLSL, so `.slang` files could be added
+  through a second compiler entry in `AirShaders.cmake` without porting the existing shaders.
 
 ---
 
@@ -301,9 +352,12 @@ The graph schedules it in `Compile()`:
    previous frame and using an imported resource the batch writes (a LUT, a reservoir buffer).
    With it, compute work overlaps this frame's graphics passes, and a frame's GPU timings
    (first to last timestamp) cover only that frame.
-3. **Waits**: any use of a resource last used on another queue waits for the batch of that use.
-   This covers read after write, write after read and state changes; two reads in a row also
-   wait (conservative). Waiting for a later batch of a queue covers its earlier ones, so a batch
+3. **Waits**: a use of a resource waits for its last write or change of state on another queue
+   (read after write); a write or a change of state also waits for every read on the other queues
+   since then (write after read). Reads that leave the state as it is run side by side on both
+   queues (the volume probes read the shadow maps on the compute queue while the trace reads them
+   on the graphics queue, §8.13), and so does the first use of an imported resource in the state
+   its import declared. Waiting for a later batch of a queue covers its earlier ones, so a batch
    keeps one wait per queue.
 4. **Hand-over**: a transition the compute queue cannot make (e.g. `RenderTarget -> SRVCompute`)
    is recorded at the end of the graphics batch that used the resource last (the prologue for an
@@ -377,6 +431,7 @@ right and, if not, what is wrong, without a GPU and without looking at a screen.
 | Command stream | `aircli render --dump-commands` | Every GPU command of a frame (barriers, dispatches, events) with resource names |
 | Snapshots | `tests/golden/*.txt` + `air.py golden-update` | Render graph and command stream of reference scenarios; any behaviour change is a reviewable text diff |
 | Image comparison | `aircli compare ref.pfm test.pfm --diff d.ppm` | rmse / psnr / max error / differing pixel fraction (JSON) and a diff heatmap |
+| Neural network kernels | `aircli mlp-check --backend d3d12` | The GPU's float32 and linear algebra network kernels against the CPU's: outputs, input and weight gradients (JSON, exit 1 when they disagree; §8.11) |
 | Scaffolding | `air.py new-feature <name>` | New feature skeleton |
 | Conventions | `air.py format` / `tidy` / `layers` | Formatting, static analysis (naming + bug patterns), module layering |
 
@@ -395,7 +450,11 @@ Principles:
 
 Image tests: `Image` reads and writes PFM (linear HDR, exact) and PPM (8-bit preview).
 `render --output` reads the final frame back; `aircli compare` measures rmse / psnr against a
-reference (see §8.3).
+reference (see §8.3). For what happens over time in real time (temporal filters, denoisers):
+`--output-frames N` also writes the N - 1 frames before the last (`image.<frame>.pfm`), and
+`--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]` moves the camera every frame (metres along its own
+axes, degrees). Flicker is the change between a static camera's frames; trails are the difference
+between a moving camera's frame and a static camera's at the same place (§8.13).
 
 ---
 
@@ -403,8 +462,8 @@ reference (see §8.3).
 
 Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Registered as the
 `pathtracer` feature with parameters `spp`, `maxBounces`, `targetSamples`, `accumulate`, `guides`,
-`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `restir*` (§8.7), `furnace`, `debugView`, `ser`
-and `debugScale`.
+`nee`, `lightTreeBounces`, `cloudEvents` (§8.10), `volumeEvents` (§8.12), `volumeMarch` and the other
+`volume*` (§8.13), `restir*` (§8.7), `nrc*` (§8.11), `furnace`, `debugView`, `ser` and `debugScale`.
 
 ### 8.1 Units and scene
 
@@ -436,9 +495,21 @@ and `debugScale`.
   | `terrain` | 2.1M triangle height field, lake, physical sky and sun | dense geometry, BLAS build and memory |
   | `sunset` | a plain, two spheres and five pillars under a sun 4 degrees high | the physical sky (§8.9), long shadows |
   | `cumulus` | a 4 km meadow, a farmstead and trees under fair-weather cumulus | volumetric clouds (§8.10): their light, shadows, cost |
+  | `smoke` | smoke rising from a brazier in a walled yard, the low sun behind it | volumes (§8.12): scattering, NEE in a medium, its shadow |
+  | `braziers` | three overlapping plumes over braziers at dusk, a lantern among them | several volumes and light groups near them (§8.13) |
+  | `textured` | a courtyard corner of tiles, bricks and riveted metal plates in the afternoon sun | material textures and normal maps (§8.15), neural texture compression (§8.16) |
+  | `coated` | the courtyard with clear coats: red car paint, blue lacquer, amber-lacquered tiles, coated plates | clear coats and their network (§8.17) |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
+- File scenes (§8.18; `MakeScene` and `SceneNames` cover both kinds), made from model files that
+  `python3 tools/air.py fetch-scenes` downloads into `.deps/scenes`:
+
+  | Scene | Content | What it tests |
+  |---|---|---|
+  | `picapica` | SEED's PICA PICA assets: a toy factory of plastic machines, pallets, books and seven robots around the mini diorama, on a table in the afternoon sun (886k triangles, 592 instances) | real assets, many small parts and materials, decals (cutouts), emissive LEDs, a clear coat |
+  | `sponza` | the Sponza atrium under the sky through its open roof (262k triangles, 25 texture sets) | textures and normal maps at scale, cutout foliage, indirect light in arcades |
+  | `helmets` | the flight, damaged and sci-fi helmets of the glTF sample assets on plinths (134k triangles) | physically based texture sets (metal, roughness, normal maps) |
 
 ### 8.2 Integrator
 
@@ -453,12 +524,25 @@ differ.
   dielectric is a GGX coat (F0 = 0.04) over a Lambert base that receives exactly the energy the coat
   did not reflect. A white material reflects 100% at every roughness and angle (white furnace).
   The albedo tables are built on the CPU at startup (`GetBsdfLut`) and uploaded once.
+- **Shading normals** (`EvaluateSurfaceBsdf`, `SampleSurfaceBsdf`): where the shading normal (the
+  interpolated one, or a normal map's) leans away from the triangle's, part of the diffuse lobe points
+  below the surface, where no light comes from. That part is mirrored in the surface's plane back
+  above it (the reflection off a facet of Schuessler et al.'s microfacet-based normal mapping, 2017,
+  with the surface as the facet): a direction above the surface also gets the diffuse lobe's value and
+  pdf at its mirror image, and a diffuse sample below the surface is mirrored, so sampling, evaluation
+  and MIS agree. White furnace, CPU reference at 128 bounces: `textured` -1.76% -> -0.58%, `terrain`
+  -0.19% -> -0.03%, `sphere_field` -0.19% -> -0.15% (mostly metal). Mirroring the specular lobes too
+  kept all of it (-0.04%, -0.001%, -0.05%) but takes a second evaluation of the whole BSDF, which cost
+  every kernel 5-7% of its frame in registers (17% with coats), also where nothing is mirrored; the
+  diffuse lobe's mirror costs nothing measurable (`coated` +4%). Coated materials are not mirrored.
 - **Light transport**: next event estimation over emissive triangles chosen by power, combined
   with BSDF sampling by the power heuristic (MIS). Emitters are one sided (front = `cross(e1, e2)`).
   The light list is also a Walker/Vose alias table, so choosing a light is O(1) (one or two loads)
   whatever the light count; the alias decision uses its own random number, so the selection
   probability is exactly `probability`, as MIS assumes. A light tree can choose instead (§8.6).
-  Russian roulette from the third bounce.
+  Russian roulette from the third bounce ends paths without bias; `maxBounces` (32) is a cap only.
+  At 8 (the earlier default) `door`, lit through a door ajar, lacked 13% of its indirect light
+  (`cornell_box` 1%, `sponza` and `picapica` under 0.05%); 32 costs 1-7% of a real-time frame.
 - **Hardware ray tracing**: a DXR ray generation shader runs the whole path (bounce loop in raygen);
   primary, bounce and shadow rays are inline `RayQuery`s. `TraceRay` into a closest-hit shader (20
   byte payload) measured 19-29% slower on every test scene at 1080p (cornell_box 2.00 -> 1.53 ms,
@@ -470,7 +554,12 @@ differ.
   by hit instance, the hit is read from the object without a closest-hit call; `pathtracer.ser=1` on
   GPUs that reorder, `DeviceCaps::shaderExecutionReordering`) and `PathTracerGi.hlsl`
   (`AIR_PT_RESTIR_GI`: records ReSTIR GI's candidates, §8.8; compiled apart because that state
-  halves the plain kernel's speed).
+  halves the plain kernel's speed). `PathTracerNrc.hlsl` and `PathTracerNrcPortable.hlsl` (§8.11)
+  end paths in the neural radiance cache; they are compute shaders (`AIR_PT_COMPUTE`) that run the
+  same `TracePixel` with inline ray queries. `PathTracerVolume.hlsl` (`AIR_PT_VOLUME`) tracks the
+  scene's volume (§8.12) and runs instead of the plain kernel while there is one;
+  `PathTracerVolumeShadows.hlsl` (`AIR_PT_VOLUME_SHADOWS`) lights surfaces through the real-time
+  volumes' moment shadow maps instead, when they are marched (§8.13).
 - **Guides** (albedos, normal/roughness, depth, motion) are written only when an active feature
   lists them in `RenderFeature::ConsumedSlots()` (dlss does): they cost about a tenth of the trace.
 
@@ -505,7 +594,9 @@ differ.
 ### 8.3 Validation
 
 - `tests/BsdfTests.cpp`: white furnace for metal and dielectric, energy bound, reciprocity, sampled
-  weight equals evaluation, sampling matches uniform integration.
+  weight equals evaluation, sampling matches uniform integration; on a surface whose shading normal
+  leans 35 degrees away the diffuse lobe keeps its albedo and nothing is gained, and its sampling
+  matches uniform integration around the surface (`Bsdf_Surface*`).
 - `tests/IntegratorTests.cpp`: an emissive white room collects exactly `B + 1` times the emission
   (B = bounces), NEE and BSDF-only estimators agree, furnace spheres average 0.18.
 - `aircli reference` renders the same scene with the CPU reference renderer (BVH + the shared
@@ -521,7 +612,13 @@ differ.
 
 `pathtracer.debugView` selects what `Resolve` writes: 0 lit, 1 normals, 2 base color,
 3 roughness, 4 metallic, 5 first-hit distance, 6 intersection count heatmap (Turbo colormap),
-7 path length heatmap, 8 direct light only, 9 indirect light only. `debugScale` scales the distance and heatmap views. `furnace=1` turns every
+7 path length heatmap, 8 direct light only, 9 indirect light only (the global illumination, before
+denoising; `nrd.view=1` shows it denoised, §8.14), 10 what the neural radiance cache predicts the
+first surface reflects (§8.11), for the real-time volumes (§8.13) 11 their march's steps, 12 its
+adaptive sampling rate, 13 the volumes per ray, and 14 the neural coat (§8.17): blue where the
+clear coats' network shades the first surface, green / red where it brightens / darkens the
+analytic approximation towards the mirror direction (full at 2x / 0.5x), purple for a coat another
+model evaluates, grey elsewhere. `debugScale` scales the distance and heatmap views. `furnace=1` turns every
 material white and every emitter off with a uniform environment, so any visible structure is an
 energy error.
 
@@ -532,8 +629,8 @@ were added:
 
 | Stage | Resolution | Writes | Features |
 |---|---|---|---|
-| `Scene` | render (`FrameContext::renderWidth/Height`) | `FrameContext::sceneColor` | pathtracer |
-| `Upscale` | render -> output | `FrameContext::output`, sets `outputWritten` | dlss |
+| `Scene` | render (`FrameContext::renderWidth/Height`) | `FrameContext::sceneColor` | pathtracer, nrd |
+| `Upscale` | render -> output | `FrameContext::output`, sets `outputWritten` | dlss, taa |
 | `Post` | output (`FrameContext::width/height`) | `FrameContext::output` in place | tonemap, example |
 
 The render resolution is the output resolution times `FrameRunnerDesc::renderScale` (`aircli
@@ -544,14 +641,20 @@ wrote the output (dlss missing, disabled, failed, or a debug view) FrameRunner a
 the output is always defined.
 
 Features communicate only through `renderer::Blackboard` (`FrameContext::blackboard`), never by
-including each other. Slots live in `renderer::slots`:
+including each other. FrameRunner asks every feature for the slots it consumes each frame (a feature
+a parameter switched off consumes none), and producers skip what nobody consumes. Slots live in
+`renderer::slots`:
 
 | Slot | Producer | Contents |
 |---|---|---|
-| `kDiffuseAlbedo`, `kSpecularAlbedo` | pathtracer (`guides=1`) | First-hit albedos |
+| `kDiffuseAlbedo`, `kSpecularAlbedo` | pathtracer (`guides=1`) | First-hit directional albedos of the BSDF's diffuse and other lobes (`GuideAlbedos`) |
 | `kNormalRoughness` | pathtracer | World normal + roughness |
 | `kViewDepth` | pathtracer | Distance along the view axis in metres |
 | `kMotionVectors` | pathtracer | Previous minus current position, in pixels |
+| `kColorBeforeTransparency` | pathtracer (real-time volumes, §8.13) | The frame resolved without the volumes over it; consuming it marks a denoiser of the whole frame |
+| `kDiffuseSignal`, `kSpecularSignal` | pathtracer (real time, lit view) | The first surface's reflected indirect light per lobe, a = its reflected ray's length (§8.14) |
+| `kSurfaceTransmittance` | pathtracer (real-time volumes) | What the volumes leave of the surfaces' light (absent: 1) |
+| `kRealTime` | pathtracer | The frame holds its own jittered samples only (not accumulated) |
 | `kJitterX/Y`, `kHistoryReset` | pathtracer | Sub-pixel jitter; history is invalid this frame |
 | `kOutputIsDisplay` | pathtracer | Output is a display-referred debug view: do not tonemap or denoise |
 
@@ -565,7 +668,9 @@ including each other. Slots live in `renderer::slots`:
   phases (at least 32). The jitter is passed negated (NGX takes the image shift, the opposite of
   the sample offset); a static camera must give a steady image (`dlss.flipJitter=1` shows the
   wrong sign for comparison). The NGX feature is created in `Initialize()`; if NGX rejects the
-  size it passes the frame through. It refuses to run on other backends.
+  size it passes the frame through. It refuses to run on other backends. When a producer publishes
+  `kColorBeforeTransparency` it passes it as RR's color-before-transparency guide, from which RR
+  tells transparent layers from the surfaces behind them (§8.13).
 - GPU timings are only meaningful when the GPU has VRAM to spare: with other processes (graphics
   debuggers, IDEs) holding most of it, WDDM pages resources to system memory and every pass slows
   down by an order of magnitude. Check `vramUsageBytes` / `vramBudgetBytes` in the report and the
@@ -635,9 +740,11 @@ with GI: receivers, neighbours, push constants), `ReSTIRDIInitial/Temporal/Spati
 
 - **Split with the path tracer**: with `kFlagReSTIR`, `PathTracer.Trace` leaves out the direct light
   from emissive triangles at the first surface (no NEE there, and no emission found by its BSDF
-  sample), and writes the first sample's hit (`PrimaryHit`: instance, primitive, barycentrics, plus a
-  normal, roughness and distance for the choice of neighbours). The passes rebuild the surface from it with the
-  integrator's own `LoadSurface`, so they shade exactly what the path tracer would have, and add
+  sample), and writes the first sample's hit (`PrimaryHit`: instance, primitive, barycentrics,
+  distance, the shading normal and the material after its textures in float16). The passes rebuild
+  the surface's geometry from it with the integrator's own `LoadSurface` and take its normal and
+  material as stored, so they shade exactly what the path tracer did without reading textures again
+  (a neural texture set decoded on sample, §8.16, would cost a decode per pass and neighbour), and add
   the result (times the samples per pixel) to the accumulation before `PathTracer.Resolve`. The
   environment is still reached only by BSDF sampling, and deeper vertices keep NEE.
 - **Samples**: a point on an emissive triangle (light index, barycentrics), the same point in every
@@ -698,7 +805,10 @@ Validation (`aircli render --set pathtracer.debugView=8` isolates the direct lig
 
   The unbiased MIS rays cost about 0.1 ms; each neighbour about 0.4 ms on `many_lights`, each light
   candidate about 0.1 ms. Rebuilding a surface from its `PrimaryHit` costs about 0.1 ms per use
-  (six per pixel), cheaper in total than storing a full-precision G-buffer twice.
+  (six per pixel), cheaper in total than storing a full-precision G-buffer twice. Storing the material
+  (40 bytes a hit, from 24) also made the receivers of normal-mapped surfaces agree with the trace:
+  rebuilt without the camera ray, a bent normal's side was judged differently, and ReSTIR GI on
+  `textured` was 0.31% dark against NEE, now 0.10%.
 - When frames accumulate, ReSTIR's correlated samples converge about as fast per unit of time as
   plain paths (§8.8 has the measurement), and with several samples per pixel per frame only the first
   one's light is resampled; hence the default of running it in real time only.
@@ -911,11 +1021,784 @@ Validation:
   scattering in thick media is the most expensive transport here, and noisy: a cloud pixel's
   samples have a relative standard deviation of about 0.8, so clouds need hundreds of samples (or
   a denoiser).
+  In real time the clouds are ray marched into maps instead (§8.19).
 - The air between a ray's origin and its first collision with the clouds dims and adds to their
   light (§8.9's aerial perspective), so distant clouds fade into the haze.
 - Not modelled: the planet's curvature (the layer is flat and ends 100 km along a ray), wind, the
   scene's own geometry lighting the clouds, the clouds' shadows in the air between them and the
   viewer.
+
+### 8.11 Neural radiance cache
+
+`pathtracer.nrc` (0 off, 1 when not accumulating, 2 always; off by default) ends paths in a neural
+radiance cache (Mueller et al. 2021, "Real-time Neural Radiance Caching for Path Tracing"): a small
+network, trained every frame on a few longer paths, predicts the light a path vertex reflects. A
+path ends at the first vertex where its footprint has spread past `nrcSpread` (0.01) times the
+primary vertex's (as if the camera emitted uniformly; usually the first diffuse bounce, while
+mirror-like chains go on), or at its last vertex, and adds the cache's prediction there instead of
+its continuation: far less noise from long paths and fewer rays, for some bias. While the cache
+runs it replaces ReSTIR GI (§8.8); ReSTIR DI keeps the first surface's direct light.
+
+- **Network** (`renderer/shader/MlpShared.h`, `renderer/NeuralNetwork.h`): 64 inputs, two hidden
+  layers of 64 ReLU neurons, 3 outputs (16 rows, the rest zero), no biases (an input held at 1).
+  The inputs are a multiresolution hash grid of the position (Mueller et al. 2022: 16 levels of 2
+  features from 16 to 512 cells across the scene's box, 2^`nrcTableLog2` (16) entries per level),
+  spherical harmonics up to degree 3 of the direction the light leaves in, the shading normal, the
+  roughness and both albedos. The outputs are reflected radiance times the camera's exposure (O(1)
+  values, safe in float16; when the exposure changes the output layer is rescaled) divided by the
+  albedo sum (the network learns the light, not the materials).
+- **Training paths** (`shaders/NrcShared.h`): one pixel per tile of pixels (`nrcTrainingPaths`,
+  32768 per frame; tiles of 2 x 2 at 480 x 270, 8 x 8 at 1080p) traces a training path, at a pixel
+  that moves every frame. Its own render query is deferred to `NRC.Resolve`, so that every thread of
+  the trace makes exactly one cache lookup; the path goes on for a suffix that ends in the cache in
+  turn (self-training: the cache learns infinite bounces from its own predictions), except 1 in
+  `nrcUnbiased` (16) paths, which go on until Russian roulette or their last vertex. Every vertex of
+  a training path (at most 6; not the first with ReSTIR DI, whose direct light is not in the path)
+  becomes a record: its inputs and the light the rest of the path found it reflect per unit of
+  throughput up to it, the tail's prediction included.
+- **Optimizer**: `nrcSteps` (4) steps per frame, each on a scattered quarter of the training paths
+  (a multiplicative permutation of the path indices); the relative L2 loss of the luminance
+  (prediction error over the prediction's squared luminance plus 0.01, which trains dark and bright
+  regions alike); Adam at `nrcLearningRate` (0.01, beta 0.9 / 0.99), L2 regularization 1e-6 of the
+  MLP's weights, sparse updates of the hash grid (entries no sample touched keep their moments).
+  Loss gradients are clamped only far out (65536 per output): a cache learns the mean of its noisy
+  targets, which their rare bright samples carry, and clamping them at 64 made `door` 28% dark.
+- **Kernels**: on the matrix units (`nrcLinearAlgebra`, §3.4) the weights are float16 MulOptimal
+  matrices: forward passes multiply, backpropagation multiplies by the same matrices loaded as
+  MulOptimalTranspose, and every weight gradient is an outer product accumulated atomically into
+  float32 OuterProductOptimal matrices, converted to row major for the optimizer, which writes new
+  float16 weights that are converted back. Backpropagated gradients are scaled by 1/64 for float16
+  range (the optimizer divides it out). Without linear algebra the float32 kernels run
+  `renderer/shader/Mlp.hlsli`, the code the CPU twin (`renderer/Mlp.h`) runs, summing weight
+  gradients over each wave before 64-bit fixed point atomics. Hash grid gradients are 64-bit fixed
+  point atomics in both (exact and order independent). The float32 master parameters, Adam's
+  moments and the gradients live in `renderer::NeuralNetwork`, whose passes any feature can use.
+- **Passes**: `PathTracer.Trace` (the cache's kernel variant, a compute shader: every thread
+  predicts at the end of its path, those without a query on a dummy one), `NRC.Resolve` (the
+  training paths' render queries into the accumulation), then per step `NRC.Train[i]`,
+  `NRC.Mlp.ConvertGradients`, `NRC.Mlp.Optimize`, `NRC.Mlp.ConvertWeights`. A new scene starts a
+  new network. The cache's pipelines are created the first time it runs
+  (`renderer::LazyComputePipeline`): the driver takes 0.7 s to compile them.
+- `debugView=10` shows what the cache predicts the first surface reflects.
+
+Validation:
+
+- `tests/MlpTests.cpp`: backpropagation agrees with finite differences for 400 weights, all 64
+  inputs and the hash grid's entries at all 16 levels; the spherical harmonics are orthonormal
+  (4e-5); Adam fits a function of position and direction from 0.87 to 0.033 mean relative error
+  in 400 steps; the GPU network's passes on the Null device. `PathTracer_RadianceCacheTrainsEveryFrame`
+  checks the cache's passes, the float32 kernels and the views.
+- `aircli mlp-check --backend d3d12` runs the GPU's network kernels on 1024 random inputs and loss
+  gradients against the CPU: the float32 kernels agree to 2e-7 (relative RMS); the linear algebra
+  ones to 7e-4 for the outputs, 1.4% for the weight gradients and 2.7% for the input gradients
+  (float16 sums, and the ReLUs float16 rounding switches near zero); one transposed load made
+  untransposed shows as 143%.
+- White furnace (`furnace=1`): the `furnace` scene's spheres vanish (accumulated, -0.01%). Inside
+  the Cornell box, where albedo 1 keeps nearly all light and a self-trained cache feeds on its own
+  predictions, it reads +1.4% (1 in 1 paths unbiased) to +2.6% (1 in 16) over the true 0.18, which
+  8 bounces of plain path tracing (then the default) miss by 14%.
+- Against a same-jitter reference (2048 spp), 480 x 270, 4 spp per frame after 62 frames, relative
+  MSE (bias of the mean):
+
+  | Scene | Plain paths | ReSTIR DI + GI | ReSTIR DI + cache |
+  |---|---|---|---|
+  | cornell_box | 0.052 | 0.0092 | 0.0127 (-1.4%) |
+  | door | 11.4 | 0.84 | 0.98 (+2.7%) |
+  | terrain | 0.0076 | 0.0082 | 0.0075 (-0.02%) |
+  | sunset | 0.135 | 0.190 | 0.057 (-0.16%) |
+  | sphere_field | 0.231 | 0.432 | 0.062 (+0.10%) |
+
+  The cache's mean moves by about 0.5% from frame to frame as it trains. In closed rooms whose
+  light arrives through few paths (the box's ceiling, the door) the first bounce's sampling
+  dominates the noise, and ReSTIR GI's reuse across pixels wins there.
+- Cost (RTX 5070, cornell_box, 960 x 540, 1 spp, ReSTIR DI off): trace 0.99 ms (0.49 ms without the
+  cache), `NRC.Resolve` 0.04 ms, 4 steps of training 4 x 0.28 ms and optimizer 4 x 0.05 ms: about
+  2.4 ms. The float32 kernels take 15 ms (trace 4.1 ms, training 9.7 ms): the matrix units are 4.2
+  times faster at inference and 8.4 at training.
+- Not done yet: ReSTIR GI's candidates ending in the cache (the reuse of the first bounce together
+  with the cache's tail); averaging the weights over steps for inference (steadier predictions);
+  scenes that move (the network restarts with the scene).
+
+### 8.12 Volumes: smoke and OpenVDB grids
+
+`SceneDesc::volumes` (`renderer/Volume.h`, up to 16) put boxes of voxels among the surfaces that
+absorb and scatter light: grids of OpenVDB files, or procedural plumes of smoke. They may overlap
+(their densities add up). `smoke` uses one plume; `aircli render|reference --volume
+FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] [--volume-grid NAME] [--volume-at
+X,Y,Z[,SIZE]]` sets a scene's volume, once per volume (the n-th `--volume` sets or adds the n-th,
+`--volume-grid` and `--volume-at` apply to the last one given, `none` removes them all), `aircli vdb
+FILE [--read GRID]` lists a file's grids (and reads one as a volume would), and the editor's Scene
+panel lists, adds, edits and removes them. In real time (not accumulating) they are ray marched over
+the path traced surfaces by default instead of tracked (§8.13).
+
+- **OpenVDB without the library** (`renderer/Vdb.h`; the format is described at the top of
+  `src/renderer/src/Vdb.cpp`): files of format version 222 (OpenVDB 2.0) on, float, double and half
+  grids (and floats saved as halves) of 5-4-3 trees, their values raw or compressed with zlib or
+  Blosc (LZ4, byte shuffled), with or without active-mask compression, and transforms that scale
+  uniformly and translate. The decoders are `core/Compression.h` (inflate, LZ4 blocks, Blosc 1
+  frames). Level sets, vector grids, rotated or anisotropic transforms and frustum maps are refused
+  with the reason. A grid is read over the bounds of its active voxels (leaves and active tiles) and
+  averaged while it is read over blocks of factor^3 voxels so that its longest side fits
+  `maxResolution` (256, at most 2048): the full-resolution Disney cloud (1.5e9 active voxels) never
+  becomes a 6 GB dense grid. Voxel i's centre is at i x scale + translation (OpenVDB's convention).
+- **Placement**: `size` > 0 scales the box to that many metres along its longest side, its bottom
+  centred on `position`; 0 keeps the file's own size and place, moved by `position`. Grids are read
+  as stored: a file from a Z-up tool lies on its side. `renderer::Scene` builds each volume on its
+  own: one that did not change keeps its resources, and it keeps the voxels it read (up to 512 MiB in
+  all, shared by volumes of the same source), so edits of the optics or the placement do not read the
+  file again; another file, grid, resolution or seed does.
+- **The plume** (`MakeSmokePlume`): 64 x 128 x 64 voxels of 2.5 cm, a swaying column of value noise
+  that widens with height and fades out in its top 30%.
+- **On the GPU** (`renderer::BuildVolume`, `renderer::Scene`): per volume, the densities as an
+  R16_FLOAT 3D texture with a zero voxel around them (hardware trilinear filtering through the static
+  linear-clamp sampler reads zero outside), and majorants for cells of 8^3 texels: the largest
+  texel trilinear filtering reaches from inside a cell, as rounded to half floats, times the
+  extinction. `GpuScene::volumeTable` holds a `gpu::VolumeData` per volume that loaded, with the
+  bindless indices of its resources. `shader/VolumeLookup.hlsli`, shared with the CPU reference (which emulates the filter,
+  `renderer::SampleTexture3DClampedR16`), marches a 3D DDA over the cells that skips empty ones:
+  delta tracking finds collisions, ratio tracking (Russian roulette below 0.1) transmittance; the
+  Henyey-Greenstein phase function is sampled exactly.
+- **Transport** (`Integrator.hlsli`): every ray, camera or bounce, is delta tracked through the
+  volumes up to its surface, each volume on its own: the nearest collision wins (the first collision
+  in a sum of media is distributed as the nearest of each medium's first collision, and the medium
+  it is in is the one that scattered), and each volume is tracked only up to the nearest collision
+  found so far. A collision is a path vertex: the throughput takes that volume's albedo, NEE samples
+  a triangle light (the light tree without a receiver cosine, or by power) and the sun, their
+  transmittance through the volumes (the product of each one's ratio tracking estimate; and the
+  clouds, for the sun), weighed by the power heuristic against phase sampling, which continues the
+  path. NEE from surfaces is dimmed by the volumes' transmittance too, which casts their shadows. Scattering events are not
+  bounces: a path takes up to `pathtracer.volumeEvents` (256) of them on top of its `maxBounces`
+  surfaces, and Russian roulette ends a walk only once its throughput has fallen below 0.25 (as the
+  clouds' walks do), so walks through a bright medium are not cut short by chance. ReSTIR DI and GI
+  and the radiance cache stay off while the scene has a volume: they do not model media.
+- At a collision on the first segment the guides and debug views show the medium: its albedo, a
+  normal facing the camera, the collision's distance.
+
+Validation:
+
+- `tests/VolumeTests.cpp`: placement and padding; along 3000 random rays the density never exceeds
+  the majorant of the DDA's segment (its ends included); ratio and delta tracking match a 1 mm ray
+  march of exp(-optical depth) for rays of optical depth 0.1-3, also up to a surface halfway;
+  averaging down keeps the mass; the phase function integrates to 1 and its samples follow its CDF
+  for g from -0.5 to 0.9; a disabled volume is transparent, a missing file gives none and says why.
+- `tests/VdbTests.cpp`: zlib streams made by zlib (stored, fixed and dynamic Huffman blocks)
+  inflate; corrupt ones fail with a message; LZ4 blocks and Blosc frames (stored, split into byte
+  streams, 256-byte blocks with leftovers, 2- and 4-byte elements); a small writer's files in every
+  encoding (raw, active mask, zlib, Blosc in one or 256-byte blocks, floats or halves, tiles and
+  inactive values) read to the same voxels in the same place; reading at a lower resolution equals
+  averaging the full grid down; listing grids, and why one cannot be read.
+- Real files (not in the repository): openvdb.org's `smoke`, `smoke2`, `fire`, `explosion` and
+  `bunny_cloud` and the Walt Disney Animation Studios cloud (eighth and sixteenth resolution) decode
+  to the sums of densities (leaves and tiles) an independent reader finds, to 1e-11.
+- `Integrator_VolumeVanishesInAWhiteFurnace`: with albedo 1 in a uniform environment every pixel is
+  0.18 within 0.1%; `Integrator_OverlappingVolumesVanishInAWhiteFurnace` the same with two crossing
+  plumes of different densities and anisotropies.
+- `Integrator_TwoHalvesOfAVolumeLookLikeTheWhole`: two copies of the plume at half its extinction,
+  lit from the side by the sun, give the image of the whole within 2% (512 spp).
+- `Scene_VolumeResourcesFollowEdits`: a volume that does not change keeps its resources when another
+  is added or fails to load; the table holds the volumes that loaded.
+- `Integrator_VolumeNeeAndPhaseSamplingAgree`: three views, the plume's shadow on the wall and the
+  plume lit from the side in a 12-degree sun, and the plume with its shadow on the ground under a
+  3 m lamp: NEE with MIS and sampling alone agree within 4% at 512-1024 spp (at 16 times that, to
+  0.15%, 0.26% and 0.04%); taking the transmittance out of any of the four NEE estimates fails it
+  (the side-lit plume doubles). Sampling alone carries the noise: under a 1.2 m lamp it was 2.5% at
+  1024 spp, too close to the tolerance.
+- GPU against the CPU reference: `smoke` (320 x 180, 16384 against 1024 spp) -0.03%, relative MSE
+  3e-4; the Disney cloud (eighth resolution, 700 m wide, extinction 0.05 /m, g 0.85) above
+  `cumulus` +0.06%.
+- Cost (RTX 5070, 1920 x 1080, 1 spp): `smoke` traces in 7.2 ms (1.6 ms without its plume, 7.7 ms
+  with openvdb.org's smoke in its place), the Disney cloud over `cumulus` in 2.3 ms (0.75 ms
+  without). A dense, bright medium is noisy: the cloud (albedo 1, g 0.85) still sparkles at 256 spp.
+- The volume has a kernel of its own (`PathTracerVolume.hlsl`, `AIR_PT_VOLUME`; its pipeline is
+  created the first time a scene has a volume): compiled into the plain kernel, the tracking code
+  cost every other scene 1-6% (cornell_box +4.9%, sphere_field +5.8%, door +1.3%, sunset +5.4%,
+  three alternating rounds each), with no volume to track.
+- Not modelled: emission (a fire's temperature grid), extinction varying with wavelength, a sparse
+  layout for the path tracer (its grids are dense: 2 bytes a voxel), Z-up files.
+
+### 8.13 Real-time volumes: ray marched, lit through moment shadow maps
+
+Tracking the volumes along every path (§8.12) is exact but costs a frame what the volumes' many
+scattering events cost. In real time (`pathtracer.volumeMarch=1`, the default, when not accumulating;
+`2` also when accumulating, to measure it) the paths ignore the volumes and every pixel ray marches
+them over its path traced surface instead. The design follows Mueller's description of a production
+volume renderer (SIGGRAPH 2026): per-pixel marching of sparse 4-bit bricks; a moment shadow map
+rendered once per light (b0 in R16, four moments in RGBA16) and looked up everywhere, on async
+compute; segments of up to four overlapping volumes per ray; light from the volumes' surroundings
+(here probes) scaled by an occlusion grid; blue-noise jitter that accumulation or a temporal filter
+resolves; adaptive sampling groups that share lighting over 2 x 2 and 4 x 4 pixels; mip levels of the
+volumes; lights cast volume shadows by default, those that matter most to the volumes. Files:
+`src/features/pathtracer/src/VolumeMarcher.*`, `VolumeShadowLayout.*`, `shaders/VolumeMarch*`,
+`VolumeShadow*`, `VolumeProbes*`; `src/renderer/` `VolumeBricks.cpp`, `BlueNoise.cpp`,
+`shader/VolumeBricks*`, `shader/MomentShadow*`.
+
+**Data** (`renderer::Scene`, `GpuScene::volumeMarch`, `volumeLevels`, `lightGroups`):
+
+- *Bricks* (`renderer::BuildVolumeBricks`, `shader/VolumeBricks.hlsli`): each volume at three levels of
+  detail (2^l voxels averaged), cut into bricks of 4^3 voxels stored as 5^3 4-bit codes (the apron
+  voxel makes trilinear filtering local to a brick) scaled between the brick's half-float minimum and
+  maximum, an indirection table (empty bricks hold none) and per brick position its Chebyshev
+  distance to the nearest allocated brick (8 bits, counted up to 15), so that a march leaves all the
+  empty bricks closer than that at once. The plume keeps 2177 of 9537 bricks; its densities read back
+  within 0.0003 on average of the path tracer's texture.
+- *Occlusion grid*: per 8^3 voxels the volume's own mean transmittance over 32 directions, marched at
+  the coarsest level with diffusion's effective extinction, sigma_t sqrt(3 (1 - albedo)(1 - g
+  albedo)): light that scatters on its way in reaches deeper than Beer's law says.
+- *Light groups* (`renderer::BuildLightGroups`): one per emissive instance, its centre, area, summed
+  normal, mean radiance, power and radius; the light triangles carry their group.
+
+**Passes** each frame, around `PathTracer.Trace`:
+
+| Pass | Queue | What it does |
+|---|---|---|
+| `VolumeMarch.Shadows` | compute, async | the moment shadow maps, again only when the scene's version or the shadow settings change |
+| `PathTracer.Trace` | graphics | `PathTracerVolumeShadows.hlsl` (`AIR_PT_VOLUME_SHADOWS`): paths that light surfaces through the maps; writes the frame's samples and their first hit's distance (`PathTracer.FrameSamples`) |
+| `VolumeMarch.Probes` | compute, async, beside the trace | 512 probes per volume, 16 paths each |
+| `VolumeMarch.March` | graphics | every pixel's ray through the volumes in front of its hit, over its samples, into the accumulation; under a denoiser it also rewrites the guides where the volumes hide the surfaces |
+| `PathTracer.Resolve` | graphics | under a denoiser, also the frame without the volumes (`PathTracer.ColorBeforeVolumes`) |
+
+- **Moment shadow maps** (`MomentShadow.hlsli`, `VolumeShadowLayout.cpp`): up to
+  `pathtracer.volumeLights` (8) light groups, ranked by power over (distance to the volumes' box^2 +
+  radius^2), and the sun get maps: orthographic over the box for the sun, octahedral around a point
+  of the group, its depth through a square root (rays from a point cross the volumes in a short
+  stretch of distances). A texel's ray is marched (`VolumeShadowMarch.hlsli`, `volumeShadowLevel` 1,
+  `volumeShadowStep` 1 voxel) and its optical depth's power moments stored as half floats; a lookup
+  reconstructs the transmittance in front of a depth with moment-based order-independent
+  transparency's algorithm (Muenstermann et al. 2018; overestimation 0.25, bias 1e-3: rounded to
+  half floats, moments need a stronger pull than 32-bit ones, `MomentTests.cpp`). A third slice holds
+  the depth of the texel ray's first opaque hit, ray traced (past the light's own instance; for the
+  sun also towards it), filtered as percentage-closer for points inside the volumes; surfaces trace
+  their own opaque shadows and read the moments only.
+- **Large emitters** (`volumeLightOrigins`, 4): a point sees a column of smoke over a bed of embers
+  through its dense foot, which hides the embers' centre from the smoke above while their edges light
+  it past the foot. An open emitter whose radius is at least a quarter of its distance to the volumes
+  plus that radius gets a map from the centre of its area in each quadrant of its plane (around its
+  centre, along the principal axes of the area). A surface reads the one nearest the point its path
+  sampled on the emitter; the march reads one per pixel and frame (`MarchLightSample`: the pixel's
+  quarter of the blue noise ranks, moved on every frame), so every pixel reads each in turn and
+  accumulation or TAA averages them, at the cost of one.
+- **Probes** (`VolumeProbes.hlsl`): 8^3 per volume at the cell centres of a lattice over its box
+  trace the path tracer's paths (`AIR_PT_VOLUME` and `AIR_PT_PROBE`: they track the volumes), 16 a
+  frame along a Fibonacci lattice turned at random per probe and frame. With `kFlagProbe` a path
+  leaves out the light that reaches the probe without scattering from the sun and from the march's
+  light groups, which the march adds itself; the rest (the sky and the surfaces through the volumes,
+  the light the volumes scatter, other emitters) is projected onto L1 spherical harmonics per colour
+  channel. The march scatters it once more, so its single scattering of the probes' light gives all
+  orders beyond the first. The probe field (an RGBA32F 3D texture, `VolumeMarchShared.h`) keeps per
+  probe the three channels and the occlusion grid's value there, filtered trilinearly within a volume.
+  It is a running mean of the frames while the scene stands still and accumulates, 5% a frame when it
+  does not.
+- **The march** (`VolumeMarch.hlsl`, shared with the CPU in `VolumeMarch.hlsli`): a thread group
+  covers 8 x 8 pixels, its lanes in Morton order; it gathers the volumes its rays cross in front of
+  their surfaces and marches the first four. A ray steps from the first box it enters to its surface,
+  `volumeStep` (1) voxels of `volumeLevel` (0) of the smallest voxel among its volumes, from a jitter
+  in [0, 1) (its blue-noise rank moved on by the golden ratio every frame), and jumps over what the
+  bricks' distances say is empty. The thread group reads its volumes and their level into groupshared
+  memory once (`LoadRayVolume`, `LoadRayLevel`), and a step walks a volume's tables once
+  (`BrickSample`: the indirection, then the brick or, where it is empty, the distance); a ray chooses
+  each light group's map once (`MarchChooseMaps`), and volumes of one anisotropy share their phase
+  function's evaluation. Each step: the volumes' extinction and scattering, the sun's light
+  through its map, each light group's (exactly per triangle for up to 8 triangles, by their solid
+  angle, Van Oosterom and Strackee, and the phase function at their centre; else a sphere or a disc of
+  its area) through its maps, and the probes' light (the harmonics convolved with Henyey-Greenstein,
+  which scales band l by g^l) times the ratio of the occlusion grid at the step to the probes' (at
+  most 4): the grid is finer than the probes. A step's light is integrated as if constant over it
+  (energy conserving); the ray ends where the transmittance falls below 1e-3. Over the surface: the
+  volumes' light plus the surface's samples times their transmittance, the air (aerial perspective)
+  fused at the depth the volumes' light comes from (its transmittance-weighted mean).
+- **Adaptive sampling groups** (`volumeAdaptive`, `MarchRayShared`): lighting is most of a step's cost
+  (70-85% here, 80-85% in Mueller's measurements), so a wave lights its steps together where
+  neighbouring pixels would light them alike. It marches one grid of steps (from its rays'
+  nearest entry, at their smallest step, so that a block's steps lie at the same depths on all its
+  rays) and decides per block of steps. Once every ray it still marches has less than
+  `volumeShareBelow2` (0.3) of the light from behind left (Mueller's criterion), or where a voxel at
+  the block's depth covers `volumeShareFootprint2` (2) pixels or more (volumes close to the camera,
+  whose pixels are many and lie within a voxel of each other), each 2 x 2 block of pixels lights 4
+  steps, one per pixel at its own ray's depth, and every pixel's step takes the light of the pixel
+  that lit it; below `volumeShareBelow4` (0.1) or from `volumeShareFootprint4` (4) pixels per voxel,
+  4 x 4 blocks and 16 steps. A pixel lights per unit of scattering (`MarchLightAt`, valid in the empty
+  parts of a box too), and only once a step of the block scatters, so empty space costs no light.
+  Which pixel lights which step turns with a hash of the block, its first step and the frame: with a
+  fixed order the front of the smoke, which shows most, took its light from one side, and wherever the
+  light changes across the image it was biased (-5% over the embers at night). The tiles move by an R2
+  offset every frame, so that blocks do not stay in place (else the converged light stepped every 4
+  pixels). Densities, depths and transmittances stay every pixel's own; the wave skips emptiness where
+  all its rays are empty, and all its lanes stay in the loop.
+- **Under a denoiser** (DLSS Ray Reconstruction, §8.5): it reprojects its history with the guides,
+  which describe the surfaces. Smoke over the sky moved with the sky, and smoke over a far wall with
+  the wall, so moving the camera left trails of smoke behind and the smoke's light flickered as the
+  history failed to match. As RR's integration guide asks for transparent layers, the march rewrites
+  the guides where the volumes hide most of the surface (`DescribeVolumesInGuides`): from an opacity
+  of 0.5, depth, motion and normal together describe the volumes (at the depth their light comes from,
+  facing the camera), and the albedos (towards the volume's albedo, no specular) and roughness (towards
+  1) blend by their opacity. The resolve also writes the frame without the volumes (the trace's samples
+  resolved alike, equal to the frame where no volume is in front), `slots::kColorBeforeTransparency`,
+  which RR takes as its color-before-transparency guide. Strafing past the `braziers` plumes up close
+  at 0.015 m a frame (1920 x 1080, Quality), the last frame against a static camera's at its place
+  (display luminance after x / (1 + x)): mean difference 0.0145 -> 0.0010, 99th percentile 0.158 ->
+  0.0065 (the guides alone 0.0069, the frame without the volumes alone 0.0085); moving forwards at
+  0.02 m a frame 0.152 -> 0.017. Over the last four frames the difference's own change from frame to
+  frame (flicker) fell from 0.0126 to 0.0045 (99th percentile). Turning in place had no trails (no
+  parallax), and a static camera's image is unchanged (within 0.0005).
+- **Over frames** (`volumeTemporal`, `VolumeTemporal.hlsl`): what the march lights changes from frame
+  to frame (its jitter, the maps it reads in turn, the blocks that share light). Accumulation and a
+  denoiser of the whole frame average that; under a denoiser of the surfaces alone (NRD, §8.14) or
+  none, `VolumeMarch.Temporal` does: the march writes its layer (the light in front, the transmittance,
+  the depth that light comes from) instead of laying it over the surfaces, and the pass follows each
+  pixel's layer point back to the previous frame along that depth, clamps the history found there to
+  the 3 x 3 pixels around and blends in `volumeTemporalBlend` (0.1) of this frame. Under NRD at the
+  `braziers` default view, the frame-to-frame deviation's 99th percentile went from 0.0079 to 0.0047
+  (display luminance), and the grain over the embers is gone. 0.1 ms at 1080p.
+- **Debug views** 11 (march steps per pixel, `debugScale` steps to the top of the Turbo colormap),
+  12 (sampling rate: blue every pixel, green 2 x 2, red 4 x 4) and 13 (volumes per ray). Direct-only
+  (8) and indirect-only (9) leave the probes' and the lights' light out of the march respectively.
+- **Render graph**: the probes read the maps on the compute queue while the trace reads them on the
+  graphics queue (reads in the same state no longer wait for each other, §5.4).
+
+Parameters: `volumeMarch`, `volumeStep`, `volumeLevel`, `volumeShadowSize` (256), `volumeShadowLevel`,
+`volumeShadowStep`, `volumeLights`, `volumeLightOrigins`, `volumeAdaptive`, `volumeShareBelow2`,
+`volumeShareBelow4`, `volumeShareFootprint2`, `volumeShareFootprint4`, `volumeAir`,
+`volumeShadowsEveryFrame` (render the maps every frame, to time them), `volumeTemporal`,
+`volumeTemporalBlend`. Status: `volumeMarch` (whether it runs), `volumeMarchLights` (light groups with maps).
+
+**CPU twin** (`pt::RenderVolumeMarchReference`, `VolumeMarchReference.cpp`; `aircli reference
+--volume-march [--frames N] [--probe-frames N] [--volume-step S] [--volume-shadow-size N]
+[--volume-lights N]`): the same shader code on the CPU, the maps marched and ray traced against the
+reference's BVH and stored as half floats, the probes traced by the reference's kernel
+(`AIR_PT_PROBE`), the surfaces by one with `AIR_PT_VOLUME_SHADOWS`, the march at full rate. It
+accumulates `--frames` frames of one camera ray per pixel at the frame's sub-pixel offset, `--spp`
+paths along it (16 by default). So the method can be measured against the path tracer that tracks
+the volumes without a GPU, and the GPU against the method. `pt::VolumeMarchProbe` exposes the maps
+and the light groups' light to tests.
+
+Validation (`src/features/pathtracer/tests/VolumeMarchTests.cpp`, `tests/MomentTests.cpp`,
+`tests/VolumeBricksTests.cpp`):
+
+- An octant-sized triangle lights the march with exactly an eighth of its radiance (isotropic); a
+  sphere and a square of 32 triangles are within 1% of the integral over their triangles, within 8%
+  scattering forwards (g 0.5; the phase function at the centre, +5.6% at worst). A single triangle
+  spanning an octant is 12% dark at g 0.5.
+- The sun's map against the transmittance marched at a quarter voxel through the finest bricks, over
+  1246 points the plume shades: 0.049 on average, 0.26 at worst. It is slightly too dark where the
+  light enters (-0.05 to -0.08 at transmittances 0.7-1) and too bright deep inside (+0.08 at 0.1-0.4),
+  the reconstruction's own error.
+- The embers' four maps against the transmittance towards their four points: 0.027 on average; above
+  1.6 m they let through 0.39 of the light, the embers' centre alone 0.025.
+- Under adaptive sampling, the light a pixel lights for its neighbours times the scattering of their
+  step is that step's own light where it is in smoke: within 3e-7 over 370 points of the `braziers`
+  (three plumes of one anisotropy, the sun and four light groups).
+- White furnace: the plume vanishes, 0.18000 at every pixel.
+- Against tracked volumes on the CPU (24 x 24, the plume close up): in the sun from its side -2.9%, at
+  night over its embers +0.9% (above the embers). With the probes on a lattice of 4^3 the first was
+  -11%; with the embers' map from their centre alone the second was -44%, and -99% for the single
+  scattering above the plume's foot.
+- `PathTracer_RealTimeVolumesAreMarched` (Null backend): the passes and pipelines, the maps rendered
+  once, the probes on the compute queue beside the trace, the status, the debug views, the maps
+  rendered again after a change, tracking while accumulating and the march with `volumeMarch=2`.
+  `PathTracer_RealTimeVolumesGuideDenoisers`: with a feature that reads the guides, the march writes
+  them and the resolve writes the frame without the volumes, not when accumulating.
+- GPU (`volumeMarch=2`, accumulating 512 frames of 4 spp, 160 x 90) against the tracked CPU reference
+  (512 spp): `smoke` -0.01% (the plume +0.55%, relative MSE 0.006), `braziers` +1.1% (the plumes
+  +1.4%); the GPU and the CPU twin agree within 0.3% in the plume.
+- Adaptive sampling against the full rate (`volumeAdaptive=0`; GPU, 1920 x 1080, 256 frames
+  accumulated, where a voxel covers about 5 pixels): the image means within 0.04% in the sun and at
+  night; per 8 x 8 pixels at most 2.1%, 99% of them within 0.6-1.5%, where hard shadow edges on the
+  smoke (a wall's) soften by up to 3 pixels. From 24 m away, where nothing shares by footprint, within
+  0.25% everywhere.
+
+Cost (RTX 5070, 1920 x 1080, 1 spp, `accumulate=0`):
+
+| Scene | Tracked | Trace | March | Probes (async) | Busy |
+|---|---|---|---|---|---|
+| `smoke` | 5.3 ms | 1.9 ms | 0.48 ms | 0.44 ms | 2.4 ms |
+| `braziers` | 10.1 ms | 2.4 ms | 1.19 ms | 0.92 ms | 3.6 ms |
+
+Without adaptive sampling the march takes 0.86 ms (`smoke`) and 3.4 ms (`braziers`), 0.83 and 2.7 ms
+sharing by transmittance alone: in these close-ups (a voxel covers about 5 pixels) the footprint does
+most of it. Without any lighting it takes 0.30 and 0.61 ms. The brick distances, the volumes in
+groupshared memory and one walk of the tables per step took a tenth off. Four maps per ember bed
+cost the `braziers` march 0.03 ms over one map. Mueller reports 0.63-1.82 ms for the main view of
+three production scenes at 1080p on an RTX 5060 Ti (the shadows on async compute aside).
+
+Not modelled: the light the volumes scatter onto surfaces (a wall next to the glowing plume at night
+is 8-11% darker than tracked), volumes seen in reflections and refractions (BSDF-sampled rays from
+surfaces do not meet them), more than four volumes per 8 x 8 pixels, the march through the cloud
+layer (§8.10, which the trace kernels still render), detail finer than the probes beyond what the
+occlusion grid restores, emission.
+
+### 8.14 Real-time denoising: NRD and TAA
+
+In real time (`pathtracer.accumulate=0`, 1 spp) the path tracer's frame is noise. Two chains turn it
+into an image:
+
+| Chain | Features | What it denoises |
+|---|---|---|
+| default (editor) | `pathtracer,nrd,taa,tonemap` | NRD the surfaces' reflected indirect light, TAA the edges and the direct light; the volumes filter themselves (§8.13) |
+| DLSS | `pathtracer,dlss,tonemap` | Ray Reconstruction the whole frame (§8.5), also anti-aliasing and upscaling |
+
+A feature that consumes `kColorBeforeTransparency` denoises the whole frame: nrd and taa then stand
+aside, and the path tracer describes the volumes in the guides (§8.13).
+
+**Signals** (`slots::kDiffuseSignal`, `kSpecularSignal`, `Integrator.hlsli`): NRD denoises diffuse
+and specular indirect light separately, divided by their albedos, with the length of the ray that
+brought it. `TracePath` (with `kFlagSignals`) splits the light its first vertex reflects beyond its
+next event estimation by the diffuse part of the BSDF sample it continued with
+(`BsdfSample::diffuseWeight`), a medium's scattering as diffuse; its own emission, its direct light
+and a miss's sky are in neither. ReSTIR GI splits its shading alike and adds it to the signals.
+The direct light (next event estimation, ReSTIR DI) passes NRD: filtered by it, the shadows spread
+into the lit surfaces around them (edge-stopping by normals and depth does not see a shadow's edge),
+and the frame lost 2% (`textured`) to 10% (`many_lights`) of its light; without it the frame is also
+closer to the reference (`textured`: one frame's RMSE 0.019 -> 0.0065), its residual noise left to
+TAA. The albedos (`GuideAlbedos`, `Bsdf.hlsli`) are the lobes' directional albedos as the BSDF weighs
+them (the diffuse lobe's `1 - Es(wo)`, a coat's inner part). The signals are exposed like sceneColor
+and dimmed by the air like it, but not by the volumes in front: those pass `kSurfaceTransmittance`.
+
+**nrd** (`src/features/nrd/`, D3D12, `AIR_WITH_NRD`): NVIDIA's NRD 4.18 built from source
+(`cmake/AirThirdParty.cmake`: NRD, ShaderMake and MathLib downloaded into `.deps`, its shaders compiled
+to DXIL with our dxc; normal encoding R10G10B10A2, linear roughness). Three passes after the path
+tracer, at the render resolution:
+
+| Pass | What it does |
+|---|---|
+| `NRD.Prepare` | each lobe's light divided by its albedo (at least 0.01), sanitized and packed with NRD.hlsli (RELAX: with the hit distance; REBLUR: YCoCg and the normalized hit distance), the normal and roughness packed |
+| `NRD.Denoise` | NRD's own dispatches, recorded with D3D12 into the RHI's command list: a root signature and pipeline per NRD pipeline (root CBV, one descriptor table, static samplers), its textures (committed, states tracked across dispatches), a shader-visible descriptor heap and an upload buffer for its constants, both rings over the frames in flight. The render graph's textures end in the states it declared |
+| `NRD.Composite` | `color += transmittance * (diffuseAlbedo * (denoised - noisy) + specularAlbedo * (...))`: exactly the signals NRD saw are replaced; emission, sky, volumes and anything the signals do not carry stay as they were |
+
+The editor renders below the viewport under NRD (Render panel, "Render scale", 0.67 by default) and
+TAA upsamples: at 1920 x 1080 a frame of `sponza` took 22.8 ms at full size, 10.3 ms at 0.67 and
+5.8 ms at 0.5, with the image at 0.67 hard to tell apart. Primary rays are about 1 ms of such a frame
+(`maxBounces=0` without NEE or ReSTIR), so a rasterized first hit would save at most that.
+
+Parameters: `enabled`, `denoiser` (0 RELAX, the default; 1 REBLUR), `historyFrames` (30),
+`antiFirefly` (off: it clamps bright samples, 4-5% of `sphere_field`'s light), `view` (1: the
+denoised signals alone, the global illumination, in place of the frame; the editor's "GI only"). Camera
+matrices are the left-handed view with the path tracer's view depth, the motion vectors the path
+tracer's (pixels, previous - current) scaled to UV, the jitter its own.
+
+**taa** (`src/features/taa/`, any backend): the Upscale stage behind nrd. Each output pixel gathers
+the 3 x 3 render samples around it (at pixel + 0.5 + jitter, a Gaussian of the distance), reprojects
+its last result with the motion vectors (Catmull-Rom, kept within the 2 x 2 texels around it), clips
+it to a box in YCoCg and blends in 0.1 of the frame; so it also upsamples a frame rendered below the
+output size. It stands aside for accumulated frames (`kRealTime` 0) and debug views. The box decides
+whether the mean survives (`Taa.hlsli`): around the frame's own noisy samples (mean +- 1.25
+deviations) it is drawn from skewed noise, mostly dark with a few bright samples, so its centre lies
+below the true mean in most frames and its width is small, and the history (which holds the true
+mean) was clipped down: TAA alone took 5% of `sphere_field`'s light. So `TAA.Fast` first keeps a fast
+history (0.25 of each frame, clipped only far out: 3 deviations widened by the pixel's temporal
+deviation, whose second moment its alpha keeps), and `TAA` clips a still pixel's history to the fast
+history's 3 x 3 box (centre unskewed by the frames it averages; 1.6 x `clip` deviations widened by
+what the frames' temporal variance leaves in it). A moving pixel (half a pixel of motion, or any
+camera motion: smoke over the sky has the sky's motion vectors) uses the frame's own box as before,
+the fast history too, so that nothing trails; it gives up some of the mean while it moves. Both
+histories round to half precision at random (`StochasticHalf`): converting on store truncates on this
+GPU, and an average that rounds every update down settles half a step times the frames it averages
+below its inputs.
+Weighing samples by 1 / (1 + luminance) against fireflies (Karis) took 5% of the Cornell box's ceiling
+light, whose few pixels hold half the image's energy: the input is denoised, so it is not done.
+
+Measured (RTX 5070, D3D12; display luminance after x / (1 + x)):
+
+- `cornell_box` 960 x 540: one frame's RMSE against 4096 accumulated spp 0.027 noisy, 0.013 NRD,
+  0.0067 NRD + TAA.
+- `braziers` 960 x 540: RMSE 0.128 noisy, 0.016 NRD, 0.014 NRD + TAA; mean +0.01%.
+- `braziers` 1920 x 1080 static: the frame-to-frame deviation's 99.9th percentile 0.073 with NRD
+  alone (jittered edges crawl), 0.0084 with TAA (DLSS RR 0.0064). Strafing past the plumes up close
+  at 0.015 m a frame, the last frame against a static camera's at its place: 99th percentile 0.013,
+  the error's flicker 0.0035 (DLSS RR 0.012 and 0.0045).
+- Cost at 1920 x 1080: `NRD.Denoise` 1.7 ms (`cornell_box`) to 2.0 ms (`braziers`), `NRD.Prepare`
+  and `NRD.Composite` 0.1 ms each, TAA 0.1 ms.
+
+#### Energy
+
+A denoiser of noise that is skewed (rare bright samples) loses light wherever it clips or clamps, and a
+filter that spreads shadows loses it where they meet the light. The mean of 32 real-time frames (after
+96, 480 x 270) against 2048 accumulated ones, and one frame's RMSE in display luminance x / (1 + x):
+
+| Scene | Before (energy / RMSE) | Now | NRD alone | TAA alone | Frames alone |
+|---|---|---|---|---|---|
+| `sphere_field` | -9.4% / 0.046 | -2.2% / 0.029 | -1.5% | -0.9% | -0.1% |
+| `many_lights` | -12.9% / 0.067 | -2.7% / 0.053 | -1.7% | -1.7% | -0.1% |
+| `textured` | -3.0% / 0.019 | -1.2% / 0.0065 | -1.3% | -0.3% | -0.2% |
+| `coated` | -3.5% / 0.023 | -1.7% / 0.0088 | -1.7% | -0.8% | -0.6% |
+| `cornell_box` | -1.5% / 0.0051 | -0.5% / 0.0083 | -0.5% | -0.1% | 0.0% |
+| `material_grid` | -1.7% | -0.5% / 0.0036 | -0.5% | -0.2% | -0.1% |
+| `braziers` | | +1.0% / 0.011 | +1.0% | +0.9% | +1.0% (the march's own, §8.13) |
+
+- What went: NRD's anti-firefly (4-5% of `sphere_field`), NRD on the direct light (shadows spread:
+  2-10%), TAA's clipping to the frame's skewed neighbourhood (5% of `sphere_field` alone), half
+  precision truncation in TAA's history (0.1-0.2%), guides that did not follow the lobes.
+- What is left: NRD on the indirect light, 0.5-1.7%, and none of RELAX's settings (history clamping,
+  antilag, luminance edge stopping, pre-pass blur, history length, 32-bit textures) moves it; about
+  two thirds of it at `sphere_field`'s edges, where the jitter switches a pixel between surfaces. TAA
+  0.1-1.7%. In a white furnace (all light indirect, ReSTIR GI's noise heaviest) the chain is still
+  3-4% below accumulation on `textured` and `coated`.
+- Cornell box: the RMSE rose (0.0051 -> 0.0083) where the light's edge meets the dark ceiling. TAA's
+  Gaussian reconstruction (`blend` 1: the frame's own mean) puts 0.38 nits outside the edge where the
+  reference's box filter has 0.05; the old clipping cut that halo, and some of the light with it.
+- Trails (the last frame of a strafing camera, 64 frames, against a static camera's at its place,
+  99th percentile of the error): `braziers` 0.0153 (before 0.0153), `cornell_box` 0.0110 (0.0106),
+  `sphere_field` 0.096 (0.085).
+
+Validation: `Nrd_RefusesOnNullDevice`, `Taa_FiltersRealTimeFramesOnly`, `Taa_KnowsWhenTheCameraMoves`,
+`PathTracer_SignalsForDenoisersOfSurfaces` (the trace and ReSTIR write the signals, the march leaves
+the guides alone and filters its layer), `Editor_DenoiserChoice`; on the GPU the D3D12 debug layer
+reports no errors for `cornell_box` and `braziers` with `pathtracer,nrd,taa`.
+
+### 8.15 Material textures
+
+A material may take a texture set (`SceneDesc::textureSets`, `Material::textures`): two RGBA8
+textures of one size that repeat, `color` (the base colour, sRGB) and `surface` (the tangent-space
+normal's x and y mapped to [0, 1] with z following, roughness, metallic). They multiply the
+material's base colour, roughness and metallic (set those to 1 to take the textures as they are) at
+the mesh's texture coordinates times `Material::uvScale`.
+
+- **Shading** (`LoadSurface`, `Integrator.hlsli`): both textures bilinear at level 0 (a path has no
+  footprint to choose a level by; the real-time denoisers and TAA filter what it aliases). The normal
+  map bends the shading normal in the triangle's tangent frame along increasing u and v (from its
+  positions and texture coordinates), orthogonalized against the interpolated normal; a bent normal
+  below the geometric surface is ignored. What its lobes send below the surface is mirrored back above
+  it (§8.2, "Shading normals"), the specular lobes' is lost. Hooks: `LoadTextureSet` (a bindless
+  `StructuredBuffer<TextureSetData>`, `IntegratorParams::textureSets` from `FrameData::textureSets`)
+  and `MaterialTextureSample` (bindless `Texture2D`, the static linear wrap sampler); on the CPU,
+  `SampleTexture2DWrapRGBA8` emulates the hardware: 8 fractional bits, sRGB decoded before filtering.
+- **Cutouts** (`Material::alphaCutoff`, `Cutout.hlsli`): where the colour texture's alpha is below
+  the cutoff the surface is a hole (leaves, chains, decals). The instances of cutout materials are
+  non-opaque in the TLAS (`TlasInstance::opaque`, D3D12 `FORCE_NON_OPAQUE`), every other instance is
+  forced opaque, so the ray queries (`TraceClosest`, `TraceVisible`, ReSTIR's, the probes'; the SER
+  variant makes its hit object from such a query) see candidates only on cutouts and commit those that
+  `AlphaCutsOut` keeps. The CPU reference's BVH runs the same function on a cutout's triangles. Scenes
+  without cutouts measured the same trace time as before. The cutoff is fixed once the scene is
+  uploaded (`SetMaterial` keeps it); neural texture compression leaves the cutouts' sets alone (the
+  codec drops the colour's alpha); the volumes' moment shadow maps take every triangle as opaque.
+- **Procedural sets** (`MaterialTextures.cpp`): a height field per material whose slopes give the
+  normal map, with colour, roughness and metallic from the same pattern, from integer hashes and
+  value noise that repeat with the texture. `MakeBrickTextures` (red bricks in mortar),
+  `MakeTileTextures` (glazed tiles in grout), `MakeMetalPlateTextures` (brushed metal, seams, rivets).
+  The `textured` scene uses all three at 512 x 512.
+- **Validation**: `MaterialTextures_*` (sampling, the sets, Validate), `Integrator_TexturesScaleTheMaterial`
+  (a flat grey texture renders as that grey), `Integrator_NormalMapsKeepTheLightInAWhiteFurnace`:
+  `textured` in a white furnace (16 bounces) is within 1.2% of the environment (3.2% dark before the
+  mirror of §8.2) and gains nothing. GPU against the CPU reference on `textured`: +0.05%.
+  `Integrator_CutoutsLetLightThrough` (a half-transparent panel before an emitting wall).
+
+### 8.16 Neural texture compression
+
+A scene's texture sets may go through neural texture compression (Vaidyanathan et al., *Random-Access
+Neural Compression of Material Textures*, SIGGRAPH 2023) with NVIDIA's LibNTC (RTXNTC 0.10 beta):
+a set's seven channels (colour, the normal's x and y, roughness, metallic) become a few grids of
+4-bit latents and a small MLP (48 -> 64 -> 48 -> 32 -> 16, int8 weights) that decodes a texel from
+them and its position. `cmake/AirThirdParty.cmake` downloads the SDK's prebuilt `libntc.dll` (Windows
+x64) and the library's headers and shaders at the commit that release pins (`AIR_WITH_NTC`, never
+committed); `renderer/NeuralTextures.h` loads the DLL at run time from next to the executable. CUDA
+compresses and decodes through the driver (no toolkit); without the DLL or an NVIDIA GPU the codec
+says why and scenes keep their textures.
+
+- **Modes** (`NeuralTextureOptions`, `aircli --neural-textures off|load|sample[,BPP[,STEPS]]
+  [--ntc-cache DIR]`, the editor's Scene panel and `aireditor --neural-textures`):
+  - **Decode on load**: compressed, then decoded once on CUDA into ordinary textures: the memory on
+    disk / in transit shrinks, the renderer is unchanged.
+  - **Decode on sample**: the GPU keeps only the latents (an RGBA8 2D array: LibNTC's BGRA4 texels
+    widened, which filter the same since x / 15 is exact in 8 bits) and the MLP's constants and
+    weights (`TextureSetData::latents`, `neural`), and the path tracer decodes a texel at every
+    camera-visible hit with LibNTC's own shader code (`libntc/shaders/Inference.hlsli`, int8 dot
+    products). The filter is stochastic (Pharr et al., *Filtering After Shading With Stochastic
+    Texture Filtering*, 2024): the hit picks one texel with a hash of the hit and the frame, the
+    bilinear weights as its probabilities, so one decode replaces four. Deeper vertices, whose
+    footprints are wide, read the set's coarse copy (a quarter of its resolution, box filtered in
+    linear light, `kNeuralTextureCoarseFactor`; what ray cones would choose at most of them), and
+    ReSTIR reads the first surface's material from `PrimaryHit` (§8.7), so a pixel decodes once a
+    frame. The decoder lives in the kernel variants with the neural parts (`PathTracerNeural.hlsl`,
+    `PathTracerGiNeural.hlsl`, `AIR_PT_NEURAL`; also the clear coats' models, §8.17), used while the
+    scene has such sets: compiled into the other kernels its registers cost them 7-10%. The volume and
+    radiance cache kernels read the coarse copy everywhere.
+  - Either way the scene's texels become the decoded ones (with the int8 weights, as the shader
+    decodes), so the CPU reference renders what the GPU does.
+- **Compression** (`NeuralTextureCodec`): `PickLatentShape` for the rate (4 bits per texel asks for
+  3.75), 20000 training steps (about 4 s a set on an RTX 5070 whatever its size; LibNTC's default
+  100000 adds a few dB), the colour learnt in sRGB. Results are cached by content and settings
+  (`<temp>/airender-ntc`). Every channel must belong to a texture of the set's metadata
+  (`AddTexture`, `SetChannels`), else LibNTC learns NaN.
+- **Measured** (`textured`'s three 512 x 512 sets): 2 MiB of RGBA8 each to 113-140 KiB (14-18x), PSNR
+  54-56 dB at 20000 steps (58-63 at 100000; photographed materials reach about 30 dB at 4 bpp). Images
+  accumulated over 2048 frames: decode on load +0.04% against the source textures; decode on sample (the
+  stochastic filter at the first surface, the coarse copy beyond) -0.12% against decode on load, as
+  much as decoding four texels bilinearly at every vertex (the shader's int8 decode against CUDA's);
+  the stochastic filter at every vertex gave -0.28%, shading single texels where bilinear shades their
+  average (normal maps and roughness are not linear in the image). Cost at 1920 x 1080 in real time:
+  `PathTracer.Trace` 3.9 ms with ordinary textures, 7.9 ms decoding on sample (the whole frame 8.4 ->
+  12.4 ms); decoding at every vertex and in every ReSTIR pass took 81 ms. LibNTC's cooperative-vector
+  path (FP8 weights on the matrix units) needs its weights converted on the device by LibNTC with our
+  D3D12 device, not done yet.
+- **Validation**: `aircli ntc-check` decodes every texel of `textured`'s sets with the shader
+  (`NtcCheck.hlsl`, the code the path tracer runs) and compares with CUDA's decode: under 1 / 255 RMS
+  per channel, means within 3e-4. `NeuralTextures_*` (the coarse copy, a scene's latents and its
+  kernels on the Null device, and with LibNTC a codec round trip and the cache), and
+  `Editor_NeuralTexturesReloadTheScene`; on the GPU the debug layer reports no errors.
+
+### 8.17 Neural shading: clear coats
+
+A material may wear a clear coat (`Material::coat`, `coatRoughness`, `coatColor`): a rough
+dielectric interface (index 1.5, GGX) over a layer that absorbs (`coatColor` is what it lets through
+at normal incidence, one way) over the material itself. The light the interface reflects has a
+closed form; the light that enters, bounces between the base and the underside of the interface and
+leaves again (the inner part) has none. Layered materials like this are where neural materials pay
+off (Zeltner et al., *Real-Time Neural Appearance Models*, 2024): a small network stands in for an
+evaluation that is otherwise a stochastic simulation. `pathtracer.coatModel` chooses how the inner
+part is evaluated (`Bsdf.hlsli`):
+
+| Model | What it is |
+|---|---|
+| 0 neural (default) | the approximation times `exp(z)`, z from an MLP trained for the scene's coated materials: noise free |
+| 1 random walk | the reference: one walk between the interface and the base per evaluation, with next event estimation to wi from both ends weighed by the power heuristic (position-free layered BSDF, Guo et al. 2018, as pbrt-v4's `LayeredBxDF` evaluates it); unbiased and noisy |
+| 2 approximate | one bounce off the base through a smooth interface, `(1 - F(wo)) (1 - F(wi)) f_base(wo', wi') T(wo') T(wi') / eta^2`, times `1 / (1 - albedo * 0.596)` for the diffuse light the interface sends back down |
+
+- **The interface**: pbrt-v4's rough dielectric (reflection and refraction, either side, radiance and
+  importance transport, visible normal sampling restricted to a lobe), the Fresnel term exact.
+- **Sampling** serves all three models: the interface's reflection with probability
+  `F(wo) / (F(wo) + (1 - F(wo)) * luminance(base * coat^2))` (clamped to [0.1, 0.9]), else the base's
+  lobes; the inner part evaluated at what was drawn is weighed by that mixture's pdf, so every model
+  is unbiased with respect to its own BSDF and MIS works as for any material. The walk evaluates from
+  a seed hashed from the hit, the frame and wi: the same direction gets the same estimate wherever a
+  frame evaluates it.
+- **The network** (`NeuralCoat.hlsli`, shared by HLSL and C++): 32 inputs (the directions outside and
+  refracted into the layer, their half vectors, azimuth, how far the base's lobe peaks there, sines
+  and cosines of those angles, the material), two hidden layers of 16 ReLUs, three outputs, 852
+  parameters. It corrects the approximation multiplicatively (`|z| <= 6`), so the analytic part keeps
+  the peaks and the colour and the network learns a smooth factor.
+- **Training** (`NeuralCoat.cpp`, on the CPU): `CollectCoatMaterials` samples the scene's coated
+  materials, a textured one by its texels; every step draws 4096 samples (a material, wo from grazing
+  to normal incidence, wi half from the sampling above and half uniform), each with the mean of four
+  walks as its target, and takes an Adam step on the relative L2 error of the inner part (unbiased in
+  the targets' noise: the gradient is linear in them). 1500 steps take about 2.5 s on 23 threads,
+  deterministic (chunks summed in order); results are cached by the materials and settings
+  (`<temp>/airender-neural-coat`; the version in its key goes up when the coat's code changes). The
+  path tracer trains when the coated materials change: at once without a network, else once the scene
+  has been unchanged for 30 frames (an editor slider keeps the last network meanwhile); the CPU
+  reference trains (or finds) the same network. Its weights reach the shaders as a constant buffer
+  (`Device::GetBindlessCBV`): every thread reads the same weights.
+- **Kernels**: coats are compiled only into the kernels with the neural parts (`AIR_PT_NEURAL`:
+  `PathTracerNeural.hlsl`, `PathTracerGiNeural.hlsl` and `ReSTIR*Neural.hlsl`, used while the scene
+  has coated materials or neural textures); elsewhere a coated material is its base. Compiled into
+  every kernel, even unused, the coat cost `cornell_box` 8.0 -> 24.3 ms a frame (the walk's loop inlined
+  into ReSTIR's resampling loops: 47x in `ReSTIRDI.Initial`), its approximation alone 8%. The volume and
+  radiance cache kernels render coated materials without their coats.
+- **Measured** (`coated`, RTX 5070): the network's inner part against 256 walks per direction, over
+  the scene's material samples: 2.2% relative RMS error (the approximation 12%; much of the 2.2% is the
+  reference's own noise); directional albedos within about 1% of the walk's. Images accumulated over
+  2048 frames at 320 x 180 against the walk: network +0.01% (blocks of 8 x 8 pixels: median +0.01%,
+  5th-95th percentile -0.2% to +0.5%), approximation -0.71%; the CPU reference with the same network
+  agrees with the GPU's (block median +0.02%). White furnace (the bases white, the layers clear): the
+  walk 0.940 (a rough interface at grazing angles loses some light to its single scattering) to 1.008
+  (`Coat_WhiteFurnaceRandomWalk`); with the scene's own shapes (64 bounces) the image means are walk
+  -0.13%, network -1.5% (white bases are outside what it trained on), approximation -4.1%. Cost at
+  1920 x 1080 in real time (frame / `Trace`): the approximation 11.4 / 5.0 ms, the network 16.7 / 6.3
+  ms, the walk 22.6 / 6.1 ms (and noisy).
+  A walk limited to 10 events (pbrt's default) lost 8% of a white coated base: light the interface
+  traps by total internal reflection keeps much of its weight for several round trips, so the limit is
+  64 and Russian roulette ends walks early.
+- **Validation**: `aircli coat-check [--scene NAME]` (the network and the approximation against the
+  walk: errors, albedos), `Coat_*` (white furnace, absorption, reciprocity of the walk, sampling against
+  uniform integration for the walk and the approximation, kernels on the Null device),
+  `NeuralCoat_LearnsTheRandomWalk`.
+
+### 8.18 Scenes from model files
+
+`renderer/SceneFiles.h` reads model files into a `SceneDesc` and composes the file scenes of §8.1 from
+them. Their assets are never committed: `python3 tools/air.py fetch-scenes [NAMES]` downloads them
+from pinned commits into `.deps/scenes/<scene>/` (`AIR_SCENE_ASSETS` elsewhere; the renderer looks
+there too), each with its license:
+
+| Scene | Source | License |
+|---|---|---|
+| `picapica` | SEED (Electronic Arts), `SEED-EA/pica-pica-assets` at b433c2e (an archive, sha256 checked) | CC BY-NC 4.0 |
+| `sponza` | Crytek; `KhronosGroup/glTF-Sample-Assets` at 8f49239, `Models/Sponza` | the license that repository names for it |
+| `helmets` | the same repository: `FlightHelmet` (CC0), `DamagedHelmet` (CC BY 4.0, ctxwing), `SciFiHelmet` (CC0) | as listed |
+
+A file scene without its assets fails to load with the command that fetches them. `aircli scenes`
+lists the file scenes too (loaded when their assets are there), `aircli render|reference --model
+FILE[,X,Y,Z[,HEIGHT[,YAW]]]` adds any model file to any scene, and the editor's scene list holds them.
+
+- **Libraries** (`cmake/AirThirdParty.cmake`, `AIR_WITH_MODEL_FILES`, downloaded into `.deps` like the
+  SDKs): ufbx 0.23.1 (FBX, OBJ), cgltf 1.15 (glTF), stb_image (PNG, JPEG, TGA), compiled into one
+  static library without our warnings. Without them `ModelFilesAvailable()` is false and imports
+  report it.
+- **Import** (`ImportModel`): a mesh per mesh and material part (glTF primitive), an instance per node
+  with its world transform, in metres and y up (ufbx converts FBX's axes and unit; `metresPerUnit`
+  overrides a file whose unit is wrong). FBX and OBJ count v upwards: v becomes 1 - v. Normals the file
+  lacks come from the faces. `materialFor` replaces a material by its name, `skipMaterial` and
+  `skipNode` leave geometry out.
+- **Materials**: glTF's metallic-roughness factors and textures (base colour sRGB with its alpha;
+  roughness from green, metallic from blue), normal map, alpha mode (`MASK` and `BLEND` become cutouts
+  at their cutoff, 0.5 for blend), a constant emission (`emissiveFactor`, strength; emissive textures
+  are left out), a clear coat (`KHR_materials_clearcoat` above 0.5). `PackMaterialTextures` resamples a
+  material's textures to one size (the largest, at most `maxTextureSize`, 1024 by default, 2048 for
+  `helmets`): box filtered down, bilinear up; decoded in parallel, each file once.
+- **Normal maps**: glTF's +y points up the image, towards decreasing v, while the renderer bends along
+  increasing v (§8.15), so green flips (`normalGreenUp`); the same holds for FBX and OBJ after their v
+  flip. Checked with the glTF sample `NormalTangentMirrorTest` (`--model`): the normal-mapped spheres,
+  with mirrored texture coordinates too, are lit like the real geometry beside them.
+- **picapica**: the PICA PICA files hold geometry and material names only (the demo's materials are
+  not in the release), and the names say what they were: `PicaMaterial` makes coloured plastics in
+  matte, satin and glossy finishes, metals, rubber and dark glass of them, a clear coat for
+  `Coated_Black_Glossy`, emissive LEDs and lights for the robots. The mug, the books, the crayons'
+  labels and the decals take the textures in the release's folders (the decals as cutouts); the
+  machines' `Plastic_Decals` have none and are left out, as are the blue display stands each model was
+  shown on (the diorama's is its floor). Scales differ by file and the mug's unit is wrong, so they are
+  given per file. One robot is imported and six more instance its meshes.
+- **sponza**: every material of the file scales its texture by 0.588 (a constant diffuse factor the
+  original export carried), which leaves its stone reflecting 10-20% where limestone reflects 40-60%;
+  as most of the arcades' light arrives by bouncing, that darkened them by the factor per bounce. The
+  scene keeps the textures alone (stone 25-36%), at EV100 11 for the shade that fills the view.
+- **Measured** (RTX 5070): loading takes 3.9 s (`picapica`), 1.8 s (`sponza`), 1.9 s (`helmets`), most
+  of it decoding textures; a real-time frame at 1920 x 1080 with `pathtracer,nrd,taa,tonemap`: `sponza`
+  21 ms (`Trace` 8.2 ms), `picapica` 18 ms (5.3 ms). The D3D12 debug layer reports no errors for the
+  three in real time. GPU accumulation against the CPU reference: `sponza` -0.08%, `picapica` -0.04%.
+- **Limits**: emissive textures, transmission and texture transforms are not read; textures are
+  sampled at level 0 (§8.15).
+- **Validation**: `SceneFiles_*` (texture packing and the normal's flip, a glTF and an OBJ written by the
+  test: transforms, units, v, materials replaced and skipped; the names and the missing-assets
+  message), `Integrator_CutoutsLetLightThrough`.
+
+### 8.19 Real-time clouds
+
+In real time (`pathtracer.cloudMarch`, 0 off, 1 when not accumulating (the default), 2 always) the
+clouds of §8.10 are not walked through by every path: a `cumulus` frame at 1920 x 1080 under
+`pathtracer,nrd,taa,tonemap` took 93 ms (`Trace` 89 ms), and takes 7.6 ms with them marched (the
+clouds' passes 0.77 ms). `src/CloudMarcher.h` follows Schneider's Nubis (the clouds of Horizon Zero
+Dawn and Forbidden West, SIGGRAPH 2015-2023): the density is ray marched rather than tracked, empty
+space is skipped whole (the majorant cells of `CloudLookup.hlsli`, which bound the density the way
+Nubis' signed distance field bounds its voxels), a frame marches a sixteenth of the render's pixels
+and reprojects the rest. Its passes run before `PathTracer.Trace`, into three maps the path tracer
+reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
+
+| Pass | Map | Read by |
+|---|---|---|
+| `Clouds.Shadow` | R32F, 512 x 512 over one tile of the clouds (they repeat): the optical depth along the sun from each point of their base up through the layer (steps of at most 25 m), rendered when the scene changes | every sun NEE below the clouds (`CloudSunTransmittance`): the transmittance of the point where the sun's ray crosses their base, instead of ratio tracking |
+| `Clouds.Sky` | RGBA32F, 128 x 128 over the upper hemisphere (the octahedron's upper half): what the clouds add to and leave of the sky towards each direction, seen from the camera (48 steps, fixed offsets) | rays that leave the scene after a bounce (`EscapeRadiance`): the clouds are kilometres away, so one viewpoint serves the scene |
+| `Clouds.March` | one pixel of every 2 x 2 block of the half-size layer, a different one each frame (96 steps, jittered) | `Clouds.Reconstruct` |
+| `Clouds.Reconstruct` | RGBA32F + R32F at half the render size: the marched pixels blended into their history (0.4), the others reprojected along the depth of the clouds' light, clamped to the march's 3 x 3 neighbourhood | the camera's rays (`AddCloudLayer`): the clouds' light added and what they let through scaling the sample and the denoiser's signals, where the ray found nothing before their front |
+
+- **Light at a step**: the sun's single scattering with the clouds' phase function (§8.10, delta-M
+  scaled) and an optical depth towards the sun from 6 samples whose steps double from 30 m; the
+  light that scattered more than once, isotropic, falling off as the two-stream solution of a
+  conservative slab, `4 density / (1 + 0.3 tau)` times the sun's irradiance over 4 pi (octaves of
+  single scattering, Wrenninge et al. 2013, came out 50% dark inside cumulus, whose optical depths
+  towards the sun are tens); the sky's light from 8 directions above and below, `0.4 (up (0.3 + 0.7 h)
+  + down (1 - 0.7 h))` at a height h in the layer. Each step integrates its light with its own
+  extinction (Hillaire 2016). The air in front dims the clouds' light and adds its own where they hide
+  the sky, as a path's walk sees it.
+- **Matched** to the path traced clouds (`cloudMarch=0`, accumulated) on `cumulus` at 640 x 360, the
+  march accumulated with `cloudMarch=2`: the cloud pixels' mean -0.08% (8 x 8 blocks: 5th percentile
+  -12%, 95th +21%; the march's sunlit sides a little dark, their shaded sides a little bright), +5.3%
+  with the sun at 25 degrees, azimuth 160. The half-size layer alone would account for 1% of those
+  blocks.
+- A yawing camera (0.5 degrees a frame) shows no trails.
+- Not done: the clouds in the real-time volumes' shadow maps (with `volumeMarch` the paths walk
+  through the clouds); the sky map's parallax for points far from the camera; the furnace walks
+  through the clouds (`furnace=1` checks their energy, §8.10).
+- **Validation**: `PathTracer_RealTimeCloudsMarchIntoMaps` (the passes, the shadow map only when the
+  scene changes, the layer's history, none while accumulating).
+
 ---
 
 ## 9. Editor
@@ -931,12 +1814,14 @@ Validation:
 
 Panels: Viewport (fly camera: hold right mouse to look, WASD/QE to move, wheel for speed, Shift
 for fast; F12 saves a screenshot), Scene (scene picker, camera,
-EV100, materials), Render (VSync, DLSS toggle and mode, shader hot reload, feature parameters),
+EV100, materials), Render (VSync, the denoiser: accumulation, NRD with TAA (the default where NRD
+runs) or DLSS Ray Reconstruction and its mode; shader hot reload, feature parameters),
 Debug (debug views, furnace, NEE), Profiler (GPU pass timeline with one lane per queue, per-thread CPU scopes,
 frame/GPU/CPU/samples-per-second history; pause with P or Pause and step frame by frame; Export
 HTML writes the profile report of §9.2), Profiler (HTML) (that report, live, inside the editor),
 Memory (VRAM budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
-Command line: `aireditor [--scene NAME] [--features pathtracer,example,tonemap] [--no-vsync] [--dlss]
+Command line (default features `pathtracer,nrd,taa,tonemap`, real time where nrd runs):
+`aireditor [--scene NAME] [--features pathtracer,example,tonemap] [--no-vsync] [--dlss]
 [--dlss-mode quality|...] [--focus WINDOW]`; `--features` replaces the feature chain, e.g. to try a
 new feature or an async compute pass in the editor; `--focus "Profiler (HTML)"` selects that
 window's dock tab at startup (handy for screenshots, as nothing else selects a tab without a click).
@@ -1027,6 +1912,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build build && 
 | `AIR_RHI_VULKAN` | OFF | Vulkan backend (requires the Vulkan SDK) |
 | `AIR_BUILD_EDITOR` | ON | Editor UI library and tests everywhere, `aireditor.exe` with D3D12 |
 | `AIR_WITH_DLSS` | ON with D3D12 | `dlss` feature; the SDK is downloaded or taken from `AIR_DLSS_SDK_DIR` |
+| `AIR_D3D12_PREVIEW` | ON with D3D12 | Preview Agility SDK and DXC for Shader Model 6.10 linear algebra (§3.4); off: the retail SDK and float32 network kernels |
 | `AIR_BUILD_TESTS` | ON | Unit tests |
 | `AIR_ENABLE_ASAN` / `AIR_ENABLE_TSAN` | OFF | Address / thread sanitizers |
 

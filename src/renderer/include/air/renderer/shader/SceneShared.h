@@ -14,6 +14,9 @@ using namespace air::hlsl;
 #endif
 
 AIR_CONST uint kInvalidIndex = 0xFFFFFFFFu;
+// The size of LibNTC's NtcTextureSetConstants, which start a neural texture set's data
+// (TextureSetData::neural); its weights follow.
+AIR_CONST uint kNeuralTextureConstantBytes = 336u;
 
 struct Vertex
 {
@@ -29,6 +32,27 @@ struct MaterialData
     float roughness;  // perceptual
     float3 emission;  // emitted radiance, nits
     float metallic;
+    // Its textures (TextureSetData; kInvalidIndex: none), which scale baseColor, roughness and metallic
+    // and bend the shading normal, at the mesh's texture coordinates times uvScale.
+    uint textureSet;
+    float uvScale;
+    // A clear coat (1) of this interface roughness over a layer that lets coatColor through.
+    uint coat;
+    float coatRoughness;
+    float3 coatColor;
+    // > 0: a cutout, a hole where the colour texture's alpha is below it (Cutout.hlsli).
+    float alphaCutoff;
+};
+
+// A material's textures (renderer::MaterialTextures): bindless Texture2D<float4> indices on the GPU,
+// indices into the CPU renderers' tables there. A set the GPU decodes on sample (neural texture
+// compression, NeuralTextures.h) has no colour and surface textures but its latents and data instead.
+struct TextureSetData
+{
+    uint color;   // RGBA8 sRGB: the base colour
+    uint surface; // RGBA8: the tangent-space normal's x and y (0.5 = 0, z follows), roughness, metallic
+    uint latents; // kInvalidIndex, or Texture2DArray<float4> (RGBA8): the neural set's latents
+    uint neural;  // ByteAddressBuffer: its NtcTextureSetConstants (336 bytes), then its int8 weights
 };
 
 // One TLAS instance. InstanceID() indexes this array.
@@ -66,6 +90,23 @@ struct LightTriangle
     uint treeTrailLow;  // trail bits 0-31
     uint treeTrailHigh; // trail bits 32-63
     uint treeDepth;     // depth of its leaf; kInvalidIndex: not in the tree (no power)
+    uint group;         // its LightGroup (the emissive instance it belongs to)
+};
+
+// The triangles of one emissive instance seen as one light, consecutive entries of the light list:
+// what lights volumes in real time (docs/architecture.md §8.13), which takes a few of these at each
+// step of a march rather than a sample among all the triangles.
+struct LightGroup
+{
+    float3 centre; // area-weighted centroid of its triangles
+    float area;    // their total area
+    float3 radiance;
+    uint firstLight;   // its triangles in the light list
+    float3 normalArea; // sum of area x emitting normal: its length is the area for a flat emitter, 0 for a closed one
+    uint lightCount;
+    float radius; // of the sphere around its triangles centred on `centre`
+    float power;  // luminance x area x pi (one-sided Lambertian emitters)
+    uint instance;
     uint pad0;
 };
 
@@ -91,9 +132,11 @@ struct LightTreeNode
 
 #ifdef __cplusplus
 static_assert(sizeof(Vertex) == 32);
-static_assert(sizeof(MaterialData) == 32);
+static_assert(sizeof(MaterialData) == 64);
+static_assert(sizeof(TextureSetData) == 16);
 static_assert(sizeof(InstanceData) == 112);
 static_assert(sizeof(LightTriangle) == 80);
+static_assert(sizeof(LightGroup) == 64);
 static_assert(sizeof(LightTreeNode) == 64);
 } // namespace air::gpu
 #endif

@@ -193,6 +193,48 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers)
     }
 }
 
+void D3D12CommandList::ConvertMatrices(std::span<const MatrixConversion> conversions)
+{
+#if AIR_D3D12_LINEAR_ALGEBRA
+    AIR_CHECK(mContext->preview, "ConvertMatrices needs DeviceCaps::linearAlgebra");
+    std::vector<D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO> infos;
+    infos.reserve(conversions.size());
+    for (const MatrixConversion& c : conversions)
+    {
+        D3D12Buffer* src = mDevice.Buffer(c.src);
+        D3D12Buffer* dst = mDevice.Buffer(c.dst);
+        AIR_CHECK(src && dst, "ConvertMatrices: invalid buffer");
+        AIR_CHECK(c.srcOffset % 128 == 0 && c.dstOffset % 128 == 0,
+                  "ConvertMatrices: offsets must be 128-byte aligned");
+        D3D12_LINEAR_ALGEBRA_MATRIX_CONVERSION_INFO info = {};
+        info.DestInfo.DestLayout = ToD3D12(c.dstLayout);
+        info.DestInfo.DestStride = c.dstStride;
+        info.DestInfo.NumRows = c.rows;
+        info.DestInfo.NumColumns = c.columns;
+        info.DestInfo.DestDataType = ToD3D12(c.dstType);
+        info.DestInfo.DestSize = UINT(mDevice.GetMatrixSize(c.rows, c.columns, c.dstType, c.dstLayout, c.dstStride));
+        info.SrcInfo.SrcSize = UINT(mDevice.GetMatrixSize(c.rows, c.columns, c.srcType, c.srcLayout, c.srcStride));
+        info.SrcInfo.SrcDataType = ToD3D12(c.srcType);
+        info.SrcInfo.SrcLayout = ToD3D12(c.srcLayout);
+        info.SrcInfo.SrcStride = c.srcStride;
+        info.DataDesc.SrcVA = src->resource->GetGPUVirtualAddress() + c.srcOffset;
+        info.DataDesc.DestVA = dst->resource->GetGPUVirtualAddress() + c.dstOffset;
+        AIR_CHECK(c.srcOffset + info.SrcInfo.SrcSize <= src->desc.size &&
+                      c.dstOffset + info.DestInfo.DestSize <= dst->desc.size,
+                  "ConvertMatrices: {}x{} matrix out of the bounds of '{}' or '{}'", c.rows, c.columns,
+                  src->desc.debugName, dst->desc.debugName);
+        infos.push_back(info);
+        Capture(std::format("ConvertMatrix {}x{} '{}'+{} {} <- '{}'+{} {}", c.rows, c.columns, dst->desc.debugName,
+                            c.dstOffset, ToString(c.dstLayout), src->desc.debugName, c.srcOffset,
+                            ToString(c.srcLayout)));
+    }
+    mContext->preview->ConvertLinearAlgebraMatrix(infos.data(), UINT(infos.size()));
+#else
+    (void)conversions;
+    AIR_CHECK(false, "ConvertMatrices needs the preview Agility SDK (AIR_D3D12_PREVIEW)");
+#endif
+}
+
 void D3D12CommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle src, u64 srcOffset, u64 size)
 {
     D3D12Buffer* d = mDevice.Buffer(dst);
@@ -222,7 +264,7 @@ D3D12_PLACED_SUBRESOURCE_FOOTPRINT Footprint(const TextureDesc& desc, u32 mip, u
 
 } // namespace
 
-void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHandle src, u64 srcOffset)
+void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset)
 {
     D3D12Texture* t = mDevice.Texture(dst);
     D3D12Buffer* b = mDevice.Buffer(src);
@@ -232,13 +274,18 @@ void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, BufferHan
     D3D12_TEXTURE_COPY_LOCATION to = {};
     to.pResource = t->resource.Get();
     to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    to.SubresourceIndex = mip;
+    AIR_CHECK(layer == 0 || (t->desc.dimension == TextureDimension::Tex2D && layer < t->desc.depthOrArraySize),
+              "CopyBufferToTexture: layer {} of '{}'", layer, t->desc.debugName);
+    to.SubresourceIndex = mip + layer * t->desc.mipLevels;
     D3D12_TEXTURE_COPY_LOCATION from = {};
     from.pResource = b->resource.Get();
     from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
     from.PlacedFootprint = Footprint(t->desc, mip, srcOffset);
     mList->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-    Capture(std::format("CopyBufferToTexture '{}' mip {} <- '{}'", t->desc.debugName, mip, b->desc.debugName));
+    Capture(layer == 0
+                ? std::format("CopyBufferToTexture '{}' mip {} <- '{}'", t->desc.debugName, mip, b->desc.debugName)
+                : std::format("CopyBufferToTexture '{}' mip {} layer {} <- '{}'", t->desc.debugName, mip, layer,
+                              b->desc.debugName));
 }
 
 void D3D12CommandList::CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, TextureHandle src, u32 mip)

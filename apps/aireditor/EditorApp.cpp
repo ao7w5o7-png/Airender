@@ -5,6 +5,7 @@
 #include "air/core/Log.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/ProfileReport.h"
+#include "air/renderer/SceneFiles.h"
 #include "air/renderer/Transfer.h"
 
 #include <imgui.h>
@@ -103,11 +104,18 @@ EditorApp::~EditorApp()
 
 bool EditorApp::LoadScene(const std::string& name)
 {
-    std::optional<renderer::SceneDesc> desc = renderer::MakeBuiltinScene(name);
+    std::string problem;
+    std::optional<renderer::SceneDesc> desc = renderer::MakeScene(name, &problem);
     if (!desc)
     {
-        AIR_LOG(Error, "Editor", "unknown scene '{}'", name);
+        AIR_LOG(Error, "Editor", "{}", problem);
         return false;
+    }
+    mNeuralReport.clear();
+    mNeuralError.clear();
+    if (!renderer::ApplyNeuralTextures(*desc, mOptions.neuralTextures, &mNeuralReport, &mNeuralError))
+    {
+        AIR_LOG(Warning, "Editor", "neural textures: {} (the plain textures instead)", mNeuralError);
     }
     mDevice.WaitIdle(); // the GPU may still read the old scene
     mScene.reset();
@@ -117,17 +125,34 @@ bool EditorApp::LoadScene(const std::string& name)
     mSceneTop = renderer::HighestPoint(mScene->Desc());
     mSkyEdit.reset();
     mCloudsEdit.reset();
+    mVolumesEdit.reset();
     AIR_LOG(Info, "Editor", "scene '{}': {} triangles, {} instances, {} materials", name, mScene->GetTriangleCount(),
             mScene->Desc().instances.size(), mScene->Desc().materials.size());
     return true;
+}
+
+void EditorApp::SetNeuralTextureMode(renderer::NeuralTextureMode mode)
+{
+    if (mode != mOptions.neuralTextures.mode)
+    {
+        mOptions.neuralTextures.mode = mode;
+        LoadScene(mSceneName);
+    }
 }
 
 void EditorApp::CreateRunner(u32 width, u32 height)
 {
     width = std::max(width, 8u);
     height = std::max(height, 8u);
-    // Keep parameter values and render graph settings across the rebuild.
-    std::vector<std::pair<std::string, std::string>> saved;
+    // Keep parameter values and render graph settings across the rebuild; the first runner takes
+    // the startup ones.
+    const bool first = !mRunner;
+    // Real time under NRD (the default with nrd among the features): the path tracer renders at
+    // mRenderScale of the viewport and TAA upsamples.
+    const bool nrdRealTime =
+        mRunner ? GetDenoiser() == Denoiser::Nrd
+                : std::find(mOptions.features.begin(), mOptions.features.end(), "nrd") != mOptions.features.end();
+    std::vector<std::pair<std::string, std::string>> saved = mRunner ? decltype(saved){} : mOptions.parameters;
     rdg::RenderGraph::Config graphConfig;
     if (mRunner)
     {
@@ -149,8 +174,9 @@ void EditorApp::CreateRunner(u32 width, u32 height)
     renderer::FrameRunnerDesc desc;
     desc.width = width;
     desc.height = height;
-    // With DLSS the path tracer renders below the output size and Ray Reconstruction upscales.
-    desc.renderScale = IsDlssEnabled() ? kDlssModes[mOptions.dlssMode].renderScale : 1.0f;
+    // With DLSS the path tracer renders below the output size and Ray Reconstruction upscales; under NRD
+    // at mRenderScale, upsampled by TAA.
+    desc.renderScale = IsDlssEnabled() ? kDlssModes[mOptions.dlssMode].renderScale : nrdRealTime ? mRenderScale : 1.0f;
     desc.shaderRoot = mOptions.shaderRoot;
     desc.graphConfig = graphConfig;
     desc.profile = true;
@@ -170,6 +196,14 @@ void EditorApp::CreateRunner(u32 width, u32 height)
         {
             mActiveFeatures.push_back(name);
         }
+    }
+    if (first && !IsDlssEnabled() &&
+        std::find(mActiveFeatures.begin(), mActiveFeatures.end(), "nrd") != mActiveFeatures.end())
+    {
+        // Real-time frames where a real-time denoiser runs (before the startup parameters, which may
+        // say otherwise).
+        SetParameter("pathtracer.accumulate", "false");
+        SetParameter("pathtracer.spp", "1");
     }
     for (const auto& [name, value] : saved)
     {
@@ -274,6 +308,50 @@ void EditorApp::SetDlssEnabled(bool enabled)
         {
             SetParameter("pathtracer.spp", mPreDlssSpp);
         }
+    }
+}
+
+EditorApp::Denoiser EditorApp::GetDenoiser() const
+{
+    if (IsDlssEnabled())
+    {
+        return Denoiser::Dlss;
+    }
+    const bool nrd = std::find(mActiveFeatures.begin(), mActiveFeatures.end(), "nrd") != mActiveFeatures.end();
+    return nrd && GetParameter("nrd", "enabled") == "true" && GetParameter("pathtracer", "accumulate") == "false"
+               ? Denoiser::Nrd
+               : Denoiser::Accumulate;
+}
+
+void EditorApp::SetDenoiser(Denoiser denoiser)
+{
+    if (denoiser == GetDenoiser())
+    {
+        return;
+    }
+    if (denoiser == Denoiser::Dlss)
+    {
+        SetDlssEnabled(true);
+        return;
+    }
+    SetDlssEnabled(false);
+    if (denoiser == Denoiser::Nrd)
+    {
+        SetParameter("nrd.enabled", "true");
+        SetParameter("pathtracer.accumulate", "false");
+        SetParameter("pathtracer.spp", "1");
+    }
+    else
+    {
+        SetParameter("pathtracer.accumulate", "true");
+        if (GetParameter("pathtracer", "spp") == "1")
+        {
+            SetParameter("pathtracer.spp", "4"); // the path tracer's default for progressive frames
+        }
+    }
+    if (mRenderScale != 1.0f) // the render scale applies under NRD only
+    {
+        CreateRunner(mRunner->GetDesc().width, mRunner->GetDesc().height);
     }
 }
 
@@ -667,7 +745,7 @@ void EditorApp::BuildMenuBar()
     }
     if (ImGui::BeginMenu("Scene"))
     {
-        for (const std::string& name : renderer::BuiltinSceneNames())
+        for (const std::string& name : renderer::SceneNames())
         {
             if (ImGui::MenuItem(name.c_str(), nullptr, name == mSceneName))
             {
@@ -834,7 +912,7 @@ void EditorApp::BuildScenePanel()
     }
     if (ImGui::BeginCombo("Scene", mSceneName.c_str()))
     {
-        for (const std::string& name : renderer::BuiltinSceneNames())
+        for (const std::string& name : renderer::SceneNames())
         {
             if (ImGui::Selectable(name.c_str(), name == mSceneName))
             {
@@ -847,6 +925,30 @@ void EditorApp::BuildScenePanel()
     ImGui::Text("Geometry %s, %u emissive triangles, light power %.1f",
                 renderer::FormatBytes(mScene->GetGeometryBytes()).c_str(), mScene->Get().lightCount,
                 mScene->Get().lightPower);
+    if (!mScene->Desc().textureSets.empty())
+    {
+        constexpr const char* kModes[] = {"Off", "Decode on load", "Decode on sample"};
+        int mode = int(mOptions.neuralTextures.mode);
+        if (ImGui::Combo("Neural textures", &mode, kModes, 3))
+        {
+            SetNeuralTextureMode(renderer::NeuralTextureMode(mode));
+        }
+        ImGui::SetItemTooltip("Neural texture compression (LibNTC) of the material textures, at about %.1f bits\n"
+                              "per texel. Decoded once on load, or by the path tracer at every first\n"
+                              "surface (deeper vertices read a quarter-resolution copy). Compressing takes a\n"
+                              "few seconds a set the first time; the results are cached.",
+                              mOptions.neuralTextures.bitsPerPixel);
+        if (!mNeuralError.empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "%s", mNeuralError.c_str());
+        }
+        for (const renderer::NeuralTextureReport& set : mNeuralReport)
+        {
+            ImGui::BulletText("%s: %.2f bpp, PSNR %.1f dB, %s -> %s", set.name.c_str(), set.bitsPerPixel, set.psnr,
+                              renderer::FormatBytes(set.sourceBytes).c_str(),
+                              renderer::FormatBytes(set.compressedBytes).c_str());
+        }
+    }
 
     ImGui::SeparatorText("Camera");
     ImGui::DragFloat3("Position", &mCamera.position.x, 0.01f);
@@ -961,6 +1063,148 @@ void EditorApp::BuildScenePanel()
         mCloudsEdit = clouds;
     }
 
+    ImGui::SeparatorText("Volumes");
+    std::vector<renderer::Volume> volumes = mVolumesEdit.value_or(mScene->Desc().volumes);
+    bool applyVolume = false;
+    bool volumeEdited = false;
+    std::optional<size_t> removeVolume;
+    for (size_t i = 0; i < volumes.size(); ++i)
+    {
+        renderer::Volume& volume = volumes[i];
+        ImGui::PushID(int(i));
+        const std::string name =
+            volume.file.empty() ? std::string("plume") : std::filesystem::path(volume.file).filename().string();
+        const bool open =
+            ImGui::TreeNodeEx("##volume", ImGuiTreeNodeFlags_DefaultOpen, "Volume %zu: %s", i, name.c_str());
+        if (!open)
+        {
+            ImGui::PopID();
+            continue;
+        }
+        applyVolume |= ImGui::Checkbox("Enabled##volume", &volume.enabled);
+        ImGui::SetItemTooltip("A box of voxels among the surfaces that absorbs and scatters light, path traced "
+                              "through (docs/architecture.md, section 8.12):\na grid of an OpenVDB file, or a "
+                              "procedural plume of smoke. Volumes may overlap.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove##volume"))
+        {
+            removeVolume = i;
+        }
+        auto text = [&](const char* label, std::string& value)
+        {
+            char buffer[1024];
+            std::snprintf(buffer, sizeof(buffer), "%s", value.c_str());
+            if (ImGui::InputText(label, buffer, sizeof(buffer)))
+            {
+                value = buffer;
+                volumeEdited = true;
+            }
+            applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        text("OpenVDB file", volume.file);
+        ImGui::SetItemTooltip("A .vdb file (aircli vdb FILE lists its grids). Empty: the procedural plume.");
+        if (!volume.file.empty())
+        {
+            text("Grid", volume.grid);
+            ImGui::SetItemTooltip("The grid to render; \"density\" falls back to the file's first grid of densities.");
+        }
+        auto slider = [&](const char* label, float* value, float lo, float hi, const char* format, int flags = 0)
+        {
+            volumeEdited |= ImGui::SliderFloat(label, value, lo, hi, format, flags);
+            applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        };
+        slider("Extinction##volume", &volume.extinction, 0.001f, 1000.0f, "%.3f /m", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Per metre where the density is 1. Smoke: 5 to 50; a cloud of hundreds of metres: "
+                              "0.02 to 0.1.");
+        slider("Albedo##volume", &volume.albedo, 0.0f, 1.0f, "%.3f");
+        ImGui::SetItemTooltip("The share of the light a collision scatters rather than absorbs (smoke 0.5 to 0.95, "
+                              "clouds 1).");
+        slider("Anisotropy", &volume.anisotropy, -0.95f, 0.95f, "%.2f");
+        ImGui::SetItemTooltip("Henyey-Greenstein g: 0 scatters evenly, towards 1 forwards (clouds about 0.85).");
+        volumeEdited |= ImGui::DragFloat3("Position##volume", &volume.position.x, 0.05f);
+        applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        slider("Size##volume", &volume.size, 0.0f, 5000.0f, volume.size > 0.0f ? "%.2f m" : "as stored",
+               ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("Its longest side, its bottom centred on the position.\n0: the file's own size and "
+                              "place, moved by the position.");
+        int resolution = int(volume.maxResolution);
+        volumeEdited |=
+            ImGui::SliderInt("Max resolution", &resolution, 8, 2048, "%d voxels", ImGuiSliderFlags_Logarithmic);
+        applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+        volume.maxResolution = u32(std::clamp(resolution, 8, 2048));
+        ImGui::SetItemTooltip("Longest side on the GPU; larger grids are averaged down.");
+        if (volume.file.empty())
+        {
+            int seed = int(volume.seed);
+            volumeEdited |= ImGui::DragInt("Seed##volume", &seed, 0.2f, 0, 1 << 20);
+            applyVolume |= ImGui::IsItemDeactivatedAfterEdit();
+            volume.seed = u32(std::max(seed, 0));
+        }
+        const std::string_view error = mScene->VolumeError(i);
+        if (!mVolumesEdit && !error.empty())
+        {
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%.*s", int(error.size()), error.data());
+        }
+        ImGui::TreePop();
+        ImGui::PopID();
+    }
+    if (removeVolume)
+    {
+        volumes.erase(volumes.begin() + std::ptrdiff_t(*removeVolume));
+        applyVolume = true;
+    }
+    if (volumes.size() < gpu::kMaxVolumes && ImGui::Button("Add volume"))
+    {
+        // A plume of smoke 2 m tall, a few metres in front of the camera.
+        renderer::Volume added{.enabled = true, .size = 2.0f};
+        added.position = mCamera.position + mCamera.Forward() * 4.0f;
+        added.position.y -= 1.0f;
+        volumes.push_back(added);
+        applyVolume = true;
+    }
+    if (applyVolume)
+    {
+        mScene->SetVolumes(volumes);
+        mVolumesEdit.reset();
+    }
+    else if (volumeEdited)
+    {
+        mVolumesEdit = volumes;
+    }
+
+    // Whether the clear coats' network runs, and on what: it shades coated materials only.
+    {
+        u32 coated = 0;
+        for (const renderer::Material& m : mScene->Desc().materials)
+        {
+            coated += m.coat ? 1u : 0u;
+        }
+        ImGui::SeparatorText("Neural shading");
+        if (coated == 0)
+        {
+            ImGui::TextWrapped("No material wears a clear coat, so the coats' network does not run. Tick "
+                               "\"Clear coat\" on a material below, or load the scene 'coated'.");
+        }
+        else if (renderer::RenderFeature* pt = mRunner->FindFeature("pathtracer"))
+        {
+            const json::Value status = pt->GetStatus();
+            const json::Value* kernels = status.Find("neuralKernels");
+            const json::Value* loss = status.Find("neuralCoatLoss");
+            const std::string model = GetParameter("pathtracer", "coatModel");
+            ImGui::Text("%u coated material%s; coatModel %s (0 = network)", coated, coated == 1 ? "" : "s",
+                        model.c_str());
+            ImGui::Text("Network: %s, training loss %.4f", kernels && kernels->AsBool() ? "running" : "not running",
+                        loss ? loss->AsNumber() : 0.0);
+            const bool showing = GetParameter("pathtracer", "debugView") == "14";
+            if (ImGui::Button(showing ? "Show the lit image" : "Show where the network shades"))
+            {
+                SetParameter("pathtracer.debugView", showing ? "0" : "14");
+            }
+            ImGui::SetItemTooltip("Debug view 14: blue where the network shades the clear coat; green / red where\n"
+                                  "it brightens / darkens the analytic approximation it corrects.");
+        }
+    }
+
     ImGui::SeparatorText("Materials");
     const auto& materials = mScene->Desc().materials;
     for (u32 i = 0; i < materials.size(); ++i)
@@ -976,6 +1220,17 @@ void EditorApp::BuildScenePanel()
         changed |= ImGui::ColorEdit3("Emission color", &m.emissionColor.x);
         changed |= ImGui::DragFloat("Emission (nits)", &m.emissionNits, 5.0f, 0.0f, 1e7f, "%.1f",
                                     ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::Checkbox("Clear coat", &m.coat);
+        ImGui::SetItemTooltip("A clear coat over the material: a rough dielectric over a layer that absorbs.\n"
+                              "pathtracer.coatModel chooses how the light it lets in and out is evaluated:\n"
+                              "a small network trained for the scene's coats (retrained a moment after they\n"
+                              "change), the random walk it learns from, or an approximation.");
+        if (m.coat)
+        {
+            changed |= ImGui::SliderFloat("Coat roughness", &m.coatRoughness, 0.0f, 1.0f);
+            changed |= ImGui::ColorEdit3("Coat color", &m.coatColor.x, ImGuiColorEditFlags_Float);
+            m.coatColor = hlsl::saturate(m.coatColor);
+        }
         if (changed)
         {
             mScene->SetMaterial(i, m);
@@ -1003,14 +1258,32 @@ void EditorApp::BuildRenderPanel()
 
     renderer::FeatureRegistry registry;
     renderer::RegisterBuiltinFeatures(registry);
-    if (registry.Find("dlss"))
+    const bool nrdAvailable = std::find(mActiveFeatures.begin(), mActiveFeatures.end(), "nrd") != mActiveFeatures.end();
+    const bool dlssAvailable = registry.Find("dlss") != nullptr;
+    if (nrdAvailable || dlssAvailable)
     {
-        bool dlss = std::find(mOptions.features.begin(), mOptions.features.end(), "dlss") != mOptions.features.end();
-        if (ImGui::Checkbox("DLSS Ray Reconstruction", &dlss))
+        constexpr const char* kNames[] = {"Accumulate (no denoiser)", "NRD (real time)", "DLSS Ray Reconstruction"};
+        const Denoiser denoiser = GetDenoiser();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+        if (ImGui::BeginCombo("Denoiser", kNames[u32(denoiser)]))
         {
-            SetDlssEnabled(dlss);
+            for (u32 i = 0; i < std::size(kNames); ++i)
+            {
+                if ((i == u32(Denoiser::Nrd) && !nrdAvailable) || (i == u32(Denoiser::Dlss) && !dlssAvailable))
+                {
+                    continue;
+                }
+                if (ImGui::Selectable(kNames[i], i == u32(denoiser)))
+                {
+                    SetDenoiser(Denoiser(i));
+                }
+            }
+            ImGui::EndCombo();
         }
-        if (dlss)
+        ImGui::SetItemTooltip("Accumulate: the frames average while nothing moves (moving restarts them).\n"
+                              "NRD: single jittered frames denoised by NVIDIA's NRD (RELAX), edges by TAA.\n"
+                              "DLSS Ray Reconstruction: denoises, anti-aliases and upscales (NVIDIA RTX).");
+        if (denoiser == Denoiser::Dlss)
         {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
             if (ImGui::BeginCombo("DLSS mode", kDlssModes[mOptions.dlssMode].name))
@@ -1027,6 +1300,25 @@ void EditorApp::BuildRenderPanel()
             ImGui::SetItemTooltip("The path tracer renders at the mode's fraction of the viewport and Ray\n"
                                   "Reconstruction denoises and upscales. DLAA renders at full size: best quality,\n"
                                   "highest cost. Quality traces 44%% of the pixels with nearly the same image.");
+        }
+        if (denoiser == Denoiser::Nrd)
+        {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Render scale", &mRenderScale, 0.33f, 1.0f, "%.2f");
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                CreateRunner(desc.width, desc.height);
+            }
+            ImGui::SetItemTooltip("The path tracer renders at this fraction of the viewport's width and height and\n"
+                                  "TAA upsamples: 0.67 renders 44%% of the pixels, about half the frame time, with\n"
+                                  "nearly the same image. Resolution scale above sizes the viewport itself.");
+            bool giOnly = GetParameter("nrd", "view") == "1";
+            if (ImGui::Checkbox("GI only (denoised)", &giOnly))
+            {
+                SetParameter("nrd.view", giOnly ? "1" : "0");
+            }
+            ImGui::SetItemTooltip("Shows the global illumination alone: the light the surfaces reflect after one\n"
+                                  "bounce or more, as NRD denoised it (pathtracer.debugView 9 shows it before).");
         }
     }
     BuildShaderSection();
@@ -1093,8 +1385,10 @@ void EditorApp::BuildDebugPanel()
     if (pt)
     {
         ImGui::SeparatorText("Path tracer view");
-        static const char* const kViews[] = {"Lit",   "Normals",       "Base color", "Roughness",    "Metallic",
-                                             "Depth", "Intersections", "Bounces",    "Direct light", "Indirect light"};
+        static const char* const kViews[] = {"Lit",          "Normals",        "Base color",     "Roughness",
+                                             "Metallic",     "Depth",          "Intersections",  "Bounces",
+                                             "Direct light", "Indirect light", "Radiance cache", "Volume steps",
+                                             "Volume rate",  "Volumes per ray"};
         u32* view = nullptr;
         bool* furnace = nullptr;
         bool* nee = nullptr;
