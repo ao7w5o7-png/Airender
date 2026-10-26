@@ -187,13 +187,15 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
     const u32 unbiased = settings.unbiased ? gpu::kReSTIRUnbiased : 0u;
 
     // A compute pass over the image that reads `reads`, writes `writes` (and the accumulation when
-    // `shades`), with `bind` filling the pass's own buffer indices.
+    // `shades`, and the denoiser signals too when `toSignals`), with `bind` filling the pass's own
+    // buffer indices. Only the indirect light goes to the signals: the direct light stays out of them
+    // as the trace's next event estimation does (docs/architecture.md §8.14).
     auto addPass = [&](const char* name, rhi::PipelineHandle pipeline, u32 flags,
                        const std::vector<rdg::BufferRef>& reads, const std::vector<rdg::BufferRef>& writes, bool shades,
-                       auto bind)
+                       bool toSignals, auto bind)
     {
         gpu::ReSTIRConstants constants = base;
-        const bool signals = shades && diffuseSignal.IsValid();
+        const bool signals = shades && toSignals && diffuseSignal.IsValid();
         constants.flags = flags | (signals ? gpu::kReSTIRSignals : 0u);
         graph.AddPass(
             name, rdg::PassFlags::Compute,
@@ -264,10 +266,10 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
         const rdg::BufferRef initial = transient(sizeof(gpu::Reservoir), "PathTracer.ReSTIRDI.InitialReservoirs");
         const rdg::BufferRef temporal = transient(sizeof(gpu::Reservoir), "PathTracer.ReSTIRDI.TemporalReservoirs");
         const u32 temporalFlag = mUseDiHistory ? gpu::kReSTIRTemporal : 0u;
-        addPass("PathTracer.ReSTIRDI.Initial", p.diInitial, unbiased, {hits}, {initial}, false,
+        addPass("PathTracer.ReSTIRDI.Initial", p.diInitial, unbiased, {hits}, {initial}, false, false,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c) { c.output = ctx.UAV(initial); });
         addPass("PathTracer.ReSTIRDI.Temporal", p.diTemporal, unbiased | temporalFlag,
-                {hits, initial, previousHits, lastHistory}, {temporal}, false,
+                {hits, initial, previousHits, lastHistory}, {temporal}, false, false,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
                     c.input = ctx.SRV(initial);
@@ -279,7 +281,7 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                     c.output = ctx.UAV(temporal);
                 });
         addPass("PathTracer.ReSTIRDI.Spatial", p.diSpatial, unbiased | (shadeDirect ? gpu::kReSTIRShade : 0u),
-                {hits, temporal}, {history}, shadeDirect,
+                {hits, temporal}, {history}, shadeDirect, false,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
                     c.input = ctx.SRV(temporal);
@@ -293,7 +295,7 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
         const rdg::BufferRef temporal = transient(sizeof(gpu::GiReservoir), "PathTracer.ReSTIRGI.TemporalReservoirs");
         const u32 temporalFlag = mUseGiHistory ? gpu::kReSTIRTemporal : 0u;
         addPass("PathTracer.ReSTIRGI.Temporal", p.giTemporal, unbiased | temporalFlag,
-                {hits, initial, previousHits, lastHistory}, {temporal}, false,
+                {hits, initial, previousHits, lastHistory}, {temporal}, false, false,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
                     c.input = ctx.SRV(initial);
@@ -305,7 +307,7 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                     c.output = ctx.UAV(temporal);
                 });
         addPass("PathTracer.ReSTIRGI.Spatial", p.giSpatial, unbiased | (shadeIndirect ? gpu::kReSTIRShade : 0u),
-                {hits, temporal}, {history}, shadeIndirect,
+                {hits, temporal}, {history}, shadeIndirect, true,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
                     c.input = ctx.SRV(temporal);

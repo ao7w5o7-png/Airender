@@ -239,4 +239,67 @@ Rgb EstimateAlbedoUniform(const Material& material, float cosThetaO, u32 sampleC
     return {float(sum[0] * scale), float(sum[1] * scale), float(sum[2] * scale)};
 }
 
+BsdfValue EvaluateSurfaceBsdf(const Material& material, const Direction& wo, const Direction& ng, const Direction& wi)
+{
+    BindLut();
+    const shader::BsdfEval e =
+        shader::EvaluateSurfaceBsdf(ToShader(material), ToShader(wo), ToShader(ng), ToShader(wi));
+    return {ToRgb(e.fCos), e.pdf};
+}
+
+BsdfDraw SampleSurfaceBsdf(const Material& material, const Direction& wo, const Direction& ng, float uLobe, float u0,
+                           float u1)
+{
+    BindLut();
+    const shader::BsdfSample s =
+        shader::SampleSurfaceBsdf(ToShader(material), ToShader(wo), ToShader(ng), uLobe, float2(u0, u1));
+    return {{s.wi.x, s.wi.y, s.wi.z}, ToRgb(s.weight), s.pdf, s.valid};
+}
+
+Rgb EstimateSurfaceAlbedo(const Material& material, const Direction& wo, const Direction& ng, u32 sampleCount)
+{
+    BindLut();
+    const shader::BsdfContext c = shader::PrepareBsdf(ToShader(material), ToShader(wo));
+    const float3 n = ToShader(ng);
+    shader::uint seed = 0x27d4eb2fu;
+    double sum[3] = {};
+    for (u32 i = 0; i < sampleCount; ++i)
+    {
+        const float uLobe = shader::Rand(seed);
+        const float u0 = shader::Rand(seed);
+        const float u1 = shader::Rand(seed);
+        const shader::BsdfSample s = shader::SampleSurfaceBsdf(c, n, uLobe, float2(u0, u1));
+        if (s.valid)
+        {
+            sum[0] += s.weight.x;
+            sum[1] += s.weight.y;
+            sum[2] += s.weight.z;
+        }
+    }
+    return {float(sum[0] / sampleCount), float(sum[1] / sampleCount), float(sum[2] / sampleCount)};
+}
+
+Rgb EstimateSurfaceAlbedoUniform(const Material& material, const Direction& wo, const Direction& ng, u32 sampleCount)
+{
+    BindLut();
+    const shader::BsdfContext c = shader::PrepareBsdf(ToShader(material), ToShader(wo));
+    const float3 n = ToShader(ng);
+    const shader::Frame frame = shader::MakeFrame(n);
+    shader::uint seed = 0x165667b1u;
+    double sum[3] = {};
+    for (u32 i = 0; i < sampleCount; ++i)
+    {
+        const float z = shader::Rand(seed);
+        const float phi = shader::kTwoPi * shader::Rand(seed);
+        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        const float3 wi = shader::ToWorld(frame, float3(r * std::cos(phi), r * std::sin(phi), z));
+        const float3 f = shader::EvaluateSurfaceBsdf(c, n, wi).fCos;
+        sum[0] += f.x;
+        sum[1] += f.y;
+        sum[2] += f.z;
+    }
+    const double scale = shader::kTwoPi / double(sampleCount); // pdf = 1 / (2 pi) around ng
+    return {float(sum[0] * scale), float(sum[1] * scale), float(sum[2] * scale)};
+}
+
 } // namespace air::pt

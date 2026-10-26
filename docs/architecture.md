@@ -516,6 +516,17 @@ differ.
   dielectric is a GGX coat (F0 = 0.04) over a Lambert base that receives exactly the energy the coat
   did not reflect. A white material reflects 100% at every roughness and angle (white furnace).
   The albedo tables are built on the CPU at startup (`GetBsdfLut`) and uploaded once.
+- **Shading normals** (`EvaluateSurfaceBsdf`, `SampleSurfaceBsdf`): where the shading normal (the
+  interpolated one, or a normal map's) leans away from the triangle's, part of the diffuse lobe points
+  below the surface, where no light comes from. That part is mirrored in the surface's plane back
+  above it (the reflection off a facet of Schuessler et al.'s microfacet-based normal mapping, 2017,
+  with the surface as the facet): a direction above the surface also gets the diffuse lobe's value and
+  pdf at its mirror image, and a diffuse sample below the surface is mirrored, so sampling, evaluation
+  and MIS agree. White furnace, CPU reference at 128 bounces: `textured` -1.76% -> -0.58%, `terrain`
+  -0.19% -> -0.03%, `sphere_field` -0.19% -> -0.15% (mostly metal). Mirroring the specular lobes too
+  kept all of it (-0.04%, -0.001%, -0.05%) but takes a second evaluation of the whole BSDF, which cost
+  every kernel 5-7% of its frame in registers (17% with coats), also where nothing is mirrored; the
+  diffuse lobe's mirror costs nothing measurable (`coated` +4%). Coated materials are not mirrored.
 - **Light transport**: next event estimation over emissive triangles chosen by power, combined
   with BSDF sampling by the power heuristic (MIS). Emitters are one sided (front = `cross(e1, e2)`).
   The light list is also a Walker/Vose alias table, so choosing a light is O(1) (one or two loads)
@@ -573,7 +584,9 @@ differ.
 ### 8.3 Validation
 
 - `tests/BsdfTests.cpp`: white furnace for metal and dielectric, energy bound, reciprocity, sampled
-  weight equals evaluation, sampling matches uniform integration.
+  weight equals evaluation, sampling matches uniform integration; on a surface whose shading normal
+  leans 35 degrees away the diffuse lobe keeps its albedo and nothing is gained, and its sampling
+  matches uniform integration around the surface (`Bsdf_Surface*`).
 - `tests/IntegratorTests.cpp`: an emissive white room collects exactly `B + 1` times the emission
   (B = bounces), NEE and BSDF-only estimators agree, furnace spheres average 0.18.
 - `aircli reference` renders the same scene with the CPU reference renderer (BVH + the shared
@@ -621,12 +634,12 @@ a parameter switched off consumes none), and producers skip what nobody consumes
 
 | Slot | Producer | Contents |
 |---|---|---|
-| `kDiffuseAlbedo`, `kSpecularAlbedo` | pathtracer (`guides=1`) | First-hit albedos |
+| `kDiffuseAlbedo`, `kSpecularAlbedo` | pathtracer (`guides=1`) | First-hit directional albedos of the BSDF's diffuse and other lobes (`GuideAlbedos`) |
 | `kNormalRoughness` | pathtracer | World normal + roughness |
 | `kViewDepth` | pathtracer | Distance along the view axis in metres |
 | `kMotionVectors` | pathtracer | Previous minus current position, in pixels |
 | `kColorBeforeTransparency` | pathtracer (real-time volumes, §8.13) | The frame resolved without the volumes over it; consuming it marks a denoiser of the whole frame |
-| `kDiffuseSignal`, `kSpecularSignal` | pathtracer (real time, lit view) | The first surface's reflected light per lobe, a = its reflected ray's length (§8.14) |
+| `kDiffuseSignal`, `kSpecularSignal` | pathtracer (real time, lit view) | The first surface's reflected indirect light per lobe, a = its reflected ray's length (§8.14) |
 | `kSurfaceTransmittance` | pathtracer (real-time volumes) | What the volumes leave of the surfaces' light (absent: 1) |
 | `kRealTime` | pathtracer | The frame holds its own jittered samples only (not accumulated) |
 | `kJitterX/Y`, `kHistoryReset` | pathtracer | Sub-pixel jitter; history is invalid this frame |
@@ -1406,20 +1419,25 @@ into an image:
 
 | Chain | Features | What it denoises |
 |---|---|---|
-| default (editor) | `pathtracer,nrd,taa,tonemap` | NRD the surfaces' reflected light, TAA the edges; the volumes filter themselves (§8.13) |
+| default (editor) | `pathtracer,nrd,taa,tonemap` | NRD the surfaces' reflected indirect light, TAA the edges and the direct light; the volumes filter themselves (§8.13) |
 | DLSS | `pathtracer,dlss,tonemap` | Ray Reconstruction the whole frame (§8.5), also anti-aliasing and upscaling |
 
 A feature that consumes `kColorBeforeTransparency` denoises the whole frame: nrd and taa then stand
 aside, and the path tracer describes the volumes in the guides (§8.13).
 
 **Signals** (`slots::kDiffuseSignal`, `kSpecularSignal`, `Integrator.hlsli`): NRD denoises diffuse
-and specular light separately, divided by their albedos, with the length of the ray that brought it.
-`TracePath` (with `kFlagSignals`) splits the light its first vertex reflects by lobe: next event
-estimation there by the BSDF's diffuse part (`BsdfEval::fCosDiffuse`), the rest of the path by the
-diffuse part of the BSDF sample it continued with (`BsdfSample::diffuseWeight`), a medium's
-scattering as diffuse; its own emission and a miss's sky are in neither. ReSTIR DI and GI split their
-shading alike and add it to the signals. The signals are exposed like sceneColor and dimmed by the air
-like it, but not by the volumes in front: those pass `kSurfaceTransmittance`.
+and specular indirect light separately, divided by their albedos, with the length of the ray that
+brought it. `TracePath` (with `kFlagSignals`) splits the light its first vertex reflects beyond its
+next event estimation by the diffuse part of the BSDF sample it continued with
+(`BsdfSample::diffuseWeight`), a medium's scattering as diffuse; its own emission, its direct light
+and a miss's sky are in neither. ReSTIR GI splits its shading alike and adds it to the signals.
+The direct light (next event estimation, ReSTIR DI) passes NRD: filtered by it, the shadows spread
+into the lit surfaces around them (edge-stopping by normals and depth does not see a shadow's edge),
+and the frame lost 2% (`textured`) to 10% (`many_lights`) of its light; without it the frame is also
+closer to the reference (`textured`: one frame's RMSE 0.019 -> 0.0065), its residual noise left to
+TAA. The albedos (`GuideAlbedos`, `Bsdf.hlsli`) are the lobes' directional albedos as the BSDF weighs
+them (the diffuse lobe's `1 - Es(wo)`, a coat's inner part). The signals are exposed like sceneColor
+and dimmed by the air like it, but not by the volumes in front: those pass `kSurfaceTransmittance`.
 
 **nrd** (`src/features/nrd/`, D3D12, `AIR_WITH_NRD`): NVIDIA's NRD 4.18 built from source
 (`cmake/AirThirdParty.cmake`: NRD, ShaderMake and MathLib downloaded into `.deps`, its shaders compiled
@@ -1433,22 +1451,34 @@ tracer, at the render resolution:
 | `NRD.Composite` | `color += transmittance * (diffuseAlbedo * (denoised - noisy) + specularAlbedo * (...))`: exactly the signals NRD saw are replaced; emission, sky, volumes and anything the signals do not carry stay as they were |
 
 Parameters: `enabled`, `denoiser` (0 RELAX, the default; 1 REBLUR), `historyFrames` (30),
-`antiFirefly`. Camera matrices are the left-handed view with the path tracer's view depth, the motion
+`antiFirefly` (off: it clamps bright samples, 4-5% of `sphere_field`'s light). Camera matrices are the left-handed view with the path tracer's view depth, the motion
 vectors the path tracer's (pixels, previous - current) scaled to UV, the jitter its own.
 
 **taa** (`src/features/taa/`, any backend): the Upscale stage behind nrd. Each output pixel gathers
 the 3 x 3 render samples around it (at pixel + 0.5 + jitter, a Gaussian of the distance), reprojects
-its last result with the motion vectors (Catmull-Rom), clips it to the neighbourhood's colour box in
-YCoCg (mean +- 1.25 deviations) and blends in 0.1 of the frame; so it also upsamples a frame rendered
-below the output size. It stands aside for accumulated frames (`kRealTime` 0) and debug views.
+its last result with the motion vectors (Catmull-Rom, kept within the 2 x 2 texels around it), clips
+it to a box in YCoCg and blends in 0.1 of the frame; so it also upsamples a frame rendered below the
+output size. It stands aside for accumulated frames (`kRealTime` 0) and debug views. The box decides
+whether the mean survives (`Taa.hlsli`): around the frame's own noisy samples (mean +- 1.25
+deviations) it is drawn from skewed noise, mostly dark with a few bright samples, so its centre lies
+below the true mean in most frames and its width is small, and the history (which holds the true
+mean) was clipped down: TAA alone took 5% of `sphere_field`'s light. So `TAA.Fast` first keeps a fast
+history (0.25 of each frame, clipped only far out: 3 deviations widened by the pixel's temporal
+deviation, whose second moment its alpha keeps), and `TAA` clips a still pixel's history to the fast
+history's 3 x 3 box (centre unskewed by the frames it averages; 1.6 x `clip` deviations widened by
+what the frames' temporal variance leaves in it). A moving pixel (half a pixel of motion, or any
+camera motion: smoke over the sky has the sky's motion vectors) uses the frame's own box as before,
+the fast history too, so that nothing trails; it gives up some of the mean while it moves. Both
+histories round to half precision at random (`StochasticHalf`): converting on store truncates on this
+GPU, and an average that rounds every update down settles half a step times the frames it averages
+below its inputs.
 Weighing samples by 1 / (1 + luminance) against fireflies (Karis) took 5% of the Cornell box's ceiling
 light, whose few pixels hold half the image's energy: the input is denoised, so it is not done.
 
 Measured (RTX 5070, D3D12; display luminance after x / (1 + x)):
 
 - `cornell_box` 960 x 540: one frame's RMSE against 4096 accumulated spp 0.027 noisy, 0.013 NRD,
-  0.0067 NRD + TAA. The mean of 16 frames: noisy -0.3%, NRD -1.2% (RELAX; -1.0% without its
-  anti-firefly, REBLUR -1.5%), NRD + TAA -1.1%.
+  0.0067 NRD + TAA.
 - `braziers` 960 x 540: RMSE 0.128 noisy, 0.016 NRD, 0.014 NRD + TAA; mean +0.01%.
 - `braziers` 1920 x 1080 static: the frame-to-frame deviation's 99.9th percentile 0.073 with NRD
   alone (jittered edges crawl), 0.0084 with TAA (DLSS RR 0.0064). Strafing past the plumes up close
@@ -1457,7 +1487,38 @@ Measured (RTX 5070, D3D12; display luminance after x / (1 + x)):
 - Cost at 1920 x 1080: `NRD.Denoise` 1.7 ms (`cornell_box`) to 2.0 ms (`braziers`), `NRD.Prepare`
   and `NRD.Composite` 0.1 ms each, TAA 0.1 ms.
 
-Validation: `Nrd_RefusesOnNullDevice`, `Taa_FiltersRealTimeFramesOnly`,
+#### Energy
+
+A denoiser of noise that is skewed (rare bright samples) loses light wherever it clips or clamps, and a
+filter that spreads shadows loses it where they meet the light. The mean of 32 real-time frames (after
+96, 480 x 270) against 2048 accumulated ones, and one frame's RMSE in display luminance x / (1 + x):
+
+| Scene | Before (energy / RMSE) | Now | NRD alone | TAA alone | Frames alone |
+|---|---|---|---|---|---|
+| `sphere_field` | -9.4% / 0.046 | -2.2% / 0.029 | -1.5% | -0.9% | -0.1% |
+| `many_lights` | -12.9% / 0.067 | -2.7% / 0.053 | -1.7% | -1.7% | -0.1% |
+| `textured` | -3.0% / 0.019 | -1.2% / 0.0065 | -1.3% | -0.3% | -0.2% |
+| `coated` | -3.5% / 0.023 | -1.7% / 0.0088 | -1.7% | -0.8% | -0.6% |
+| `cornell_box` | -1.5% / 0.0051 | -0.5% / 0.0083 | -0.5% | -0.1% | 0.0% |
+| `material_grid` | -1.7% | -0.5% / 0.0036 | -0.5% | -0.2% | -0.1% |
+| `braziers` | | +1.0% / 0.011 | +1.0% | +0.9% | +1.0% (the march's own, §8.13) |
+
+- What went: NRD's anti-firefly (4-5% of `sphere_field`), NRD on the direct light (shadows spread:
+  2-10%), TAA's clipping to the frame's skewed neighbourhood (5% of `sphere_field` alone), half
+  precision truncation in TAA's history (0.1-0.2%), guides that did not follow the lobes.
+- What is left: NRD on the indirect light, 0.5-1.7%, and none of RELAX's settings (history clamping,
+  antilag, luminance edge stopping, pre-pass blur, history length, 32-bit textures) moves it; about
+  two thirds of it at `sphere_field`'s edges, where the jitter switches a pixel between surfaces. TAA
+  0.1-1.7%. In a white furnace (all light indirect, ReSTIR GI's noise heaviest) the chain is still
+  3-4% below accumulation on `textured` and `coated`.
+- Cornell box: the RMSE rose (0.0051 -> 0.0083) where the light's edge meets the dark ceiling. TAA's
+  Gaussian reconstruction (`blend` 1: the frame's own mean) puts 0.38 nits outside the edge where the
+  reference's box filter has 0.05; the old clipping cut that halo, and some of the light with it.
+- Trails (the last frame of a strafing camera, 64 frames, against a static camera's at its place,
+  99th percentile of the error): `braziers` 0.0153 (before 0.0153), `cornell_box` 0.0110 (0.0106),
+  `sphere_field` 0.096 (0.085).
+
+Validation: `Nrd_RefusesOnNullDevice`, `Taa_FiltersRealTimeFramesOnly`, `Taa_KnowsWhenTheCameraMoves`,
 `PathTracer_SignalsForDenoisersOfSurfaces` (the trace and ReSTIR write the signals, the march leaves
 the guides alone and filters its layer), `Editor_DenoiserChoice`; on the GPU the D3D12 debug layer
 reports no errors for `cornell_box` and `braziers` with `pathtracer,nrd,taa`.
@@ -1474,7 +1535,8 @@ the mesh's texture coordinates times `Material::uvScale`.
   footprint to choose a level by; the real-time denoisers and TAA filter what it aliases). The normal
   map bends the shading normal in the triangle's tangent frame along increasing u and v (from its
   positions and texture coordinates), orthogonalized against the interpolated normal; a bent normal
-  below the geometric surface is ignored. Hooks: `LoadTextureSet` (a bindless
+  below the geometric surface is ignored. What its lobes send below the surface is mirrored back above
+  it (§8.2, "Shading normals"), the specular lobes' is lost. Hooks: `LoadTextureSet` (a bindless
   `StructuredBuffer<TextureSetData>`, `IntegratorParams::textureSets` from `FrameData::textureSets`)
   and `MaterialTextureSample` (bindless `Texture2D`, the static linear wrap sampler); on the CPU,
   `SampleTexture2DWrapRGBA8` emulates the hardware: 8 fractional bits, sRGB decoded before filtering.
@@ -1484,10 +1546,9 @@ the mesh's texture coordinates times `Material::uvScale`.
   `MakeTileTextures` (glazed tiles in grout), `MakeMetalPlateTextures` (brushed metal, seams, rivets).
   The `textured` scene uses all three at 512 x 512.
 - **Validation**: `MaterialTextures_*` (sampling, the sets, Validate), `Integrator_TexturesScaleTheMaterial`
-  (a flat grey texture renders as that grey), `Integrator_NormalMapsLoseLittleInAWhiteFurnace`: rays
-  a bent normal sends below the surface are lost, so `textured` in a white furnace is 3.2% dark (the
-  mortar's grooves darkest; microfacet-based normal mapping, Schuessler et al. 2017, would keep that
-  light) and gains nothing. GPU against the CPU reference on `textured`: +0.05%.
+  (a flat grey texture renders as that grey), `Integrator_NormalMapsKeepTheLightInAWhiteFurnace`:
+  `textured` in a white furnace (16 bounces) is within 1.2% of the environment (3.2% dark before the
+  mirror of §8.2) and gains nothing. GPU against the CPU reference on `textured`: +0.05%.
 
 ### 8.16 Neural texture compression
 
@@ -1597,9 +1658,8 @@ part is evaluated (`Bsdf.hlsli`):
   5th-95th percentile -0.2% to +0.5%), approximation -0.71%; the CPU reference with the same network
   agrees with the GPU's (block median +0.02%). White furnace (the bases white, the layers clear): the
   walk 0.940 (a rough interface at grazing angles loses some light to its single scattering) to 1.008
-  (`Coat_WhiteFurnaceRandomWalk`); with the scene's own shapes the image means are walk -3.5%, network
-  -4.7% (white bases are outside what it trained on), approximation -6.9%, against -3.2% for the
-  uncoated `textured` (its normal maps). Cost at 1920 x 1080 in real time (frame / `Trace`): the
+  (`Coat_WhiteFurnaceRandomWalk`); with the scene's own shapes (64 bounces) the image means are walk
+  -0.13%, network -1.5% (white bases are outside what it trained on), approximation -4.1%. Cost at 1920 x 1080 in real time (frame / `Trace`): the
   approximation 11.4 / 5.0 ms, the network 16.7 / 6.3 ms, the walk 22.6 / 6.1 ms (and noisy).
   A walk limited to 10 events (pbrt's default) lost 8% of a white coated base: light the interface
   traps by total internal reflection keeps much of its weight for several round trips, so the limit is

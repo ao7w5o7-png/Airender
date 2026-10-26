@@ -144,7 +144,8 @@ public:
         mParameters.Add("enabled", &mEnabled, "Denoise the path tracer's frame (in real time: accumulate=false)");
         mParameters.Add("denoiser", &mDenoiser, "0 RELAX, 1 REBLUR (diffuse and specular)", 0, 1);
         mParameters.Add("historyFrames", &mHistoryFrames, "Frames NRD accumulates at most (30: half a second)", 1, 63);
-        mParameters.Add("antiFirefly", &mAntiFirefly, "NRD's firefly suppression");
+        mParameters.Add("antiFirefly", &mAntiFirefly,
+                        "NRD's firefly suppression (clamps bright samples: 4% of the sphere field's light)");
     }
 
     ~NrdFeature() override
@@ -758,7 +759,7 @@ private:
     bool mEnabled = true;
     u32 mDenoiser = gpu::kNrdRelax;
     u32 mHistoryFrames = 30;
-    bool mAntiFirefly = true;
+    bool mAntiFirefly = false;
 
     rhi::Device* mDevice = nullptr;
     ID3D12Device* mD3d = nullptr;

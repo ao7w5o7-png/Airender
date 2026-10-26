@@ -2,7 +2,9 @@
 // surfaces (nrd): the path tracer jitters its camera rays every frame in real time, which only a
 // temporal filter turns into smooth edges instead of crawling ones. It reconstructs the output from the
 // frame's jittered samples (and so also upsamples a frame rendered below the output size), reprojects
-// its last result with the motion vectors and clips it to the frame's neighbourhood (Taa.hlsl).
+// its last result with the motion vectors and clips it to the neighbourhood of a fast history that
+// follows the frames over a few of them (Taa.hlsli: clipped to the frame's own noisy neighbourhood,
+// the history lost the mean of skewed noise).
 //
 // It stands aside for frames that average themselves (slots::kRealTime 0: accumulation), for debug
 // views, and when a feature denoises the whole frame (one that consumes
@@ -10,6 +12,7 @@
 
 #include "air/core/Log.h"
 #include "air/renderer/RenderFeature.h"
+#include "air/renderer/Scene.h"
 #include "air/renderer/ShaderLoader.h"
 #include "air/renderer/shader/SceneShared.h"
 
@@ -33,8 +36,9 @@ public:
     {
         mParameters.Add("enabled", &mEnabled, "Temporal anti-aliasing of real-time frames");
         mParameters.Add("blend", &mBlend, "Weight of the current frame", 0.02f, 1.0f);
-        mParameters.Add("clip", &mClip, "History clipped to the neighbourhood's mean +- this many deviations", 0.5f,
+        mParameters.Add("clip", &mClip, "History clipped to the fast history's mean +- this many deviations", 0.5f,
                         4.0f);
+        mParameters.Add("fastBlend", &mFastBlend, "Weight of the current frame in the fast history", 0.05f, 1.0f);
     }
 
     ~TaaFeature() override
@@ -49,7 +53,15 @@ public:
                     mDevice->DestroyTexture(t);
                 }
             }
+            for (rhi::TextureHandle& t : mFastHistory)
+            {
+                if (t.IsValid())
+                {
+                    mDevice->DestroyTexture(t);
+                }
+            }
             mPipeline.Destroy(*mDevice);
+            mFastPipeline.Destroy(*mDevice);
         }
     }
 
@@ -61,9 +73,10 @@ public:
         mRenderWidth = context.renderWidth;
         mRenderHeight = context.renderHeight;
         mPipeline.Load(context.device, context.shaderDir, "Taa.cs", "TAA", sizeof(gpu::TaaConstants));
-        if (!mPipeline.IsAvailable())
+        mFastPipeline.Load(context.device, context.shaderDir, "TaaFast.cs", "TAA.Fast", sizeof(gpu::TaaConstants));
+        if (!mPipeline.IsAvailable() || !mFastPipeline.IsAvailable())
         {
-            AIR_LOG(Error, "TAA", "Taa.cs is missing from {}", context.shaderDir.string());
+            AIR_LOG(Error, "TAA", "Taa.cs or TaaFast.cs is missing from {}", context.shaderDir.string());
             return false;
         }
         for (u32 i = 0; i < 2; ++i)
@@ -75,6 +88,12 @@ public:
                                               .usage = rhi::TextureUsage::UnorderedAccess |
                                                        rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopySrc,
                                               .debugName = i == 0 ? "TAA.History[0]" : "TAA.History[1]"});
+            mFastHistory[i] = context.device.CreateTexture(
+                {.format = rhi::Format::RGBA16_FLOAT,
+                 .width = mWidth,
+                 .height = mHeight,
+                 .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                 .debugName = i == 0 ? "TAA.FastHistory[0]" : "TAA.FastHistory[1]"});
         }
         return true;
     }
@@ -90,6 +109,7 @@ public:
     {
         json::Value status = json::Value::MakeObject();
         status["filtered"] = mFiltered;
+        status["cameraMoved"] = mCameraMoved;
         return status;
     }
 
@@ -110,11 +130,17 @@ public:
         const u32 current = mCurrent;
         const rdg::TextureRef result = graph.ImportTexture(mHistory[current], mAccess[current], Access::CopySrc);
         mAccess[current] = Access::CopySrc;
+        const rdg::TextureRef fastResult =
+            graph.ImportTexture(mFastHistory[current], mFastAccess[current], Access::SRVCompute);
+        mFastAccess[current] = Access::SRVCompute;
         rdg::TextureRef past;
+        rdg::TextureRef fastPast;
         if (history)
         {
             past = graph.ImportTexture(mHistory[current ^ 1u], mAccess[current ^ 1u], Access::CopySrc);
             mAccess[current ^ 1u] = Access::CopySrc;
+            fastPast = graph.ImportTexture(mFastHistory[current ^ 1u], mFastAccess[current ^ 1u], Access::SRVCompute);
+            mFastAccess[current ^ 1u] = Access::SRVCompute;
         }
         mCurrent ^= 1u;
         mValid = true;
@@ -127,10 +153,42 @@ public:
         c.jitterX = float(context.blackboard.GetValue(slots::kJitterX));
         c.jitterY = float(context.blackboard.GetValue(slots::kJitterY));
         c.blend = mBlend;
+        c.fastBlend = mFastBlend;
         c.clip = mClip;
+        c.frame = mFrame++;
+        mCameraMoved = history && !(context.camera == mPreviousCamera);
+        c.cameraMoved = mCameraMoved ? 1.0f : 0.0f;
+        mPreviousCamera = context.camera;
         c.history = air::gpu::kInvalidIndex;
+        c.fastHistory = air::gpu::kInvalidIndex;
         const rdg::TextureRef color = context.sceneColor;
         const rdg::TextureRef motionVectors = *motion;
+        const rhi::PipelineHandle fastPipeline = mFastPipeline.Get(*mDevice);
+        graph.AddPass(
+            "TAA.Fast", rdg::PassFlags::Compute,
+            [&](rdg::PassBuilder& b)
+            {
+                b.Read(color, Access::SRVCompute);
+                b.Read(motionVectors, Access::SRVCompute);
+                if (fastPast.IsValid())
+                {
+                    b.Read(fastPast, Access::SRVCompute);
+                }
+                b.Write(fastResult, Access::UAVCompute);
+            },
+            [=](rdg::PassContext& ctx) mutable
+            {
+                c.color = ctx.SRV(color);
+                c.motion = ctx.SRV(motionVectors);
+                if (fastPast.IsValid())
+                {
+                    c.fastHistory = ctx.SRV(fastPast);
+                }
+                c.fastResult = ctx.UAV(fastResult);
+                ctx.cmd.SetPipeline(fastPipeline);
+                ctx.cmd.PushConstants(&c, sizeof(c));
+                ctx.cmd.Dispatch((c.width + 7) / 8, (c.height + 7) / 8, 1);
+            });
         const rhi::PipelineHandle pipeline = mPipeline.Get(*mDevice);
         graph.AddPass(
             "TAA", rdg::PassFlags::Compute,
@@ -138,6 +196,7 @@ public:
             {
                 b.Read(color, Access::SRVCompute);
                 b.Read(motionVectors, Access::SRVCompute);
+                b.Read(fastResult, Access::SRVCompute);
                 if (past.IsValid())
                 {
                     b.Read(past, Access::SRVCompute);
@@ -148,6 +207,7 @@ public:
             {
                 c.color = ctx.SRV(color);
                 c.motion = ctx.SRV(motionVectors);
+                c.fastResult = ctx.SRV(fastResult);
                 if (past.IsValid())
                 {
                     c.history = ctx.SRV(past);
@@ -175,6 +235,7 @@ private:
     bool mEnabled = true;
     float mBlend = 0.1f;
     float mClip = 1.25f;
+    float mFastBlend = 0.25f;
 
     rhi::Device* mDevice = nullptr;
     u32 mWidth = 0;
@@ -182,11 +243,17 @@ private:
     u32 mRenderWidth = 0;
     u32 mRenderHeight = 0;
     renderer::LazyComputePipeline mPipeline;
+    renderer::LazyComputePipeline mFastPipeline;
     std::array<rhi::TextureHandle, 2> mHistory;
     std::array<Access, 2> mAccess{Access::None, Access::None};
+    std::array<rhi::TextureHandle, 2> mFastHistory;
+    std::array<Access, 2> mFastAccess{Access::None, Access::None};
     u32 mCurrent = 0;
+    u32 mFrame = 0;
+    renderer::Camera mPreviousCamera;
     bool mValid = false;
     bool mFiltered = false;
+    bool mCameraMoved = false;
 };
 
 } // namespace

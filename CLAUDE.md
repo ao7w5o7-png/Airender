@@ -73,10 +73,13 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   `aircli coat-check` and compare an accumulated `coatModel=0` image with a `coatModel=1` one; raise the
   version in `TrainNeuralCoat`'s cache key so stale networks are not reused.
 - Real-time denoising (docs/architecture.md §8.14): the editor's default chain is
-  `pathtracer,nrd,taa,tonemap` (NRD on the surfaces' light split by lobe, TAA for edges; nrd needs
-  D3D12), the alternative `pathtracer,dlss`. Anything that adds light at the first surface must also
-  add its lobe split to `kDiffuseSignal` / `kSpecularSignal` (as ReSTIR does), or NRD leaves it noisy;
-  check a denoised frame's mean (average 16 frames) against an accumulated reference.
+  `pathtracer,nrd,taa,tonemap` (NRD on the surfaces' indirect light split by lobe, TAA for edges and
+  the direct light; nrd needs D3D12), the alternative `pathtracer,dlss`. Indirect light added at the
+  first surface must also add its lobe split to `kDiffuseSignal` / `kSpecularSignal` (as ReSTIR GI
+  does), or NRD leaves it noisy; direct light stays out of them (NRD spreads shadows: 2-10% of the
+  light lost). Energy is part of correctness: check the mean of 32 real-time frames against an
+  accumulated reference, in real lighting and in the white furnace (`--set pathtracer.furnace=1`;
+  docs/architecture.md §8.14 "Energy"); a filter that clips or clamps noisy samples loses light.
 - Real time is judged over frames, and a static camera hides trails: `--camera-motion
   RIGHT,UP,FORWARD[,YAW[,PITCH]]` moves the camera every frame and `--output-frames N` writes the last
   N frames. Compare a moving camera's last frame with a static camera's at the same place (trails,

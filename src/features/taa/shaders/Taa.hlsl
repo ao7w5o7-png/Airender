@@ -1,53 +1,13 @@
-// Temporal anti-aliasing and upsampling: each output pixel gathers the frame's 3 x 3 render samples
-// around it (they lie at pixel + 0.5 + jitter) with a Gaussian of their distance, follows its motion
-// back to the previous result (Catmull-Rom), clips that history to the neighbourhood's colour box in
-// YCoCg (mean +- clip standard deviations) and blends the two. Its input is denoised: weighing samples by
-// 1 / (1 + luminance) against fireflies (Karis 2014) took 5% of a small bright emitter's light.
+// TAA's result (Taa.hlsli): the frame blended into its reprojected last result by `blend`, that history
+// clipped to the box of this frame's fast history around the pixel (TaaFast.hlsl), widened by how
+// much the fast history's mean strays from the true one given the frames' temporal deviation.
 
-#include "air/renderer/shader/SceneShared.h"
-#include "TaaShared.h"
+#include "Taa.hlsli"
 
-[[vk::push_constant]] ConstantBuffer<TaaConstants> g : register(b0);
-
-SamplerState gLinearClamp : register(s0);
-
-float Luma(float3 c)
-{
-    return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
-}
-
-float3 ToYCoCg(float3 c)
-{
-    return float3(0.25f * c.r + 0.5f * c.g + 0.25f * c.b, 0.5f * c.r - 0.5f * c.b, -0.25f * c.r + 0.5f * c.g - 0.25f * c.b);
-}
-
-float3 FromYCoCg(float3 c)
-{
-    return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
-}
-
-// Catmull-Rom filtering of the history from five bilinear taps (the corners dropped).
-float3 SampleCatmullRom(Texture2D<float4> t, float2 uv, float2 size)
-{
-    float2 position = uv * size;
-    float2 center = floor(position - 0.5f) + 0.5f;
-    float2 f = position - center;
-    float2 w0 = f * (-0.5f + f * (1.0f - 0.5f * f));
-    float2 w1 = 1.0f + f * f * (-2.5f + 1.5f * f);
-    float2 w2 = f * (0.5f + f * (2.0f - 1.5f * f));
-    float2 w3 = f * f * (-0.5f + 0.5f * f);
-    float2 w12 = w1 + w2;
-    float2 tc0 = (center - 1.0f) / size;
-    float2 tc3 = (center + 2.0f) / size;
-    float2 tc12 = (center + w2 / w12) / size;
-    float3 c = t.SampleLevel(gLinearClamp, float2(tc12.x, tc0.y), 0.0f).rgb * (w12.x * w0.y) +
-               t.SampleLevel(gLinearClamp, float2(tc0.x, tc12.y), 0.0f).rgb * (w0.x * w12.y) +
-               t.SampleLevel(gLinearClamp, float2(tc12.x, tc12.y), 0.0f).rgb * (w12.x * w12.y) +
-               t.SampleLevel(gLinearClamp, float2(tc3.x, tc12.y), 0.0f).rgb * (w3.x * w12.y) +
-               t.SampleLevel(gLinearClamp, float2(tc12.x, tc3.y), 0.0f).rgb * (w12.x * w3.y);
-    float weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
-    return max(c / weight, 0.0f);
-}
+// A still pixel's box is this much wider than `clip` deviations: the fast history's deviation is small
+// next to the frames' (it averages them), and a tight box around it still took 1.5% of the sphere
+// field's light (0.9% at 1.6x).
+static const float kStillClip = 1.6f;
 
 [numthreads(8, 8, 1)]
 void Main(uint3 id : SV_DispatchThreadID)
@@ -56,46 +16,39 @@ void Main(uint3 id : SV_DispatchThreadID)
     {
         return;
     }
-    Texture2D<float4> color = ResourceDescriptorHeap[g.color];
-    Texture2D<float2> motion = ResourceDescriptorHeap[g.motion];
+    Texture2D<float4> fast = ResourceDescriptorHeap[g.fastResult];
     RWTexture2D<float4> result = ResourceDescriptorHeap[g.result];
-    float2 renderSize = float2(g.renderWidth, g.renderHeight);
-    float2 uv = (float2(id.xy) + 0.5f) / float2(g.width, g.height);
-    float2 at = uv * renderSize; // in render pixels
-    int2 center = int2(floor(at));
-    int2 last = int2(renderSize) - 1;
-    float2 jitter = float2(g.jitterX, g.jitterY);
-
-    float3 sum = 0.0f;
-    float weights = 0.0f;
-    float3 m1 = 0.0f;
-    float3 m2 = 0.0f;
-    for (int dy = -1; dy <= 1; ++dy)
+    Neighbourhood n = Gather(id.xy);
+    float3 output = n.current;
+    if (g.history != kInvalidIndex && n.onScreen)
     {
-        for (int dx = -1; dx <= 1; ++dx)
+        float3 m1 = 0.0f;
+        float3 m2 = 0.0f;
+        int2 last = int2(g.width, g.height) - 1;
+        for (int dy = -1; dy <= 1; ++dy)
         {
-            int2 q = clamp(center + int2(dx, dy), int2(0, 0), last);
-            float3 c = max(color[uint2(q)].rgb, 0.0f);
-            float2 d = at - (float2(q) + 0.5f + jitter);
-            float w = exp(-2.29f * dot(d, d));
-            sum += c * w;
-            weights += w;
-            float3 y = ToYCoCg(c);
-            m1 += y;
-            m2 += y * y;
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                float3 y = ToYCoCg(fast[uint2(clamp(int2(id.xy) + int2(dx, dy), int2(0, 0), last))].rgb);
+                m1 += y;
+                m2 += y * y;
+            }
         }
-    }
-    float3 current = weights > 0.0f ? sum / weights : max(color[uint2(clamp(center, int2(0, 0), last))].rgb, 0.0f);
-    float3 output = current;
-    float2 previous = uv + motion[uint2(clamp(center, int2(0, 0), last))] / renderSize;
-    if (g.history != kInvalidIndex && all(previous >= 0.0f) && all(previous <= 1.0f))
-    {
-        Texture2D<float4> history = ResourceDescriptorHeap[g.history];
-        float3 past = SampleCatmullRom(history, previous, float2(g.width, g.height));
         float3 mean = m1 / 9.0f;
-        float3 deviation = sqrt(max(m2 / 9.0f - mean * mean, 0.0f));
-        past = FromYCoCg(clamp(ToYCoCg(past), mean - g.clip * deviation, mean + g.clip * deviation));
-        output = lerp(max(past, 0.0f), current, g.blend);
+        float3 spatial = max(m2 / 9.0f - mean * mean, 0.0f);
+        Texture2D<float4> history = ResourceDescriptorHeap[g.history];
+        float3 past = SampleCatmullRom(history, n.previous, float2(g.width, g.height)).rgb;
+        // The frames' variance (of luminance, for every channel) around the result's mean, as the
+        // fast history's average of fastBlend leaves it: blend / (2 - blend) of it.
+        float l = Luma(past);
+        float temporal = max(fast[id.xy].a - l * l, 0.0f) * g.fastBlend / (2.0f - g.fastBlend);
+        // Where the image moves, the fast history lags behind it for a few frames and would leave a
+        // trail: the box then comes from this frame's own samples (and gives up some of the mean
+        // while it moves), fully from half a pixel of motion on.
+        float3 halfWidth = lerp(kStillClip * g.clip * sqrt(spatial + temporal), g.clip * n.deviation, n.moving);
+        mean = lerp(mean, n.mean, n.moving);
+        past = Clip(past, mean, halfWidth);
+        output = lerp(max(past, 0.0f), n.current, g.blend);
     }
-    result[id.xy] = float4(output, 1.0f);
+    result[id.xy] = float4(StochasticHalf(float4(output, 1.0f), id.xy).rgb, 1.0f);
 }

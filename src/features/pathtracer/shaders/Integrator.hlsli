@@ -189,9 +189,9 @@ struct PathSample
     uint primitive;
     float2 barycentrics;
     GiPath gi; // with kFlagRecordGi
-    // With kFlagSignals, for denoisers: the light the first vertex reflects, split by the lobe that
-    // reflects it (its own emission, and the sky a miss sees, are in neither), and how far its
-    // reflected ray went (0: none).
+    // With kFlagSignals, for denoisers: the indirect light the first vertex reflects, split by the lobe
+    // that reflects it (its own emission, its direct light and the sky a miss sees are in neither), and
+    // how far its reflected ray went (0: none).
     float3 diffuseRadiance;
     float3 specularRadiance;
     float reflectionDistance;
@@ -640,8 +640,11 @@ NrcQuery NrcMakeQuery(Surface s, float3 wo)
     q.normal = NrcPackDirection(n);
     q.direction = NrcPackDirection(wo);
     q.roughness = NrcPackUnorm16x2(s.material.roughness, 0.0f);
-    q.diffuse = NrcPackColor(DiffuseAlbedo(s.material));
-    q.specular = NrcPackColor(SpecularAlbedo(s.material, saturate(dot(n, wo))));
+    float3 diffuse;
+    float3 specular;
+    GuideAlbedos(s.material, dot(n, wo), diffuse, specular);
+    q.diffuse = NrcPackColor(diffuse);
+    q.specular = NrcPackColor(specular);
     return q;
 }
 #endif
@@ -740,8 +743,9 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.diffuseRadiance = float3(0.0f, 0.0f, 0.0f);
     result.specularRadiance = float3(0.0f, 0.0f, 0.0f);
     result.reflectionDistance = 0.0f;
-    // The split: the first vertex's next event estimation goes by its BSDF's parts, the rest of the
-    // path (from `reflectedFrom` on) by those of the BSDF sample it continued with.
+    // The split: the path beyond the first vertex (from `reflectedFrom` on) by the parts of the BSDF
+    // sample it continued with. The first vertex's next event estimation is in neither: the direct
+    // light passes the denoiser (docs/architecture.md §8.14).
     bool signals = (params.flags & kFlagSignals) != 0u;
     bool reflected = false;
     float3 reflectedFrom = float3(0.0f, 0.0f, 0.0f);
@@ -884,7 +888,6 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     if (bounce == 0u)
                     {
                         result.directRadiance += contribution;
-                        result.diffuseRadiance += contribution;
                     }
                 }
             }
@@ -903,7 +906,6 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     if (bounce == 0u)
                     {
                         result.directRadiance += contribution;
-                        result.diffuseRadiance += contribution;
                     }
                 }
             }
@@ -989,8 +991,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             result.position = s.position;
             result.normal = s.shadingNormal;
             result.material = s.material;
-            result.diffuseAlbedo = DiffuseAlbedo(s.material);
-            result.specularAlbedo = SpecularAlbedo(s.material, saturate(dot(s.shadingNormal, -direction)));
+            GuideAlbedos(s.material, dot(s.shadingNormal, -direction), result.diffuseAlbedo, result.specularAlbedo);
             result.instance = hit.instance;
             result.primitive = hit.primitive;
             result.barycentrics = hit.barycentrics;
@@ -1124,6 +1125,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         // The BSDF is prepared per call below: keeping a BsdfContext alive across the shadow ray
         // costs registers, which measured slower than repeating its cached LUT lookups.
         float3 woLocal = ToLocal(frame, wo);
+        float3 ngLocal = ToLocal(frame, ng);
         float3 rayOrigin = OffsetRayOrigin(s.position, ng);
         bool lightTree = bounce < params.lightTreeBounces;
 
@@ -1158,7 +1160,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             float cosLight = dot(-wi, lightNormal);
             if (pmf > 0.0f && cosLight > 0.0f && dot(wi, ng) > 0.0f)
             {
-                BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
+                BsdfEval e = EvaluateSurfaceBsdf(s.material, woLocal, ngLocal, ToLocal(frame, wi));
                 float lightPdf = LightPdf(pmf, light.area, dist, cosLight);
                 if (any(e.fCos) && lightPdf > 0.0f && TraceVisible(rayOrigin, wi, dist * (1.0f - 1e-4f)))
                 {
@@ -1187,9 +1189,6 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                         if (bounce == 0u)
                         {
                             result.directRadiance += contribution;
-                            float3 diffuse = throughput * e.fCosDiffuse * light.radiance * (weight / lightPdf);
-                            result.diffuseRadiance += diffuse;
-                            result.specularRadiance += contribution - diffuse;
                         }
                     }
                 }
@@ -1204,7 +1203,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             float3 wi = SampleSunDirection(params.sky, uSun);
             if (dot(wi, ng) > 0.0f)
             {
-                BsdfEval e = EvaluateBsdf(s.material, woLocal, ToLocal(frame, wi));
+                BsdfEval e = EvaluateSurfaceBsdf(s.material, woLocal, ngLocal, ToLocal(frame, wi));
                 if (any(e.fCos) && TraceVisible(rayOrigin, wi, 1e30f))
                 {
                     // One estimate after the other: the operands of * are unsequenced in C++.
@@ -1235,9 +1234,6 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                         if (bounce == 0u)
                         {
                             result.directRadiance += contribution;
-                            float3 diffuse = throughput * e.fCosDiffuse * sunRadiance * (weight / sunPdf);
-                            result.diffuseRadiance += diffuse;
-                            result.specularRadiance += contribution - diffuse;
                         }
                     }
                 }
@@ -1247,7 +1243,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         // Continue the path by sampling the BSDF.
         float uLobe = Rand(seed);
         float2 u = Rand2(seed);
-        BsdfSample bs = SampleBsdf(s.material, woLocal, uLobe, u);
+        BsdfSample bs = SampleSurfaceBsdf(s.material, woLocal, ngLocal, uLobe, u);
         if (!bs.valid)
         {
             break;

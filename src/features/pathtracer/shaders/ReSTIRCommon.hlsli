@@ -106,8 +106,9 @@ struct Receiver
     bool valid;
     float3 position;
     float3 origin; // where its rays start, off the surface
-    float3 ng;     // geometric normal, facing the eye
-    Frame frame;   // around the shading normal the BSDF uses
+    float3 ng;      // geometric normal, facing the eye
+    Frame frame;    // around the shading normal the BSDF uses
+    float3 ngLocal; // ng in that frame (EvaluateSurfaceBsdf)
     BsdfContext bsdf;
 };
 
@@ -161,6 +162,7 @@ Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
     r.origin = OffsetRayOrigin(s.position, s.geometricNormal);
     r.ng = s.geometricNormal;
     r.frame = MakeFrame(ns);
+    r.ngLocal = ToLocal(r.frame, r.ng);
     r.bsdf = PrepareBsdf(s.material, ToLocal(r.frame, wo));
     return r;
 }

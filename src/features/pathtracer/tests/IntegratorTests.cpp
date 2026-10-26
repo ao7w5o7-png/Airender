@@ -174,10 +174,11 @@ TEST(Integrator_TexturesScaleTheMaterial)
     EXPECT(Near(withTextures, withoutTextures, 0.01, "textured vs constant walls"));
 }
 
-// Normal maps in a white furnace (the textured scene, its colours white): rays a bent shading normal
-// sends below the surface are lost, so a little light is missing (3.2% at 256 spp, the grooves of
-// the mortar darkest); none may be gained.
-TEST(Integrator_NormalMapsLoseLittleInAWhiteFurnace)
+// Normal maps in a white furnace (the textured scene, its colours white): what a bent shading normal's
+// diffuse lobe sends below the surface is mirrored back above it (EvaluateSurfaceBsdf), so little light
+// is lost (0.6% at 128 bounces, 3.2% before; the specular lobes' share below the surface and the 16
+// bounces here leave a little in the mortar's grooves), and none is gained.
+TEST(Integrator_NormalMapsKeepTheLightInAWhiteFurnace)
 {
     TaskSystem tasks(4);
     const renderer::SceneDesc scene = airtest::BuiltinScene("textured");
@@ -188,8 +189,8 @@ TEST(Integrator_NormalMapsLoseLittleInAWhiteFurnace)
     settings.applyExposure = true; // the furnace's exposure maps the environment to 0.18
     const Image image = pt::RenderReference(scene, scene.camera, settings);
     const double mean = MeanLuminance(image);
-    EXPECT(mean < 0.18 * 1.01);
-    EXPECT(Near(mean, 0.18, 0.05, "textured furnace mean"));
+    EXPECT(mean < 0.18 * 1.005);
+    EXPECT(Near(mean, 0.18, 0.012, "textured furnace mean"));
 }
 
 // Veach's MIS scene: lights from 3 cm to 90 cm reflected by smooth to rough plates. NEE with MIS

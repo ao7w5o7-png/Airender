@@ -66,4 +66,15 @@ Rgb EstimateAlbedo(const Material& material, float cosThetaO, u32 sampleCount);
 // The same integral with uniform hemisphere sampling of EvaluateBsdf: independent of the sampler.
 Rgb EstimateAlbedoUniform(const Material& material, float cosThetaO, u32 sampleCount);
 
+// On a surface whose geometric normal ng (unit, in the shading frame, on wo's side) differs from the
+// shading normal z: the lobes with what they send below the surface mirrored back above it
+// (Bsdf.hlsli EvaluateSurfaceBsdf / SampleSurfaceBsdf).
+BsdfValue EvaluateSurfaceBsdf(const Material& material, const Direction& wo, const Direction& ng, const Direction& wi);
+BsdfDraw SampleSurfaceBsdf(const Material& material, const Direction& wo, const Direction& ng, float uLobe, float u0,
+                           float u1);
+// The albedo towards wo of the light arriving from above the surface: with SampleSurfaceBsdf, or
+// (uniform) integrating EvaluateSurfaceBsdf over the hemisphere around ng.
+Rgb EstimateSurfaceAlbedo(const Material& material, const Direction& wo, const Direction& ng, u32 sampleCount);
+Rgb EstimateSurfaceAlbedoUniform(const Material& material, const Direction& wo, const Direction& ng, u32 sampleCount);
+
 } // namespace air::pt

@@ -383,10 +383,10 @@ TEST(PathTracer_RealTimeVolumesGuideDenoisers)
     EXPECT(accumulating.graphText.find("PathTracer.ColorBeforeVolumes") == std::string::npos);
 }
 
-// Under a denoiser of the surfaces alone (NRD) the path tracer writes their light split by lobe (the
-// trace, then the ReSTIR passes add theirs), the guides keep describing the surfaces, and the volumes'
-// layer is filtered over frames by VolumeMarch.Temporal, which also writes what it lets through of the
-// surfaces' light. Without volumes ReSTIR DI and GI add to the signals.
+// Under a denoiser of the surfaces alone (NRD) the path tracer writes their indirect light split by lobe
+// (the trace, then ReSTIR GI adds its own; the direct light, ReSTIR DI's too, passes the denoiser), the
+// guides keep describing the surfaces, and the volumes' layer is filtered over frames by
+// VolumeMarch.Temporal, which also writes what it lets through of the surfaces' light.
 TEST(PathTracer_SignalsForDenoisersOfSurfaces)
 {
     Headless h({"pathtracer", "tonemap"});
@@ -397,6 +397,7 @@ TEST(PathTracer_SignalsForDenoisersOfSurfaces)
     for (const char* pass : {"PathTracer.Trace (RayTracing)", "PathTracer.ReSTIRDI.Spatial (Compute)",
                              "PathTracer.ReSTIRGI.Spatial (Compute)"})
     {
+        const bool writes = std::string(pass).find("ReSTIRDI") == std::string::npos;
         const size_t at = plain.graphText.find(pass);
         EXPECT(at != std::string::npos);
         const size_t next = plain.graphText.find("\n  [", at);
@@ -404,7 +405,7 @@ TEST(PathTracer_SignalsForDenoisersOfSurfaces)
              {"write PathTracer.DiffuseSignal as UAVCompute", "write PathTracer.SpecularSignal as UAVCompute"})
         {
             const size_t write = plain.graphText.find(signal, at);
-            EXPECT(write != std::string::npos && write < next);
+            EXPECT((write != std::string::npos && write < next) == writes);
         }
     }
     h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f}});

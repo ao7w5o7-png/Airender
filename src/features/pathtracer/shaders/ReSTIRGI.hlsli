@@ -141,11 +141,11 @@ GiPoint EvaluateGi(Receiver r, SecondaryVertex v, GiSample x)
     {
         return p; // x2 below r's horizon, or r on the other side of x2 than the path
     }
-    BsdfEval e1 = EvaluateBsdf(r.bsdf, ToLocal(r.frame, p.wi));
+    BsdfEval e1 = EvaluateSurfaceBsdf(r.bsdf, r.ngLocal, ToLocal(r.frame, p.wi));
     // x2's shading frame as TracePath builds it for this incoming direction.
     float3 ns2 = dot(v.ns, wo2) > 0.0f ? v.ns : v.ng;
     Frame frame2 = MakeFrame(ns2);
-    BsdfEval e2 = EvaluateBsdf(v.material, ToLocal(frame2, wo2), ToLocal(frame2, x.direction));
+    BsdfEval e2 = EvaluateSurfaceBsdf(v.material, ToLocal(frame2, wo2), ToLocal(frame2, v.ng), ToLocal(frame2, x.direction));
     float mis = 1.0f;
     if (x.strategy == 0u)
     {
