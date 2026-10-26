@@ -612,10 +612,13 @@ differ.
 
 `pathtracer.debugView` selects what `Resolve` writes: 0 lit, 1 normals, 2 base color,
 3 roughness, 4 metallic, 5 first-hit distance, 6 intersection count heatmap (Turbo colormap),
-7 path length heatmap, 8 direct light only, 9 indirect light only, 10 what the neural radiance
-cache predicts the first surface reflects (§8.11), and for the real-time volumes (§8.13) 11 their
-march's steps, 12 its adaptive sampling rate, 13 the volumes per ray. `debugScale` scales the
-distance and heatmap views. `furnace=1` turns every
+7 path length heatmap, 8 direct light only, 9 indirect light only (the global illumination, before
+denoising; `nrd.view=1` shows it denoised, §8.14), 10 what the neural radiance cache predicts the
+first surface reflects (§8.11), for the real-time volumes (§8.13) 11 their march's steps, 12 its
+adaptive sampling rate, 13 the volumes per ray, and 14 the neural coat (§8.17): blue where the
+clear coats' network shades the first surface, green / red where it brightens / darkens the
+analytic approximation towards the mirror direction (full at 2x / 0.5x), purple for a coat another
+model evaluates, grey elsewhere. `debugScale` scales the distance and heatmap views. `furnace=1` turns every
 material white and every emitter off with a uniform environment, so any visible structure is an
 energy error.
 
@@ -1460,9 +1463,16 @@ tracer, at the render resolution:
 | `NRD.Denoise` | NRD's own dispatches, recorded with D3D12 into the RHI's command list: a root signature and pipeline per NRD pipeline (root CBV, one descriptor table, static samplers), its textures (committed, states tracked across dispatches), a shader-visible descriptor heap and an upload buffer for its constants, both rings over the frames in flight. The render graph's textures end in the states it declared |
 | `NRD.Composite` | `color += transmittance * (diffuseAlbedo * (denoised - noisy) + specularAlbedo * (...))`: exactly the signals NRD saw are replaced; emission, sky, volumes and anything the signals do not carry stay as they were |
 
+The editor renders below the viewport under NRD (Render panel, "Render scale", 0.67 by default) and
+TAA upsamples: at 1920 x 1080 a frame of `sponza` took 22.8 ms at full size, 10.3 ms at 0.67 and
+5.8 ms at 0.5, with the image at 0.67 hard to tell apart. Primary rays are about 1 ms of such a frame
+(`maxBounces=0` without NEE or ReSTIR), so a rasterized first hit would save at most that.
+
 Parameters: `enabled`, `denoiser` (0 RELAX, the default; 1 REBLUR), `historyFrames` (30),
-`antiFirefly` (off: it clamps bright samples, 4-5% of `sphere_field`'s light). Camera matrices are the left-handed view with the path tracer's view depth, the motion
-vectors the path tracer's (pixels, previous - current) scaled to UV, the jitter its own.
+`antiFirefly` (off: it clamps bright samples, 4-5% of `sphere_field`'s light), `view` (1: the
+denoised signals alone, the global illumination, in place of the frame; the editor's "GI only"). Camera
+matrices are the left-handed view with the path tracer's view depth, the motion vectors the path
+tracer's (pixels, previous - current) scaled to UV, the jitter its own.
 
 **taa** (`src/features/taa/`, any backend): the Upscale stage behind nrd. Each output pixel gathers
 the 3 x 3 render samples around it (at pixel + 0.5 + jitter, a Gaussian of the distance), reprojects

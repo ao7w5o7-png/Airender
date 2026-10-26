@@ -146,6 +146,8 @@ public:
         mParameters.Add("historyFrames", &mHistoryFrames, "Frames NRD accumulates at most (30: half a second)", 1, 63);
         mParameters.Add("antiFirefly", &mAntiFirefly,
                         "NRD's firefly suppression (clamps bright samples: 4% of the sphere field's light)");
+        mParameters.Add("view", &mView, "0 the frame, 1 the global illumination alone (the indirect light, denoised)",
+                        0, 1);
     }
 
     ~NrdFeature() override
@@ -372,6 +374,7 @@ public:
             c.height = mHeight;
             c.denoiser = mInstanceKind;
             c.denoisingRange = kDenoisingRange;
+            c.view = mView;
             c.surfaceTransmittance = air::gpu::kInvalidIndex;
             const rhi::PipelineHandle pipeline = mComposite.Get(*mDevice);
             const rdg::TextureRef reads[] = {
@@ -760,6 +763,7 @@ private:
     u32 mDenoiser = gpu::kNrdRelax;
     u32 mHistoryFrames = 30;
     bool mAntiFirefly = false;
+    u32 mView = 0;
 
     rhi::Device* mDevice = nullptr;
     ID3D12Device* mD3d = nullptr;

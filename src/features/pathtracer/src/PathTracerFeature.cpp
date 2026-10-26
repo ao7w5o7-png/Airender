@@ -135,8 +135,10 @@ public:
                         "White furnace: white materials, lights off; energy conservation shows as a flat grey image");
         mParameters.Add("debugView", &mSettings.debugView,
                         "0 lit, 1 normals, 2 base color, 3 roughness, 4 metallic, 5 depth, 6 intersection heatmap, "
-                        "7 bounce heatmap, 8 direct light, 9 indirect light, 10 radiance cache at the first hit, "
-                        "11 volume march steps, 12 its lighting rate, 13 volumes per ray",
+                        "7 bounce heatmap, 8 direct light, 9 indirect light (GI; noisy: nrd.view=1 shows it denoised), "
+                        "10 radiance cache at the first hit, 11 volume march steps, 12 its lighting rate, "
+                        "13 volumes per ray, 14 neural coat (blue: the network shades the clear coat; green / "
+                        "red: it brightens / darkens the approximation)",
                         0, gpu::kDebugViewCount - 1);
         mParameters.Add(
             "ser", &mSettings.shaderExecutionReordering,

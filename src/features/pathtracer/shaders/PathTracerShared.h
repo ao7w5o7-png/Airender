@@ -28,13 +28,17 @@ AIR_CONST uint kDebugDepth = 5;         // first-hit distance / debugScale
 AIR_CONST uint kDebugIntersections = 6; // heatmap: triangles intersected by the camera ray / debugScale
 AIR_CONST uint kDebugBounces = 7;       // heatmap: path length / maxBounces (Russian roulette shows here)
 AIR_CONST uint kDebugDirect = 8;        // radiance of paths with at most one bounce (emission + direct light)
-AIR_CONST uint kDebugIndirect = 9;      // radiance of the remaining paths
+AIR_CONST uint kDebugIndirect = 9;      // radiance of the remaining paths: the global illumination
 AIR_CONST uint kDebugNrcCache = 10;     // the neural radiance cache's prediction at the first hit (pathtracer.nrc)
 // The real-time volumes' ray march (VolumeMarch.hlsl, pathtracer.volumeMarch), over the surfaces:
 AIR_CONST uint kDebugVolumeSteps = 11;    // heatmap: lit steps / debugScale
 AIR_CONST uint kDebugVolumeRate = 12;     // lighting rate: blue every pixel, green shared by 2 x 2, red by 4 x 4
 AIR_CONST uint kDebugVolumeSegments = 13; // heatmap: volumes the camera ray crosses (of kMarchMaxVolumes)
-AIR_CONST uint kDebugViewCount = 14;
+// Where the clear coats' network shades the first surface (blue) and how much it corrects the analytic
+// approximation towards the mirror direction (green brighter, red darker; full at 2x / 0.5x); other
+// coat models purple, the rest grey.
+AIR_CONST uint kDebugNeuralCoat = 14;
+AIR_CONST uint kDebugViewCount = 15;
 
 AIR_CONST uint kFlagFurnace = 1u;      // every material white, emitters off: an energy-conserving image is uniform
 AIR_CONST uint kFlagReset = 2u;        // discard the accumulated samples

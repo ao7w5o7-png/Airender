@@ -52,6 +52,7 @@ struct NrdCompositeConstants
     uint height;
     uint denoiser;
     float denoisingRange;
+    uint view; // 0: the frame; 1: the denoised signals alone (the indirect light: the GI)
 };
 
 #ifdef __cplusplus

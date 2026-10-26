@@ -26,6 +26,11 @@ void Main(uint3 id : SV_DispatchThreadID)
     Texture2D<float> viewDepth = ResourceDescriptorHeap[g.viewDepth];
     if (!(viewDepth[id.xy] < g.denoisingRange))
     {
+        if (g.view == 1u)
+        {
+            RWTexture2D<float4> sky = ResourceDescriptorHeap[g.color];
+            sky[id.xy] = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
         return; // NRD does not write beyond the denoising range
     }
     Texture2D<float4> diffuseSignal = ResourceDescriptorHeap[g.diffuseSignal];
@@ -59,5 +64,11 @@ void Main(uint3 id : SV_DispatchThreadID)
     float3 change = da * (max(diffuse, 0.0f) - Noisy(diffuseSignal[id.xy].rgb, da)) +
                     sa * (max(specular, 0.0f) - Noisy(specularSignal[id.xy].rgb, sa));
     float4 c = color[id.xy];
+    if (g.view == 1u)
+    {
+        // The global illumination alone (the signals carry the indirect light), denoised.
+        color[id.xy] = float4(transmittance * (da * max(diffuse, 0.0f) + sa * max(specular, 0.0f)), c.a);
+        return;
+    }
     color[id.xy] = float4(max(c.rgb + transmittance * change, 0.0f), c.a);
 }

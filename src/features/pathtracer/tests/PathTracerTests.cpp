@@ -128,12 +128,12 @@ TEST(PathTracer_WritesGuidesForDenoisers)
 TEST(PathTracer_DebugViewsAndFurnaceRun)
 {
     Headless h({"pathtracer", "tonemap"});
-    for (int view = 0; view < 14; ++view)
+    for (int view = 0; view < 15; ++view)
     {
         EXPECT(h.runner->SetParameter("pathtracer.debugView", std::to_string(view)));
         EXPECT(h.Frame().validationErrors.empty());
     }
-    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "14"));
+    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "15"));
     EXPECT(h.runner->SetParameter("pathtracer.furnace", "true"));
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "false"));
     EXPECT(h.Frame().validationErrors.empty());

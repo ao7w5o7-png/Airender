@@ -211,6 +211,37 @@ float3 DebugValue(uint view, PathSample s, float intersections, FrameData f)
     }
 }
 
+// kDebugNeuralCoat at the first surface s, seen along `direction`.
+float3 NeuralCoatView(PathSample s, float3 direction)
+{
+    float g = 0.05f + 0.25f * Luminance(s.material.baseColor);
+    float3 grey = float3(g, g, g);
+    if (!s.hit || s.material.coat == kCoatNone)
+    {
+        return grey;
+    }
+#if AIR_BSDF_COATS
+    if (s.material.coat != kCoatNeural)
+    {
+        return float3(0.45f, 0.1f, 0.6f);
+    }
+    Frame frame = MakeFrame(s.normal);
+    float3 wo = ToLocal(frame, -direction);
+    if (wo.z <= 0.0f)
+    {
+        return grey;
+    }
+    BsdfContext c = PrepareBsdf(s.material, wo);
+    float3 wi = float3(-wo.x, -wo.y, wo.z);
+    float network = Luminance(NeuralCoatInner(c, wi));
+    float approximation = Luminance(CoatInnerApproximate(c, wi));
+    float change = clamp(log2(max(network, 1e-12f) / max(approximation, 1e-12f)), -1.0f, 1.0f);
+    return float3(max(-change, 0.0f), max(change, 0.0f), 0.0f) + float3(0.0f, 0.15f, 0.55f) * (1.0f - abs(change));
+#else
+    return float3(0.45f, 0.1f, 0.6f); // a coat, but these kernels evaluate it as its base
+#endif
+}
+
 // --- Shaders -------------------------------------------------------------------------------------
 
 void TracePixel(uint2 pixel)
@@ -297,6 +328,10 @@ void TracePixel(uint2 pixel)
             intersections = float(CountIntersections(f.camera.position.xyz, direction));
         }
         float3 value = f.debugView == kDebugNone ? s.radiance : DebugValue(f.debugView, s, intersections, f);
+        if (f.debugView == kDebugNeuralCoat)
+        {
+            value = NeuralCoatView(s, direction);
+        }
 #if AIR_PT_NRC
         if (f.debugView == kDebugNrcCache)
         {

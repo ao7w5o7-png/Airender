@@ -147,6 +147,11 @@ void EditorApp::CreateRunner(u32 width, u32 height)
     // Keep parameter values and render graph settings across the rebuild; the first runner takes
     // the startup ones.
     const bool first = !mRunner;
+    // Real time under NRD (the default with nrd among the features): the path tracer renders at
+    // mRenderScale of the viewport and TAA upsamples.
+    const bool nrdRealTime =
+        mRunner ? GetDenoiser() == Denoiser::Nrd
+                : std::find(mOptions.features.begin(), mOptions.features.end(), "nrd") != mOptions.features.end();
     std::vector<std::pair<std::string, std::string>> saved = mRunner ? decltype(saved){} : mOptions.parameters;
     rdg::RenderGraph::Config graphConfig;
     if (mRunner)
@@ -169,8 +174,9 @@ void EditorApp::CreateRunner(u32 width, u32 height)
     renderer::FrameRunnerDesc desc;
     desc.width = width;
     desc.height = height;
-    // With DLSS the path tracer renders below the output size and Ray Reconstruction upscales.
-    desc.renderScale = IsDlssEnabled() ? kDlssModes[mOptions.dlssMode].renderScale : 1.0f;
+    // With DLSS the path tracer renders below the output size and Ray Reconstruction upscales; under NRD
+    // at mRenderScale, upsampled by TAA.
+    desc.renderScale = IsDlssEnabled() ? kDlssModes[mOptions.dlssMode].renderScale : nrdRealTime ? mRenderScale : 1.0f;
     desc.shaderRoot = mOptions.shaderRoot;
     desc.graphConfig = graphConfig;
     desc.profile = true;
@@ -342,6 +348,10 @@ void EditorApp::SetDenoiser(Denoiser denoiser)
         {
             SetParameter("pathtracer.spp", "4"); // the path tracer's default for progressive frames
         }
+    }
+    if (mRenderScale != 1.0f) // the render scale applies under NRD only
+    {
+        CreateRunner(mRunner->GetDesc().width, mRunner->GetDesc().height);
     }
 }
 
@@ -1162,6 +1172,39 @@ void EditorApp::BuildScenePanel()
         mVolumesEdit = volumes;
     }
 
+    // Whether the clear coats' network runs, and on what: it shades coated materials only.
+    {
+        u32 coated = 0;
+        for (const renderer::Material& m : mScene->Desc().materials)
+        {
+            coated += m.coat ? 1u : 0u;
+        }
+        ImGui::SeparatorText("Neural shading");
+        if (coated == 0)
+        {
+            ImGui::TextWrapped("No material wears a clear coat, so the coats' network does not run. Tick "
+                               "\"Clear coat\" on a material below, or load the scene 'coated'.");
+        }
+        else if (renderer::RenderFeature* pt = mRunner->FindFeature("pathtracer"))
+        {
+            const json::Value status = pt->GetStatus();
+            const json::Value* kernels = status.Find("neuralKernels");
+            const json::Value* loss = status.Find("neuralCoatLoss");
+            const std::string model = GetParameter("pathtracer", "coatModel");
+            ImGui::Text("%u coated material%s; coatModel %s (0 = network)", coated, coated == 1 ? "" : "s",
+                        model.c_str());
+            ImGui::Text("Network: %s, training loss %.4f", kernels && kernels->AsBool() ? "running" : "not running",
+                        loss ? loss->AsNumber() : 0.0);
+            const bool showing = GetParameter("pathtracer", "debugView") == "14";
+            if (ImGui::Button(showing ? "Show the lit image" : "Show where the network shades"))
+            {
+                SetParameter("pathtracer.debugView", showing ? "0" : "14");
+            }
+            ImGui::SetItemTooltip("Debug view 14: blue where the network shades the clear coat; green / red where\n"
+                                  "it brightens / darkens the analytic approximation it corrects.");
+        }
+    }
+
     ImGui::SeparatorText("Materials");
     const auto& materials = mScene->Desc().materials;
     for (u32 i = 0; i < materials.size(); ++i)
@@ -1257,6 +1300,25 @@ void EditorApp::BuildRenderPanel()
             ImGui::SetItemTooltip("The path tracer renders at the mode's fraction of the viewport and Ray\n"
                                   "Reconstruction denoises and upscales. DLAA renders at full size: best quality,\n"
                                   "highest cost. Quality traces 44%% of the pixels with nearly the same image.");
+        }
+        if (denoiser == Denoiser::Nrd)
+        {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Render scale", &mRenderScale, 0.33f, 1.0f, "%.2f");
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                CreateRunner(desc.width, desc.height);
+            }
+            ImGui::SetItemTooltip("The path tracer renders at this fraction of the viewport's width and height and\n"
+                                  "TAA upsamples: 0.67 renders 44%% of the pixels, about half the frame time, with\n"
+                                  "nearly the same image. Resolution scale above sizes the viewport itself.");
+            bool giOnly = GetParameter("nrd", "view") == "1";
+            if (ImGui::Checkbox("GI only (denoised)", &giOnly))
+            {
+                SetParameter("nrd.view", giOnly ? "1" : "0");
+            }
+            ImGui::SetItemTooltip("Shows the global illumination alone: the light the surfaces reflect after one\n"
+                                  "bounce or more, as NRD denoised it (pathtracer.debugView 9 shows it before).");
         }
     }
     BuildShaderSection();
