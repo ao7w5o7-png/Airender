@@ -242,6 +242,24 @@ float3 NeuralCoatView(PathSample s, float3 direction)
 #endif
 }
 
+// The real-time clouds over a camera ray (kFlagCloudMaps): their layer at uv in front of what the ray
+// found, when that lies behind their front. Like the air in front (AddAerialPerspective) their light is
+// added to the sample and what they let through scales the denoiser's signals.
+void AddCloudLayer(FrameData f, float2 uv, AIR_INOUT(PathSample) s)
+{
+    Texture2D<float4> layer = ResourceDescriptorHeap[f.cloudLayer];
+    Texture2D<float> front = ResourceDescriptorHeap[f.cloudDepth];
+    float4 clouds = layer.SampleLevel(gLinearClamp, uv, 0.0f);
+    if (s.hit && !(s.hitDistance > front.SampleLevel(gLinearClamp, uv, 0.0f)))
+    {
+        return;
+    }
+    s.radiance = clouds.rgb + clouds.a * s.radiance;
+    s.directRadiance = clouds.rgb + clouds.a * s.directRadiance;
+    s.diffuseRadiance *= clouds.a;
+    s.specularRadiance *= clouds.a;
+}
+
 // --- Shaders -------------------------------------------------------------------------------------
 
 void TracePixel(uint2 pixel)
@@ -311,6 +329,10 @@ void TracePixel(uint2 pixel)
         params.flags = i == 0u ? f.flags | kFlagRecordGi | nrcFlags : f.flags;
         PathSample s = TracePath(f.camera.position.xyz, direction, params, seed);
         AddAerialPerspective(params, direction, s);
+        if ((f.flags & kFlagCloudMaps) != 0u)
+        {
+            AddCloudLayer(f, pixelPos / size, s);
+        }
 #if AIR_PT_NRC
         if ((params.flags & kFlagNrcTrain) != 0u && s.hit && params.sky.aerialDistance > 0.0f)
         {

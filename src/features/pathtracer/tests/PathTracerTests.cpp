@@ -426,3 +426,39 @@ TEST(PathTracer_SignalsForDenoisersOfSurfaces)
         EXPECT((graph.find(past) != std::string::npos) == (frame > 0));
     }
 }
+
+// The real-time clouds (CloudMarcher.h): in real time their maps are made before the trace, which reads
+// them; the shadow map only when the clouds change, the layer from its history from the second frame on.
+// While accumulating (cloudMarch=1) paths walk through the clouds and no map is made.
+TEST(PathTracer_RealTimeCloudsMarchIntoMaps)
+{
+    Headless h({"pathtracer", "tonemap"});
+    air::renderer::Clouds clouds;
+    clouds.enabled = true;
+    clouds.bottom = 1500.0f;
+    clouds.top = 2500.0f;
+    h.scene->SetClouds(clouds);
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        const auto result = h.Frame();
+        EXPECT(result.validationErrors.empty());
+        const std::string& graph = result.graphText;
+        EXPECT((graph.find("Clouds.Shadow (Compute)") != std::string::npos) == (frame == 0));
+        const size_t sky = graph.find("Clouds.Sky (Compute)");
+        const size_t march = graph.find("Clouds.March (Compute)");
+        const size_t reconstruct = graph.find("Clouds.Reconstruct (Compute)");
+        const size_t trace = graph.find("PathTracer.Trace");
+        EXPECT(sky != std::string::npos && march != std::string::npos && reconstruct != std::string::npos);
+        EXPECT(reconstruct < trace && march < reconstruct);
+        EXPECT(graph.find("read  Clouds.Layer[" + std::to_string(frame % 2) + "] as SRVCompute", trace) !=
+               std::string::npos);
+        const std::string past = "read  Clouds.Layer[" + std::to_string((frame + 1) % 2) + "] as SRVCompute";
+        EXPECT((graph.find(past, reconstruct) < trace) == (frame > 0));
+    }
+    EXPECT(h.runner->DescribeFeatures().Dump(0).find("\"cloudMarch\":true") != std::string::npos);
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "1"));
+    const auto accumulated = h.Frame();
+    EXPECT(accumulated.validationErrors.empty());
+    EXPECT(accumulated.graphText.find("Clouds.") == std::string::npos);
+}

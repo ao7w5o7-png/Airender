@@ -154,6 +154,18 @@ float CloudMajorantLoad(CloudData c, uint cell)
     return majorants[cell];
 }
 
+float CloudShadowSample(CloudData c, float2 uv)
+{
+    Texture2D<float> map = ResourceDescriptorHeap[c.shadowMap];
+    return map.SampleLevel(gLinearWrap, uv, 0.0f);
+}
+
+float4 CloudSkySample(CloudData c, float2 uv)
+{
+    Texture2D<float4> map = ResourceDescriptorHeap[c.skyMap];
+    return map.SampleLevel(gLinearClamp, uv, 0.0f);
+}
+
 VolumeData LoadVolume(uint table, uint index)
 {
     StructuredBuffer<VolumeData> volumes = ResourceDescriptorHeap[table];

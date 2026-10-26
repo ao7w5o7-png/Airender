@@ -1,6 +1,7 @@
 air_add_feature(NAME pathtracer
     SOURCES
         src/Bsdf.cpp
+        src/CloudMarcher.cpp
         src/PathTracer.cpp
         src/NeuralCoat.cpp
         src/PathTracerFeature.cpp

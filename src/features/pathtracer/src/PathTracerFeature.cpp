@@ -36,6 +36,14 @@ public:
                         0, 64);
         mParameters.Add("cloudEvents", &mSettings.cloudEvents,
                         "Scattering events a path may take in the clouds before its light is given up", 0, 1u << 16);
+        mParameters.Add("cloudMarch", &mSettings.cloudMarch.mode,
+                        "Real-time clouds: ray marched into maps the paths read instead of walking through them "
+                        "(0 off, 1 when not accumulating, 2 always)",
+                        0, 2);
+        mParameters.Add("cloudSteps", &mSettings.cloudMarch.steps,
+                        "Real-time clouds: samples a camera ray may take in them", 8, 512);
+        mParameters.Add("cloudLightSamples", &mSettings.cloudMarch.lightSamples,
+                        "Real-time clouds: samples towards the sun from each (steps doubling from 30 m)", 1, 10);
         mParameters.Add("volumeEvents", &mSettings.volumeEvents,
                         "Scattering events a path may take in the scene's volume (besides its bounces) before its "
                         "light is given up",
@@ -200,6 +208,7 @@ public:
         status["neuralKernels"] = mTracer && mTracer->UsesNeuralKernels(); // AIR_PT_NEURAL
         status["neuralCoatLoss"] = mTracer ? mTracer->GetNeuralCoatLoss() : 0.0f;
         status["nrc"] = mTracer && mTracer->UsesRadianceCache();
+        status["cloudMarch"] = mTracer && mTracer->UsesCloudMarch();
         status["nrcLinearAlgebra"] = mTracer && mTracer->RadianceCacheUsesLinearAlgebra();
         status["nrcSteps"] = mTracer ? mTracer->GetRadianceCacheSteps() : 0u;
         status["volumeMarch"] = mTracer && mTracer->UsesVolumeMarch();

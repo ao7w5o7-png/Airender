@@ -45,7 +45,8 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   selection (light tree: `--set pathtracer.lightTreeBounces=N`, docs/architecture.md §8.6), `door`
   for indirect transport, `sphere_field` / `terrain` for instancing, dense geometry and memory,
   `sunset` for the physical sky (`--sun ELEVATION,AZIMUTH` gives any scene that sky, §8.9),
-  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10),
+  `cumulus` for volumetric clouds (`--clouds COVERAGE[,BOTTOM,TOP]` adds them to any scene, §8.10;
+  in real time they are ray marched into maps, `--set pathtracer.cloudMarch=0|1|2`, §8.19),
   `smoke` for volumes (`--volume FILE.vdb|plume[,EXTINCTION,ALBEDO,G] --volume-at X,Y,Z,SIZE` puts
   an OpenVDB grid in any scene, repeated for several; `aircli vdb FILE` lists a file's grids; §8.12),
   `braziers` for several volumes and lights close to them (§8.13), `textured` for material textures

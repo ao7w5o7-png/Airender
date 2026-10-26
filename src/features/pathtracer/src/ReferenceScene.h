@@ -203,6 +203,9 @@ struct SceneHooks
         return renderer::SampleTexture3D(tables.clouds.detail.data(), n, n, n, uvw.x, uvw.y, uvw.z);
     }
     float CloudMajorantLoad(CloudData /*c*/, uint cell) const { return tables.clouds.majorants[cell]; }
+    // The real-time clouds' maps (kFlagCloudMaps) are the GPU's: the reference walks through the clouds.
+    float CloudShadowSample(CloudData /*c*/, float2 /*uv*/) const { return 0.0f; }
+    float4 CloudSkySample(CloudData /*c*/, float2 /*uv*/) const { return float4(0.0f, 0.0f, 0.0f, 1.0f); }
     VolumeData LoadVolume(uint /*table*/, uint index) const { return tables.volumes[index].data; }
     float VolumeDensitySample(VolumeData v, float3 uvw) const
     {

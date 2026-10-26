@@ -118,6 +118,21 @@ struct VolumeMarchSettings
     bool operator==(const VolumeMarchSettings&) const = default;
 };
 
+// The real-time clouds (docs/architecture.md §8.19, src/CloudMarcher.h): instead of every path's walk
+// through them, a ray march of the clouds over the camera's rays at a sixteenth of the render's pixels
+// per frame (reprojected for the rest), a map of the sky through them for the other rays that leave the
+// scene and a shadow map of them for the sun.
+struct CloudMarchSettings
+{
+    u32 mode = 1;         // kReSTIROff, kReSTIRRealTime (with accumulate=false), kReSTIRAlways
+    u32 steps = 96;       // samples a camera ray may take in the clouds
+    u32 lightSamples = 6; // samples towards the sun from each (steps doubling from 30 m)
+    u32 skySteps = 48;    // the same for the sky map
+    u32 skyLightSamples = 4;
+
+    bool operator==(const CloudMarchSettings&) const = default;
+};
+
 // Clear coats (docs/architecture.md §8.17): how coated materials evaluate the light their coat lets in
 // and out again.
 inline constexpr u32 kCoatModelNeural = 0;      // an MLP trained for the scene's coated materials
@@ -158,6 +173,7 @@ struct PathTracerSettings
     ReSTIRSettings restir;
     RadianceCacheSettings nrc;
     VolumeMarchSettings volumeMarch;
+    CloudMarchSettings cloudMarch;
     bool furnace = false;     // white materials, emitters off, auto exposure on the environment
     u32 debugView = 0;        // gpu::kDebug*
     float debugScale = 10.0f; // metres for the depth view, intersections for the heatmap
@@ -172,6 +188,7 @@ struct PathTracerSettings
 class ReSTIR;
 class RadianceCache;
 class VolumeMarcher;
+class CloudMarcher;
 
 class PathTracer
 {
@@ -220,6 +237,7 @@ public:
     // Whether the last traced frame's volumes were ray marched (not tracked), and with how many light
     // groups besides the sun.
     bool UsesVolumeMarch() const { return mUsedVolumeMarch; }
+    bool UsesCloudMarch() const { return mUsedCloudMarch; }
     u32 GetVolumeMarchLights() const;
     bool RadianceCacheUsesLinearAlgebra() const;
     u32 GetRadianceCacheSteps() const;
@@ -274,7 +292,9 @@ private:
     std::unique_ptr<ReSTIR> mReSTIR;
     std::unique_ptr<RadianceCache> mRadianceCache;
     std::unique_ptr<VolumeMarcher> mVolumeMarcher;
+    std::unique_ptr<CloudMarcher> mCloudMarcher;
     bool mUsedVolumeMarch = false;
+    bool mUsedCloudMarch = false;
     bool mUsedReSTIRDI = false;
     bool mUsedReSTIRGI = false;
     bool mUsedNeuralKernels = false;

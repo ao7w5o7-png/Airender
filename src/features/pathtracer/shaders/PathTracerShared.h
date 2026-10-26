@@ -65,6 +65,10 @@ AIR_CONST uint kFlagProbe = 4096u; // a probe's path for the march's ambient lig
 // (TraceConstants::diffuseSignal, specularSignal; ReSTIR GI adds its own). Its direct light passes the
 // denoiser: filtered by it, the shadows spread and the frame lost 2-10% of its light.
 AIR_CONST uint kFlagSignals = 8192u;
+// The clouds come from the real-time clouds' maps (CloudMaps.hlsli, CloudMarcher.h): the camera's
+// rays from FrameData::cloudLayer, other rays that leave the scene from CloudData::skyMap, the sun's
+// light through them from CloudData::shadowMap. No walks through them.
+AIR_CONST uint kFlagCloudMaps = 16384u;
 AIR_CONST float kMissReflectionDistance = 1000.0f; // a reflected ray that leaves the scene, metres
 
 // The neural coat's parameters as float4s (NeuralCoat.hlsli kNeuralCoatParameters / 4), the size of its
@@ -118,6 +122,13 @@ struct FrameData
     uint textureSets;                // StructuredBuffer<TextureSetData> (GpuScene::textureSetTable)
     uint neuralCoat;                 // ByteAddressBuffer: the neural coat's parameters (NeuralCoat.hlsli)
     VolumeShadowsData volumeShadows; // their moment shadow maps, with kFlagVolumeMarch
+    // With kFlagCloudMaps: the clouds over the camera's rays at half the render size (Texture2D<float4>:
+    // rgb what they add, nits, a what they leave of what lies behind) and the distance to their front
+    // (Texture2D<float>), CloudMarcher's reconstruction.
+    uint cloudLayer;
+    uint cloudDepth;
+    uint pad0;
+    uint pad1;
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -161,7 +172,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 592);
+static_assert(sizeof(FrameData) == 608);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

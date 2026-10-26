@@ -7,6 +7,7 @@
 #include "air/renderer/ShaderLoader.h"
 #include "air/renderer/Transfer.h"
 
+#include "CloudMarcher.h"
 #include "PathTracerShared.h"
 #include "RadianceCache.h"
 #include "ReSTIR.h"
@@ -32,8 +33,8 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
     return a.maxBounces == b.maxBounces && a.accumulate == b.accumulate &&
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
            a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
-           a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && a.furnace == b.furnace && a.debugView == b.debugView &&
-           a.debugScale == b.debugScale && a.coatModel == b.coatModel;
+           a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && a.cloudMarch == b.cloudMarch && a.furnace == b.furnace &&
+           a.debugView == b.debugView && a.debugScale == b.debugScale && a.coatModel == b.coatModel;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -186,6 +187,8 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
     mRadianceCache->Initialize(shaderDir);
     mVolumeMarcher = std::make_unique<VolumeMarcher>(mDevice);
     mVolumeMarcher->Initialize(shaderDir);
+    mCloudMarcher = std::make_unique<CloudMarcher>(mDevice);
+    mCloudMarcher->Initialize(shaderDir);
 
     mFrameRingSize = mDevice.GetFramesInFlight() + 1;
     mFrameRing = mDevice.CreateBuffer({.size = mFrameRingSize * sizeof(gpu::FrameData),
@@ -363,8 +366,14 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     {
         mReSTIR->Invalidate();
     }
+    // The real-time clouds: their maps instead of walks through them (not in the furnace, where the
+    // walks check that the clouds conserve energy, nor with real-time volumes, whose shadow maps do not
+    // know the clouds).
+    const bool cloudMarch = scene.clouds.enabled != 0 && on(mSettings.cloudMarch.mode) && !mSettings.furnace &&
+                            !march && mCloudMarcher->IsAvailable();
     if (spp > 0)
     {
+        mUsedCloudMarch = cloudMarch;
         mUsedReSTIRDI = restirDi;
         mUsedReSTIRGI = restirGi;
         mUsedNrc = nrc;
@@ -439,7 +448,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
                   (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restirDi ? gpu::kFlagReSTIR : 0u) |
                   (restirGi ? gpu::kFlagReSTIRGI : 0u) | (nrc ? gpu::kFlagNrc : 0u) |
-                  (march ? gpu::kFlagVolumeMarch | gpu::kFlagGlobalJitter : 0u) | (signals ? gpu::kFlagSignals : 0u);
+                  (march ? gpu::kFlagVolumeMarch | gpu::kFlagGlobalJitter : 0u) | (signals ? gpu::kFlagSignals : 0u) |
+                  (cloudMarch ? gpu::kFlagCloudMaps : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -456,6 +466,12 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     if (march && spp > 0)
     {
         mVolumeMarcher->BeginFrame(graph, scene, mSettings.volumeMarch, frame.volumeShadows);
+    }
+    frame.cloudLayer = air::gpu::kInvalidIndex;
+    frame.cloudDepth = air::gpu::kInvalidIndex;
+    if (cloudMarch && spp > 0)
+    {
+        mCloudMarcher->BeginFrame(scene, mSettings.width, mSettings.height, !historyInvalid, frame);
     }
 
     const u32 slot = frame.frameIndex % mFrameRingSize;
@@ -573,6 +589,12 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             }
         }
         VolumeMarcher* marcher = march ? mVolumeMarcher.get() : nullptr;
+        CloudMarcher* clouds = cloudMarch ? mCloudMarcher.get() : nullptr;
+        if (clouds)
+        {
+            clouds->AddPasses(graph, scene, mSettings.cloudMarch, constants.frameData, constants.frameSlot,
+                              constants.skyTable, frame.frameIndex);
+        }
         graph.AddPass(
             "PathTracer.Trace", nrc ? rdg::PassFlags::Compute : rdg::PassFlags::RayTracing,
             [&](rdg::PassBuilder& b)
@@ -581,6 +603,10 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                 if (marcher)
                 {
                     marcher->DeclareShadowReads(b);
+                }
+                if (clouds)
+                {
+                    clouds->DeclareReads(b);
                 }
                 for (rdg::BufferRef buffer : {primaryHits, giReservoirs})
                 {

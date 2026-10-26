@@ -24,6 +24,8 @@
 //                                                     the aerial perspective tables (SkyLookup.hlsli)
 //   float         CloudBaseSample(CloudData c, float3 uvw), CloudDetailSample(...),
 //   float         CloudMajorantLoad(CloudData c, uint cell)   the clouds (CloudLookup.hlsli)
+//   float         CloudShadowSample(CloudData c, float2 uv), float4 CloudSkySample(CloudData c, float2 uv)
+//                                                     the real-time clouds' maps (CloudMaps.hlsli)
 //   VolumeData    LoadVolume(uint table, uint index)  the scene's volumes (IntegratorParams::volumeTable)
 //   float         VolumeDensitySample(VolumeData v, float3 uvw), VolumeMajorantLoad(VolumeData v, uint cell)
 //                                                     a volume's voxels (VolumeLookup.hlsli)
@@ -83,6 +85,7 @@
 #include "Bsdf.hlsli"
 #include "Camera.hlsli"
 #include "Sampling.hlsli"
+#include "CloudMaps.hlsli"
 #include "air/renderer/shader/CloudLookup.hlsli"
 #include "air/renderer/shader/SkyLookup.hlsli"
 #include "air/renderer/shader/VolumeLookup.hlsli"
@@ -535,13 +538,35 @@ struct Escape
     bool surface;
 };
 
-Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, float tMax, AIR_INOUT(uint) seed)
+// With the real-time clouds' maps (kFlagCloudMaps) a camera ray (`camera`) sees the sky alone: the clouds
+// over it come from FrameData::cloudLayer (TracePixel). Any other ray takes them from the sky map.
+Escape EscapeRadiance(IntegratorParams params, float3 origin, float3 direction, float tMax, bool camera,
+                      AIR_INOUT(uint) seed)
 {
     Escape escape;
     escape.sun = float3(0.0f, 0.0f, 0.0f);
     escape.rest = float3(0.0f, 0.0f, 0.0f);
     escape.surface = false;
     CloudData c = params.clouds;
+    if ((params.flags & kFlagCloudMaps) != 0u)
+    {
+        escape.surface = tMax < 1e30f;
+        if (!escape.surface)
+        {
+            if (HasSun(params.sky) && dot(direction, params.sky.sunDirection) >= params.sky.sunCosRadius)
+            {
+                escape.sun = params.sky.sunRadiance;
+            }
+            escape.rest = SkyRadiance(params.sky, direction);
+            if (!camera)
+            {
+                float4 clouds = CloudSkyMapLookup(c, direction);
+                escape.sun *= clouds.w;
+                escape.rest = float3(clouds.x, clouds.y, clouds.z) + escape.rest * clouds.w;
+            }
+        }
+        return escape;
+    }
     float albedo = (params.flags & kFlagFurnace) != 0u ? 1.0f : c.albedo;
     bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
     float sunPdf = sunNee ? 1.0f / SunSolidAngle(params.sky) : 0.0f;
@@ -697,6 +722,16 @@ float LightTransmittance(IntegratorParams params, LightTriangle light, float3 or
 #else
     return 1.0f;
 #endif
+}
+
+// The sun's light through the clouds: from their shadow map (kFlagCloudMaps), else ratio tracking.
+float CloudSunTransmittance(IntegratorParams params, float3 origin, float3 direction, AIR_INOUT(uint) seed)
+{
+    if ((params.flags & kFlagCloudMaps) != 0u)
+    {
+        return CloudShadowMapTransmittance(params.clouds, origin, direction);
+    }
+    return CloudTransmittance(params.clouds, origin, direction, 1e30f, seed);
 }
 
 float SunTransmittance(IntegratorParams params, float3 origin, float3 direction, AIR_INOUT(uint) seed)
@@ -899,7 +934,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     float phase = VolumePhase(volume, dot(direction, wi));
                     // One estimate after the other: the operands of * are unsequenced in C++.
                     float transmittance = VolumesTransmittance(params, p, wi, 1e30f, seed);
-                    transmittance *= CloudTransmittance(params.clouds, p, wi, 1e30f, seed);
+                    transmittance *= CloudSunTransmittance(params, p, wi, seed);
                     float3 contribution = throughput * params.sky.sunRadiance *
                                           (phase * transmittance * PowerHeuristic(sunPdf, phase) / sunPdf);
                     result.radiance += contribution;
@@ -941,9 +976,11 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         escape.sun = float3(0.0f, 0.0f, 0.0f);
         escape.rest = float3(0.0f, 0.0f, 0.0f);
         escape.surface = true;
-        if (!hit.hit || (params.clouds.enabled != 0u && origin.y > params.clouds.bottom))
+        bool cloudMaps = (params.flags & kFlagCloudMaps) != 0u;
+        if (!hit.hit || (params.clouds.enabled != 0u && origin.y > params.clouds.bottom && !cloudMaps))
         {
-            escape = EscapeRadiance(params, origin, direction, hit.hit ? hit.t : 1e30f, seed);
+            bool camera = bounce == 0u && (params.flags & kFlagProbe) == 0u;
+            escape = EscapeRadiance(params, origin, direction, hit.hit ? hit.t : 1e30f, camera, seed);
         }
         if (!hit.hit || !escape.surface)
         {
@@ -1207,7 +1244,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                 if (any(e.fCos) && TraceVisible(rayOrigin, wi, 1e30f))
                 {
                     // One estimate after the other: the operands of * are unsequenced in C++.
-                    float transmittance = CloudTransmittance(params.clouds, rayOrigin, wi, 1e30f, seed);
+                    float transmittance = CloudSunTransmittance(params, rayOrigin, wi, seed);
                     transmittance *= SunTransmittance(params, rayOrigin, wi, seed);
                     float3 sunRadiance = params.sky.sunRadiance * transmittance;
                     float weight = PowerHeuristic(sunPdf, e.pdf);
