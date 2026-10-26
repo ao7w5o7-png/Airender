@@ -22,7 +22,7 @@
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
 //                    [--clouds C[,B,T]] [--clouds-exact] [--cirrus C[,A,D]] [--cloud-events N] [--camera ...]
-//                    [--ev EV100]
+//                    [--ev EV100] [--subsurface-model 0|1|2]
 //                    [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]
 //                    [--neural-textures ...] [--ntc-cache DIR]
 //                    [--volume-march [--frames N] [--probe-frames N] [--volume-step S]
@@ -35,6 +35,9 @@
 //   aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]   neural
 //                    texture decoding in the shader (as on sample) against LibNTC's on CUDA (JSON)
 //   aircli coat-check [--scene NAME] [--directions N]   the neural coat of a scene's coated materials
+//   aircli subsurface-fit [--walks N] [--steps N] [--write FILE]   the neural subsurface profile against
+//                         the half-space walk; --write fits it anew and writes the header (the
+//                         feature's shaders/SubsurfaceProfileNetwork.h)
 //                    against the random walk it learnt from: errors and albedos (JSON)
 //
 // `render` fails (exit 1) if any frame produced a validation error.
@@ -47,6 +50,7 @@
 #include "air/core/TaskSystem.h"
 #include "air/features/pathtracer/NeuralCoat.h"
 #include "air/features/pathtracer/ReferenceRenderer.h"
+#include "air/features/pathtracer/SubsurfaceFit.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/NeuralNetwork.h"
@@ -102,6 +106,7 @@ int Usage()
         "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
         "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
         "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact] [--cloud-events N]\n"
+        "                [--subsurface-model 0|1|2]   (neural profile, random walk, Burley's profile)\n"
         "                [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]\n"
         "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
         "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
@@ -114,7 +119,8 @@ int Usage()
         "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
         "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
         "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n"
-        "  aircli coat-check [--scene NAME] [--directions N]\n",
+        "  aircli coat-check [--scene NAME] [--directions N]\n"
+        "  aircli subsurface-fit [--walks N] [--steps N] [--write SubsurfaceProfileNetwork.h]\n",
         stderr);
     return kExitUsage;
 }
@@ -603,6 +609,10 @@ int CommandReference(Args& args)
         {
             settings.volumeEvents = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeEvents
         }
+        else if (arg == "--subsurface-model")
+        {
+            settings.subsurfaceModel = u32(std::stoul(std::string(args.Next()))); // as pathtracer.subsurfaceModel
+        }
         else if (arg == "--light-tree-bounces")
         {
             settings.lightTreeBounces = u32(std::stoul(std::string(args.Next()))); // as pathtracer.lightTreeBounces
@@ -912,6 +922,62 @@ int CommandMlpCheck(Args& args)
     const bool passed = report["passed"].AsBool();
     std::puts(report.Dump().c_str());
     return passed ? kExitOk : kExitCheckFailed;
+}
+
+// ---------------------------------------------------------------------------
+// subsurface-fit
+// ---------------------------------------------------------------------------
+int CommandSubsurfaceFit(Args& args)
+{
+    u32 walks = 200000;
+    pt::SubsurfaceFitSettings settings;
+    std::string write;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--walks")
+        {
+            walks = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--steps")
+        {
+            settings.steps = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--write")
+        {
+            write = args.Next();
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    if (args.error)
+    {
+        return Usage();
+    }
+    TaskSystem tasks;
+    auto start = std::chrono::steady_clock::now();
+    const std::vector<pt::SubsurfaceProfileTable::Config> configs = pt::SubsurfaceFitConfigs();
+    const pt::SubsurfaceProfileTable table = pt::SimulateSubsurfaceProfiles(configs, walks, 1, &tasks);
+    const double walkSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    json::Value report = json::Value::MakeObject();
+    report["walksPerConfig"] = walks;
+    report["configs"] = u32(configs.size());
+    report["walkSeconds"] = walkSeconds;
+    report["compiled"] = pt::CheckSubsurfaceProfile(table, pt::CompiledSubsurfaceProfile());
+    if (!write.empty())
+    {
+        start = std::chrono::steady_clock::now();
+        const pt::SubsurfaceFitResult fit = pt::FitSubsurfaceProfile(table, settings, &tasks);
+        report["fitSeconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        report["fitLoss"] = fit.loss;
+        report["fitted"] = pt::CheckSubsurfaceProfile(table, fit.parameters);
+        std::ofstream(write, std::ios::binary) << pt::SubsurfaceProfileHeader(fit.parameters);
+        report["written"] = write;
+    }
+    std::printf("%s\n", report.Dump(2).c_str());
+    return kExitOk;
 }
 
 // ---------------------------------------------------------------------------
@@ -1416,6 +1482,10 @@ int main(int argc, char** argv)
     if (command == "coat-check")
     {
         return CommandCoatCheck(args);
+    }
+    if (command == "subsurface-fit")
+    {
+        return CommandSubsurfaceFit(args);
     }
     if (command == "vdb")
     {

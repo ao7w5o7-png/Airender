@@ -281,6 +281,7 @@ void TracePixel(uint2 pixel)
     gTextureSets = f.textureSets;
     params.textureSeed = f.frameIndex;
     params.coatModel = f.coatModel;
+    params.subsurfaceModel = f.subsurfaceModel;
     gNeuralCoat = f.neuralCoat;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;

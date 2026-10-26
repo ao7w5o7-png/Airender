@@ -500,6 +500,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `textured` | a courtyard corner of tiles, bricks and riveted metal plates in the afternoon sun | material textures and normal maps (§8.15), neural texture compression (§8.16) |
   | `coated` | the courtyard with clear coats: red car paint, blue lacquer, amber-lacquered tiles, coated plates | clear coats and their network (§8.17) |
   | `car_paint` | candy red, gold pearl, midnight blue, silver and solid black paints on a stretched body and five spheres | metallic flakes under clear coats and the network's flake inputs (§8.17) |
+  | `subsurface` | marble, jade, skin and wax balls and a thin jade slab against a low sun behind them | subsurface scattering: light carried beneath surfaces, through thin parts and from lit backs (§8.20) |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -1888,6 +1889,87 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   through the clouds (`furnace=1` checks their energy, §8.10).
 - **Validation**: `PathTracer_RealTimeCloudsMarchIntoMaps` (the passes, the shadow map only when the
   scene changes, the layer's history, none while accumulating).
+
+### 8.20 Subsurface scattering
+
+A dielectric material may scatter the light it does not reflect beneath its surface
+(`Material::subsurfaceRadius`, per channel, metres; `subsurfaceAnisotropy`): skin, marble, jade, wax,
+milk. The material's dielectric BSDF already splits its light that way (§8.3): of the light the
+specular lobes do not reflect, `1 - Es(wo)` enters, and its diffuse lobe returns it as if where it
+entered, `(1 - Es(wi)) / (pi (1 - EsAvg))` on the way out. Subsurface scattering keeps both factors
+and moves the second: the light that enters at x_i is carried beneath the surface to where it leaves,
+x_o, and leaves through the exit lobe there (`BsdfMaterial::subsurfaceExit`, white, integrating to 1).
+The base colour stays what the material reflects in all; with the radius going to 0 the material is
+the plain dielectric again, exactly. (`Subsurface.hlsli`, `SubsurfaceProfile.hlsli`.)
+
+- **The medium**: homogeneous beneath the surface, its single-scattering albedo chosen so that a
+  half-space of it reflects the base colour in all: a table of that reflectance by Monte Carlo
+  (400000 walks per entry, single-scattering albedos `1 - (1 - i/31)^3`, g = 0, 0.3, 0.6, 0.9),
+  inverted into the BSDF LUT as `sqrt(1 - albedo)` per colour (`kLutSubsurface`; textured colours
+  look it up per shading point). Its extinction is `1 / (radius s(A) (1 - g))`, Chiang et al. 2016's
+  scale `s = 1.9 - A + 3.5 (A - 0.8)^2` with the anisotropy's similarity scaling: the light spreads
+  about `radius` whatever g (without it g = 0.9 spread ten times as far, past any profile's reach).
+- **Three models** (`pathtracer.subsurfaceModel`, `aircli reference --subsurface-model`):
+
+  | Model | What finds x_o |
+  |---|---|
+  | 1 random walk (default) | the medium inside the mesh itself: free flights against rays of the scene, Henyey-Greenstein scattering, out where a ray reaches a surface first. Unbiased for any shape: light through thin parts, from a lit back, around corners |
+  | 2 Burley | a profile R(r) of the distance from x_i, Burley's normalized diffusion (Christensen and Burley 2015), the exit found by a probe ray through a disc around x_i (on the plane of the normal half of the time, of either tangent a quarter; one of up to 4 hits on the entering mesh, every axis and channel in its pdf) |
+  | 0 neural profile | the same probe, R(r) Burley's times `exp(z(log(r/d), A, g))` from a 3-16-16-1 MLP fit to the half-space walk |
+
+- **Colour channels** walk together: one channel, at random, draws every distance of a walk, and each
+  channel's light is weighed by the balance heuristic over the three channels' pdfs of the whole
+  walk (one-sample MIS, as pbrt-v4 weighs its wavelengths): the weight stays below 3 times the
+  product of the channel's albedos. Weighing each segment on its own bounded the segments but not
+  their product: in the white furnace 1.1% of the light went missing into the rare enormous weights
+  of long walks, even at 4096 frames.
+- **In the path tracer** (`TracePath`): at a subsurface vertex the path takes the specular lobes
+  (the vertex's BSDF, the base colour black) or goes beneath, by the lobes' energy towards wo (`(1 -
+  Es(wo)) A` against `Es(wo)`, clamped to [0.1, 0.9]); beneath, the vertex becomes x_o with the exit
+  lobe, its normals outwards. ReSTIR DI and GI see the specular lobes at the first surface; a path
+  that went beneath there gathers its own light (NEE at x_o included) and records no GI candidate, and
+  the GI candidate's pdf includes the lobe's probability. The denoisers' guides take the base colour
+  for the diffuse albedo, and the light from beneath is the diffuse signal. Compiled into the kernels
+  with the neural parts (`AIR_PT_SUBSURFACE` with `AIR_PT_NEURAL`, chosen while the scene has
+  subsurface materials); elsewhere (volumes, the radiance cache) the material is the plain
+  dielectric. Meshes must be closed with their triangles winding outwards (the probe's exits must
+  face the way x_i does: counting the back of a thin slab as a half-space created 50% more light there
+  in the white furnace).
+- **The neural profile** (`SubsurfaceFit.cpp`, `aircli subsurface-fit [--write FILE]`): the half-space
+  walk at 22 colours (0.05 - 0.99) and 7 anisotropies (0 - 0.9), 200000 walks each (16 s on 24
+  threads), histogrammed in 50 bins of log(r / d) from -6 to 4; the MLP (353 parameters, compiled into
+  the shaders as constants, `SubsurfaceProfileNetwork.h`) fit to `log(walk / Burley)` per bin, weighed
+  by the bin's share of the light, by Adam (6000 steps, 2.4 s). Its profile follows the walk's with a
+  relative RMS of 0.056 against Burley's 0.196 (the light-weighted error per colour and g, averaged),
+  the light in all within 1.4% (Burley 1.0%); worst near colour 0.99, whose tails pass the last bin.
+  Evaluated with its loops unrolled (immediate weights, activations in registers): looped, the
+  network made the trace 2.6 times slower.
+- **The probe's budget**: up to 12 rays along the chord, of which only hits on the entering mesh count
+  towards its 4: a budget of all hits lost the light where the chord ran through the neighbouring balls
+  first, a dark cross on each.
+
+Validation (`tests/SubsurfaceTests.cpp`, scene `subsurface`):
+
+- The half-space walk reflects the colour it was given (6 colours and anisotropies, 40000 walks:
+  within 1% plus the walk's noise); the shaders' network equals the CPU's; the compiled network follows
+  the walk at least twice as closely as Burley with its energy within 3%.
+- White furnace (the furnace scene's spheres, radius 5 / 2 / 1 cm): walk 0.1797, Burley 0.1793, network
+  0.1766 (a white furnace's colour 1 lies past the fit's 0.99); on the GPU over `subsurface`, the
+  objects -0.2% with the walk (the plain dielectric's own -0.05%), the profiles -2.5% (the balls'
+  curvature).
+- A thick slab under a uniform sky reflects as the plain dielectric of its colour: all three models
+  within 0.3%.
+- GPU against the CPU reference (`subsurface`, the walk, 320 x 180): the means agree to 0.0003%, 20 x 20
+  blocks within the CPU's noise.
+- `subsurface` lit from behind (accumulated, 320 x 180): against the walk, the profiles' median 8 x 8
+  block -2.3%, the balls 15-44% dark (the walk carries the light of their lit backs through them; jade
+  spreads 8 cm in a ball 44 cm across), the slab 70% dark (the sun through it). Neural and Burley differ
+  little there: the profile's shape matters less than what a profile cannot do.
+- Cost at 1920 x 1080 in real time (`PathTracer.Trace`): walk 6.4 ms, Burley 5.8, network 6.25; the noise
+  of a frame on the balls alike for the three (relative deviation 1.0-1.5). The walk, exact and no
+  dearer here, is the default.
+- Not modelled: refraction at the boundary (the exit lobe is the dielectric's diffuse one), single
+  scattering's glints, a medium that varies inside (textured colours set the medium at x_i).
 
 ---
 

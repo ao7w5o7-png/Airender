@@ -85,6 +85,7 @@ void Main(uint3 group : SV_GroupID, uint index : SV_GroupIndex)
     gTextureSets = f.textureSets;
     params.textureSeed = f.frameIndex;
     params.coatModel = f.coatModel;
+    params.subsurfaceModel = f.subsurfaceModel;
     gNeuralCoat = f.neuralCoat;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;

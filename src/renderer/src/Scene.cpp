@@ -590,6 +590,8 @@ void Scene::Update()
     WriteDynamicData();
     mGpu.coatedMaterials =
         std::any_of(mDesc.materials.begin(), mDesc.materials.end(), [](const Material& m) { return m.coat; });
+    mGpu.subsurfaceMaterials = std::any_of(mDesc.materials.begin(), mDesc.materials.end(), [](const Material& m)
+                                           { return m.ToGpu().subsurfaceRadius != float3(0.0f); });
     ++mGpu.version;
     mDirty = false;
 }

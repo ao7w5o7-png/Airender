@@ -60,5 +60,6 @@ SceneDesc MakeBraziers();
 SceneDesc MakeTextured();
 SceneDesc MakeCoated();
 SceneDesc MakeCarPaint();
+SceneDesc MakeSubsurface();
 
 } // namespace air::renderer::detail

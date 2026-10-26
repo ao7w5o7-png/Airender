@@ -42,7 +42,8 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
            a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
            a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && cloudMarch == b.cloudMarch && a.furnace == b.furnace &&
-           a.debugView == b.debugView && a.debugScale == b.debugScale && a.coatModel == b.coatModel;
+           a.debugView == b.debugView && a.debugScale == b.debugScale && a.coatModel == b.coatModel &&
+           a.subsurfaceModel == b.subsurfaceModel;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -337,7 +338,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     // Neural texture sets decoded on sample and coated materials' coat models: by the plain and ReSTIR GI
     // kernels' twins (and ReSTIR's); the others read the sets' coarse copies and the coats'
     // approximation.
-    const bool neural = (scene.neuralTextures || scene.coatedMaterials) && !volume;
+    const bool neural = (scene.neuralTextures || scene.coatedMaterials || scene.subsurfaceMaterials) && !volume;
     auto create = [&](rhi::PipelineHandle& pipeline, const rhi::RayTracingPipelineDesc& desc)
     {
         if (neural && !pipeline.IsValid())
@@ -454,6 +455,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                           ? kCoatModelApproximate + 1
                           : std::min(mSettings.coatModel, kCoatModelApproximate) + 1;
     frame.neuralCoat = mNeuralCoat.IsValid() ? mDevice.GetBindlessCBV(mNeuralCoat) : 0u;
+    frame.subsurfaceModel = std::min(mSettings.subsurfaceModel, 2u);
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;
@@ -739,7 +741,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.bsdfLut = constants.bsdfLut;
             restirScene.skyTable = constants.skyTable;
             mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, diffuseSignal, specularSignal,
-                               view != gpu::kDebugIndirect, view != gpu::kDebugDirect, neural && scene.coatedMaterials);
+                               view != gpu::kDebugIndirect, view != gpu::kDebugDirect,
+                               neural && (scene.coatedMaterials || scene.subsurfaceMaterials));
         }
         if (nrc)
         {

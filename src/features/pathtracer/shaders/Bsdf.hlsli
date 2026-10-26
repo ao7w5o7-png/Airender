@@ -31,6 +31,13 @@
 // and the sampling picks the interface's reflection or the base's lobes (a proxy for the inner part:
 // any of the three is weighed by the same pdf).
 //
+// The dielectric's diffuse lobe is the light that enters the surface, scatters beneath it and leaves
+// again, as if where it entered: (1 - Es(wo)) on the way in, (1 - Es(wi)) / (pi (1 - EsAvg)) on the way
+// out. A material with subsurface scattering (Subsurface.hlsli) takes the same factors at two places:
+// its BSDF is the specular lobes alone, the path tracer carries the light that enters to where it
+// leaves, and there the BSDF is the exit lobe alone (BsdfMaterial::subsurfaceExit): white,
+// (1 - Es(wi)) cos / (pi (1 - EsAvg)), which integrates to 1.
+//
 // Directions are in the local shading frame (z = normal) and point away from the surface.
 #ifndef AIR_PT_BSDF_HLSLI
 #define AIR_PT_BSDF_HLSLI
@@ -42,7 +49,11 @@ AIR_CONST uint kLutE = 0;                                          // [r][mu]
 AIR_CONST uint kLutEavg = kBsdfLutSize * kBsdfLutSize;             // [r]
 AIR_CONST uint kLutEs = kLutEavg + kBsdfLutSize;                   // [r][mu]
 AIR_CONST uint kLutEsAvg = kLutEs + kBsdfLutSize * kBsdfLutSize;   // [r]
-AIR_CONST uint kBsdfLutFloats = kLutEsAvg + kBsdfLutSize;
+// Subsurface scattering: sqrt(1 - single-scattering albedo) for the colour a half-space reflects in
+// all, [g][colour] for g = 0, 0.3, 0.6, 0.9 (Subsurface.hlsli).
+AIR_CONST uint kLutSubsurface = kLutEsAvg + kBsdfLutSize;
+AIR_CONST uint kSubsurfaceLutRows = 4;
+AIR_CONST uint kBsdfLutFloats = kLutSubsurface + kSubsurfaceLutRows * kBsdfLutSize;
 AIR_CONST float kDielectricF0 = 0.04f;
 AIR_CONST float kMinRoughness = 0.03f; // alpha >= 9e-4: keeps D finite in float
 
@@ -78,6 +89,8 @@ struct BsdfMaterial
     float flakes;
     float flakeRoughness;
     float3 flakeColor;
+    // 1: where light carried beneath a subsurface material leaves it, the exit lobe alone (see above).
+    uint subsurfaceExit;
 };
 
 struct BsdfEval
@@ -261,10 +274,14 @@ BsdfContext PrepareBsdf(BsdfMaterial m, float3 wo)
     c.diffuseScale = kInvPi / max(1.0f - esAvg, 1e-4f);
     c.metalMsFresnel = MultiScatterFresnelFromAverage(m.baseColor, eavg);
     c.dielectricMsFresnel = MultiScatterFresnelFromAverage(float3(kDielectricF0, kDielectricF0, kDielectricF0), eavg);
+    if (m.subsurfaceExit != 0u)
+    {
+        c.eso = 0.0f; // the light is already beneath the surface
+    }
     float diffuseEnergy = (1.0f - c.eso) * max(Luminance(m.baseColor), 0.0f);
     float pDielectric = c.eso + diffuseEnergy > 0.0f ? c.eso / (c.eso + diffuseEnergy) : 1.0f;
     float pMetal = c.eo; // the rest is the diffuse-like multiple-scattering lobe
-    c.specularProbability = saturate(lerp(pDielectric, pMetal, saturate(m.metallic)));
+    c.specularProbability = m.subsurfaceExit != 0u ? 0.0f : saturate(lerp(pDielectric, pMetal, saturate(m.metallic)));
     c.coatAlpha = RoughnessToAlpha(m.coatRoughness);
     c.coatProbability = 0.0f;
     c.flakeAlpha = RoughnessToAlpha(m.flakeRoughness);
@@ -303,6 +320,10 @@ BsdfEval EvaluateBaseBsdf(BsdfContext c, float3 wi)
     float3 dielectricF0 = kDielectricF0;
     float3 metal = FresnelSchlick(c.material.baseColor, cosOH) * ss + c.metalMsFresnel * ms;
     float3 dielectricSpecular = FresnelSchlick(dielectricF0, cosOH) * ss + c.dielectricMsFresnel * ms;
+    if (c.material.subsurfaceExit != 0u)
+    {
+        dielectricSpecular = float3(0.0f, 0.0f, 0.0f);
+    }
     float esi = LutBilinear(kLutEs, wi.z, c.roughness);
     float3 diffuse = c.material.baseColor * ((1.0f - c.eso) * (1.0f - esi) * c.diffuseScale * wi.z);
     e.fCos = lerp(dielectricSpecular + diffuse, metal, saturate(c.material.metallic));

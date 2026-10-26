@@ -52,7 +52,8 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   `smoke` for volumes (`--volume FILE.vdb|plume[,EXTINCTION,ALBEDO,G] --volume-at X,Y,Z,SIZE` puts
   an OpenVDB grid in any scene, repeated for several; `aircli vdb FILE` lists a file's grids; §8.12),
   `braziers` for several volumes and lights close to them (§8.13), `textured` for material textures
-  and normal maps (§8.15), `coated` for clear coats and their network (§8.17). File scenes made from
+  and normal maps (§8.15), `coated` for clear coats and their network (§8.17), `subsurface` for
+  subsurface scattering (§8.20). File scenes made from
   real assets (§8.18): `picapica`, `sponza` (textures at scale, cutout foliage), `helmets`; fetch them
   first with `python3 tools/air.py fetch-scenes` (into `.deps/scenes`, never committed).
   `--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]` adds any glTF, FBX or OBJ to any scene.
@@ -74,6 +75,12 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   `AIR_PT_NEURAL` kernels. After touching the decode path run `aircli ntc-check --shaders build/shaders`
   (the shader's decode against LibNTC's CUDA decode, every texel), and compare an accumulated
   `sample` image with a `load` one (they agree within about 0.1%).
+- Subsurface scattering (docs/architecture.md §8.20, scene `subsurface`): `--set
+  pathtracer.subsurfaceModel=1|0|2` (random walk inside the mesh, the default and reference; neural
+  profile; Burley's profile). Check energy with `--set pathtracer.furnace=1` (white, must stay 0.18)
+  and the GPU against `aircli reference --subsurface-model N`. The neural profile's network is fit by
+  `aircli subsurface-fit --write src/features/pathtracer/shaders/SubsurfaceProfileNetwork.h` (it prints
+  its error against the half-space walk); refit after changing the medium or the walk.
 - Neural shading, clear coats (docs/architecture.md §8.17, scene `coated`): `--set pathtracer.coatModel=0|1|2`
   (network, random walk reference, approximation). After changing the coat or its network run
   `aircli coat-check` and compare an accumulated `coatModel=0` image with a `coatModel=1` one; raise the

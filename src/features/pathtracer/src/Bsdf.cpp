@@ -4,6 +4,8 @@
 
 #include "air/renderer/shader/HlslCompat.h"
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 namespace air::pt
@@ -97,6 +99,44 @@ float CosineAverage(const float* row)
     return float(2.0 * sum);
 }
 
+// Subsurface scattering (Subsurface.hlsli): the light a half-space of the medium reflects in all, by
+// Monte Carlo (400000 walks each: cosine-weighted entry through an index-matched boundary, Henyey-
+// Greenstein scattering, the walk SubsurfaceWalk takes in a flat slab), for single-scattering albedos
+// 1 - (1 - i / 31)^3 and g = 0, 0.3, 0.6, 0.9. Without absorption all of the light leaves.
+constexpr float kSubsurfaceReflectance[shader::kSubsurfaceLutRows][kBsdfLutSize] = {
+    {0.00000f, 0.02017f, 0.04135f, 0.06342f, 0.08655f, 0.11113f, 0.13667f, 0.16301f, 0.18996f, 0.21952f, 0.24943f,
+     0.28017f, 0.31305f, 0.34620f, 0.38068f, 0.41730f, 0.45536f, 0.49344f, 0.53134f, 0.57316f, 0.61468f, 0.65650f,
+     0.69843f, 0.73982f, 0.78169f, 0.82150f, 0.86204f, 0.89834f, 0.93234f, 0.96277f, 0.98671f, 1.0f},
+    {0.00000f, 0.01378f, 0.02889f, 0.04499f, 0.06254f, 0.08128f, 0.10109f, 0.12298f, 0.14592f, 0.17065f, 0.19702f,
+     0.22510f, 0.25553f, 0.28815f, 0.32092f, 0.35683f, 0.39309f, 0.43261f, 0.47249f, 0.51568f, 0.56060f, 0.60487f,
+     0.65151f, 0.69853f, 0.74468f, 0.79147f, 0.83613f, 0.88030f, 0.92051f, 0.95578f, 0.98420f, 1.0f},
+    {0.00000f, 0.00782f, 0.01639f, 0.02622f, 0.03685f, 0.04897f, 0.06218f, 0.07682f, 0.09314f, 0.11082f, 0.13087f,
+     0.15379f, 0.17631f, 0.20454f, 0.23423f, 0.26614f, 0.30102f, 0.33811f, 0.37852f, 0.42280f, 0.46939f, 0.51795f,
+     0.56926f, 0.62301f, 0.67933f, 0.73461f, 0.79041f, 0.84514f, 0.89604f, 0.94216f, 0.97906f, 1.0f},
+    {0.00000f, 0.00196f, 0.00410f, 0.00652f, 0.00948f, 0.01288f, 0.01666f, 0.02092f, 0.02622f, 0.03215f, 0.03922f,
+     0.04741f, 0.05764f, 0.06894f, 0.08259f, 0.09956f, 0.11886f, 0.14234f, 0.17014f, 0.20218f, 0.24143f, 0.28691f,
+     0.33936f, 0.40088f, 0.46878f, 0.54607f, 0.62987f, 0.71605f, 0.80439f, 0.88842f, 0.95875f, 1.0f},
+};
+
+// sqrt(1 - albedo) of the half-space that reflects colour i / 31 in all: the table above inverted,
+// linear in sqrt(1 - albedo) between its entries.
+void BuildSubsurfaceRow(const float* reflectance, float* out)
+{
+    const auto root = [](u32 i) { return std::pow(1.0f - float(i) / float(kBsdfLutSize - 1), 1.5f); };
+    for (u32 c = 0; c < kBsdfLutSize; ++c)
+    {
+        const float color = NodeValue(c);
+        u32 i = 0;
+        while (i + 2 < kBsdfLutSize && reflectance[i + 1] < color)
+        {
+            ++i;
+        }
+        const float span = reflectance[i + 1] - reflectance[i];
+        const float t = span > 0.0f ? std::clamp((color - reflectance[i]) / span, 0.0f, 1.0f) : 0.0f;
+        out[c] = root(i) + (root(i + 1) - root(i)) * t;
+    }
+}
+
 std::vector<float> BuildLut()
 {
     std::vector<float> lut(shader::kBsdfLutFloats, 0.0f);
@@ -125,6 +165,10 @@ std::vector<float> BuildLut()
             es[m] = IntegrateSingleScatter(nodeMu(m), NodeValue(r), shader::kDielectricF0) + fms * (1.0f - e[m]);
         }
         lut[shader::kLutEsAvg + r] = CosineAverage(es);
+    }
+    for (u32 g = 0; g < shader::kSubsurfaceLutRows; ++g)
+    {
+        BuildSubsurfaceRow(kSubsurfaceReflectance[g], &lut[shader::kLutSubsurface + g * kBsdfLutSize]);
     }
     shader::tLut = nullptr;
     return lut;
@@ -157,6 +201,7 @@ shader::BsdfMaterial ToShader(const Material& m)
     out.flakes = m.flakes;
     out.flakeRoughness = m.flakeRoughness;
     out.flakeColor = float3(m.flakeColor[0], m.flakeColor[1], m.flakeColor[2]);
+    out.subsurfaceExit = m.subsurfaceExit ? 1u : 0u;
     return out;
 }
 

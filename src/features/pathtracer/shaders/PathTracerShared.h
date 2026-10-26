@@ -127,7 +127,7 @@ struct FrameData
     // (Texture2D<float>), CloudMarcher's reconstruction.
     uint cloudLayer;
     uint cloudDepth;
-    uint pad0;
+    uint subsurfaceModel; // kSubsurface*: how light beneath subsurface materials finds where it leaves
     uint pad1;
 };
 

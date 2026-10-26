@@ -187,6 +187,10 @@ struct PathTracerSettings
     // this kernel's cheap shading the reorder costs more than it saves (docs/architecture.md §8.2).
     bool shaderExecutionReordering = false;
     u32 coatModel = kCoatModelNeural;
+    // Subsurface scattering (docs/architecture.md §8.20): how the light beneath a subsurface material
+    // finds where it leaves (Subsurface.hlsli kSubsurface*: 0 the neural profile, 1 the random walk,
+    // 2 Burley's profile). The walk is exact for any shape and cost about as much as the profiles.
+    u32 subsurfaceModel = 1;
 };
 
 class ReSTIR;

@@ -76,6 +76,14 @@ struct Material
     float flakes = 0.0f;
     float flakeRoughness = 0.3f;
     float3 flakeColor = {0.9f, 0.9f, 0.9f};
+    // Subsurface scattering (docs/architecture.md §8.20): light that enters the surface spreads about
+    // this far beneath it before it leaves again, per channel, metres (skin: millimetres, its red
+    // furthest; marble and jade: centimetres); baseColor is the colour the material reflects in all, as
+    // without. 0: none, the light leaves where it entered. The anisotropy of the scattering inside is
+    // Henyey-Greenstein's g (0..0.9). Dielectric materials (metallic 0) on closed meshes whose triangles
+    // wind outwards.
+    float3 subsurfaceRadius = {0.0f, 0.0f, 0.0f};
+    float subsurfaceAnisotropy = 0.0f;
     // A cutout (leaves, chains, decals): where the colour texture's alpha is below this the surface is
     // a hole that rays pass through; 0: opaque. Its instances are non-opaque in the acceleration
     // structure, so it is fixed once the scene is uploaded (SetMaterial keeps it).
@@ -201,8 +209,9 @@ struct GpuScene
     // StructuredBuffer<gpu::TextureSetData> (bindless indices of RGBA8 SRGB / UNORM Texture2Ds, or of a
     // neural set's latents and data), one per SceneDesc::textureSets entry, at least one element.
     rhi::BufferHandle textureSetTable;
-    bool neuralTextures = false;  // some set is decoded on sample (TextureSetData::latents)
-    bool coatedMaterials = false; // some material wears a clear coat (Material::coat)
+    bool neuralTextures = false;      // some set is decoded on sample (TextureSetData::latents)
+    bool coatedMaterials = false;     // some material wears a clear coat (Material::coat)
+    bool subsurfaceMaterials = false; // some material scatters beneath its surface (Material::subsurfaceRadius)
     // The description the scene was made from, kept current by its edits: for features that need the
     // materials on the CPU (the path tracer trains the neural coat for the coated ones).
     const SceneDesc* desc = nullptr;

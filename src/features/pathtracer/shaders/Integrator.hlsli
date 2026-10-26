@@ -121,6 +121,11 @@
 #ifndef AIR_PT_NTC
 #define AIR_PT_NTC 0
 #endif
+// Subsurface scattering (Subsurface.hlsli, the AIR_PT_NEURAL kernels): without it a material with a
+// subsurface radius is the plain dielectric its light leaves as if where it entered.
+#ifndef AIR_PT_SUBSURFACE
+#define AIR_PT_SUBSURFACE 0
+#endif
 
 struct IntegratorParams
 {
@@ -131,6 +136,7 @@ struct IntegratorParams
     uint textureSets; // the materials' textures: bindless StructuredBuffer<TextureSetData> on the GPU
     uint textureSeed; // the frame's: neural texture sets filter stochastically
     uint coatModel;   // kCoat*: how coated materials evaluate their coat's inner part
+    uint subsurfaceModel; // kSubsurface*: how the light beneath subsurface materials finds where it leaves
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
@@ -150,6 +156,15 @@ struct Surface
     float3 emission;        // radiance towards the incoming ray (0 when hit from the back)
     uint lightIndex;        // this triangle in the light list; kInvalidIndex when it does not emit
     BsdfMaterial material;
+#if AIR_PT_SUBSURFACE
+    // Subsurface scattering (MaterialData::subsurfaceRadius > 0): `material` is then its specular
+    // lobes alone, the light beneath has this colour (baseColor), radius and anisotropy.
+    bool subsurface;
+    float3 subsurfaceColor;
+    float3 subsurfaceRadius;
+    float subsurfaceAnisotropy;
+    bool frontFace; // the ray met the side its triangle winds towards (the outside of a closed mesh)
+#endif
 };
 
 // The indirect light of a path, as ReSTIR GI (ReSTIRGI.hlsli) resamples it: the part of the path
@@ -521,8 +536,74 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params, u
         s.emission = float3(0.0f, 0.0f, 0.0f);
     }
     s.lightIndex = any(s.emission) ? LoadInstanceLight(hit.instance) + hit.primitive : kInvalidIndex;
+    s.material.subsurfaceExit = 0u;
+#if AIR_PT_SUBSURFACE
+    s.subsurface = m.subsurfaceRadius.x > 0.0f || m.subsurfaceRadius.y > 0.0f || m.subsurfaceRadius.z > 0.0f;
+    s.subsurfaceColor = s.material.baseColor;
+    s.subsurfaceRadius = m.subsurfaceRadius;
+    s.subsurfaceAnisotropy = m.subsurfaceAnisotropy;
+    s.frontFace = frontFace;
+    if (s.subsurface)
+    {
+        s.material.baseColor = float3(0.0f, 0.0f, 0.0f); // the diffuse light goes beneath
+        s.material.metallic = 0.0f;
+    }
+#endif
     return s;
 }
+
+#if AIR_PT_SUBSURFACE
+#include "Subsurface.hlsli"
+
+// Where the light that entered a subsurface material at `s` (hit on `instance`) leaves it, as the
+// surface there with the exit lobe for its BSDF, its normals outwards; `weight` is what the light
+// carries there per unit that entered. False: it does not leave (lost).
+bool SubsurfaceTransport(IntegratorParams params, Surface s, uint instance, AIR_INOUT(uint) seed,
+                         AIR_OUT(Surface) exit, AIR_OUT(float3) weight)
+{
+    // The outward normal: the side the triangles wind towards.
+    float3 n = s.frontFace ? s.geometricNormal : -s.geometricNormal;
+    SubsurfaceMedium m = MakeSubsurfaceMedium(s.subsurfaceColor, s.subsurfaceRadius, s.subsurfaceAnisotropy);
+    SubsurfaceExit e;
+    if (params.subsurfaceModel == kSubsurfaceRandomWalk)
+    {
+        e = SubsurfaceWalk(m, s.position, n, seed);
+    }
+    else
+    {
+        e = SubsurfaceProbe(m, s.position, n, instance, params.subsurfaceModel, seed);
+    }
+    exit = s;
+    weight = float3(0.0f, 0.0f, 0.0f);
+    if (!e.valid)
+    {
+        return false;
+    }
+    exit = LoadSurface(e.hit, e.direction, params, kSurfaceCoarse);
+    // The walk reaches the surface from inside; the probe from either side: outwards is where the
+    // triangle winds.
+    bool flip = params.subsurfaceModel == kSubsurfaceRandomWalk ? true : !exit.frontFace;
+    if (flip)
+    {
+        exit.geometricNormal = -exit.geometricNormal;
+        exit.shadingNormal = -exit.shadingNormal;
+    }
+    weight = e.weight;
+    if (params.subsurfaceModel != kSubsurfaceRandomWalk)
+    {
+        weight = SubsurfaceProbeWeight(m, s.position, n, exit.position, exit.geometricNormal, e.weight.x,
+                                       params.subsurfaceModel);
+    }
+    exit.material.baseColor = float3(1.0f, 1.0f, 1.0f);
+    exit.material.metallic = 0.0f;
+    exit.material.coat = kCoatNone;
+    exit.material.subsurfaceExit = 1u;
+    exit.emission = float3(0.0f, 0.0f, 0.0f);
+    exit.lightIndex = kInvalidIndex;
+    exit.subsurface = false;
+    return any(weight);
+}
+#endif
 
 // --- Clouds --------------------------------------------------------------------------------------
 
@@ -849,6 +930,10 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     float3 previousNormal = float3(0.0f, 0.0f, 0.0f);
     bool previousTree = false;
     uint events = 0u; // scattering events in the volumes so far; `bounce` counts them as vertices
+    // The first vertex sent its light beneath a subsurface material and the path goes on from where it
+    // left: ReSTIR's estimates at the first surface do not cover it (they see the specular lobes).
+    bool beneath = false;
+    float lobeProbability = 1.0f; // of the first vertex's lobes the path took (ReSTIR GI's pdf)
 
     for (uint bounce = 0u; bounce <= params.maxBounces + events; ++bounce)
     {
@@ -1033,6 +1118,16 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             result.normal = s.shadingNormal;
             result.material = s.material;
             GuideAlbedos(s.material, dot(s.shadingNormal, -direction), result.diffuseAlbedo, result.specularAlbedo);
+#if AIR_PT_SUBSURFACE
+            if (s.subsurface)
+            {
+                // The denoisers see the light beneath as the diffuse lobe it replaces.
+                BsdfMaterial lambert = s.material;
+                lambert.baseColor = s.subsurfaceColor;
+                result.material = lambert;
+                GuideAlbedos(lambert, dot(s.shadingNormal, -direction), result.diffuseAlbedo, result.specularAlbedo);
+            }
+#endif
             result.instance = hit.instance;
             result.primitive = hit.primitive;
             result.barycentrics = hit.barycentrics;
@@ -1047,7 +1142,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
 
         // Emission found by the BSDF sample, weighted against NEE having found it.
-        bool emits = any(s.emission) && !(restir && bounce == 1u);
+        bool emits = any(s.emission) && !(restir && bounce == 1u && !beneath);
 #if AIR_PT_PROBE
         if (emits && bounce == 0u && (params.flags & kFlagProbe) != 0u)
         {
@@ -1155,6 +1250,48 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
         result.bounces = bounce + 1u;
 
+#if AIR_PT_SUBSURFACE
+        // A subsurface material: its specular lobes here (s.material), or the light that enters, carried
+        // to where it leaves, which becomes the vertex. The choice is by the lobes' energy towards wo.
+        if (s.subsurface)
+        {
+            float muO = saturate(dot(s.shadingNormal, -direction));
+            float eso = LutBilinear(kLutEs, muO, max(s.material.roughness, kMinRoughness));
+            float enter = (1.0f - eso) * max(Luminance(s.subsurfaceColor), 0.0f);
+            float q = clamp(enter / max(enter + eso, 1e-6f), 0.1f, 0.9f);
+            if (Rand(seed) < q)
+            {
+                Surface exit;
+                float3 weight;
+                if (!SubsurfaceTransport(params, s, hit.instance, seed, exit, weight))
+                {
+                    break;
+                }
+                throughput *= weight * ((1.0f - eso) / q);
+                s = exit;
+                direction = -exit.shadingNormal; // the exit lobe does not depend on wo
+                if (bounce == 0u)
+                {
+                    // Not ReSTIR's: the path gathers this light itself, all of it the diffuse lobe's.
+                    beneath = true;
+                    gi = false;
+                    recordGi = false;
+                    reflected = true;
+                    reflectedFrom = result.radiance;
+                    diffuseShare = float3(1.0f, 1.0f, 1.0f);
+                }
+            }
+            else
+            {
+                throughput /= 1.0f - q;
+                if (bounce == 0u)
+                {
+                    lobeProbability = 1.0f - q;
+                }
+            }
+        }
+#endif
+
         float3 ns = s.shadingNormal;
         float3 ng = s.geometricNormal;
         float3 wo = -direction;
@@ -1171,7 +1308,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         bool lightTree = bounce < params.lightTreeBounces;
 
         // Next event estimation: one point on one emissive triangle.
-        if (useNee && !(restir && bounce == 0u))
+        if (useNee && !(restir && bounce == 0u && !beneath))
         {
             float uLight = Rand(seed);
             float uAlias = Rand(seed); // drawn in both modes: the random sequence stays the same
@@ -1295,7 +1432,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             break; // shading normal sent the ray into the surface
         }
         throughput *= bs.weight;
-        if (bounce == 0u)
+        if (bounce == 0u && !beneath)
         {
             reflected = true;
             reflectedFrom = result.radiance;
@@ -1304,7 +1441,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
         if (gi && bounce == 0u)
         {
-            firstBsdfPdf = bs.pdf;
+            firstBsdfPdf = bs.pdf * lobeProbability;
         }
         else if (gi && bounce == 1u)
         {

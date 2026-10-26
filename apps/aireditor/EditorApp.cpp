@@ -1251,6 +1251,24 @@ void EditorApp::BuildScenePanel()
                 m.flakeColor = hlsl::saturate(m.flakeColor);
             }
         }
+        if (!m.coat && m.metallic == 0.0f)
+        {
+            // In centimetres: skin a few millimetres, marble and jade centimetres.
+            renderer::float3 radius = m.subsurfaceRadius * 100.0f;
+            if (ImGui::DragFloat3("Subsurface radius (cm)", &radius.x, 0.02f, 0.0f, 50.0f, "%.2f"))
+            {
+                m.subsurfaceRadius = hlsl::max(radius, renderer::float3(0.0f)) * 0.01f;
+                changed = true;
+            }
+            ImGui::SetItemTooltip("Subsurface scattering: how far light spreads beneath the surface per channel\n"
+                                  "(0: none). The base colour stays what the material reflects in all.\n"
+                                  "pathtracer.subsurfaceModel: 1 a random walk inside the mesh (exact, the\n"
+                                  "default), 0 the neural profile, 2 Burley's profile.");
+            if (m.subsurfaceRadius != renderer::float3(0.0f))
+            {
+                changed |= ImGui::SliderFloat("Subsurface anisotropy", &m.subsurfaceAnisotropy, 0.0f, 0.9f);
+            }
+        }
         if (changed)
         {
             mScene->SetMaterial(i, m);

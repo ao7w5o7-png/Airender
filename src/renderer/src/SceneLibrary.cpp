@@ -54,6 +54,8 @@ gpu::MaterialData Material::ToGpu() const
     out.flakes = coat ? flakes : 0.0f;
     out.flakeRoughness = flakeRoughness;
     out.flakeColor = flakeColor;
+    out.subsurfaceRadius = coat || metallic > 0.0f ? float3(0.0f) : subsurfaceRadius;
+    out.subsurfaceAnisotropy = subsurfaceAnisotropy;
     out.alphaCutoff = textures == kNoTextures ? 0.0f : alphaCutoff;
     return out;
 }
@@ -340,6 +342,7 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"textured", detail::MakeTextured},
     {"coated", detail::MakeCoated},
     {"car_paint", detail::MakeCarPaint},
+    {"subsurface", detail::MakeSubsurface},
 };
 
 } // namespace
@@ -436,6 +439,15 @@ std::string Validate(const SceneDesc& desc)
               std::max({m.flakeColor.x, m.flakeColor.y, m.flakeColor.z}) <= 1.0f))
         {
             return std::format("material '{}': flakes, their roughness and colour must be in [0, 1]", m.name);
+        }
+        if (!(std::min({m.subsurfaceRadius.x, m.subsurfaceRadius.y, m.subsurfaceRadius.z}) >= 0.0f) ||
+            !(m.subsurfaceAnisotropy >= 0.0f && m.subsurfaceAnisotropy <= 0.9f) ||
+            (std::max({m.subsurfaceRadius.x, m.subsurfaceRadius.y, m.subsurfaceRadius.z}) > 0.0f &&
+             (m.metallic > 0.0f || m.coat)))
+        {
+            return std::format("material '{}': subsurface radius must be >= 0 and its anisotropy in [0, 0.9], on "
+                               "a dielectric without a coat",
+                               m.name);
         }
         if (m.textures != kNoTextures && m.textures >= desc.textureSets.size())
         {

@@ -68,6 +68,7 @@ coat::BsdfMaterial ToShader(const CoatMaterialSample& s, uint model, uint seed)
     m.flakes = s.flakes;
     m.flakeRoughness = s.flakeRoughness;
     m.flakeColor = float3(s.flakeColor[0], s.flakeColor[1], s.flakeColor[2]);
+    m.subsurfaceExit = 0u;
     return m;
 }
 

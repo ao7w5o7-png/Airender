@@ -156,6 +156,10 @@ public:
         mParameters.Add(
             "ser", &mSettings.shaderExecutionReordering,
             "Shader execution reordering (DXR 1.2) where the GPU reorders; slower with today's cheap shading");
+        mParameters.Add("subsurfaceModel", &mSettings.subsurfaceModel,
+                        "Subsurface scattering: where the light beneath leaves (0 the neural profile, 1 the "
+                        "random walk, the reference, 2 Burley's profile)",
+                        0, 2);
         mParameters.Add("coatModel", &mSettings.coatModel,
                         "Clear coats: 0 neural (an MLP trained for the scene's coated materials), 1 random walk "
                         "(the reference, noisy), 2 analytic approximation",

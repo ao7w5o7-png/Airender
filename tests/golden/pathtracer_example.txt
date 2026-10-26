@@ -28,7 +28,7 @@ Resources:
   tex Example.Pattern (transient) passes [2, 3] heap offset 0 size 65536
 === frame 0 commands
 [Graphics] Barrier [buf 'PathTracer.BsdfLut' None -> CopyDst]
-[Graphics] CopyBuffer buf 'PathTracer.BsdfLut'+0 <- buf 'PathTracer.BsdfLut.Staging'+0 (8448 bytes)
+[Graphics] CopyBuffer buf 'PathTracer.BsdfLut'+0 <- buf 'PathTracer.BsdfLut.Staging'+0 (8960 bytes)
 [Graphics] Barrier [buf 'PathTracer.BsdfLut' CopyDst -> SRVCompute]
 [Graphics] Barrier [tex 'PathTracer.Accumulation' None -> UAVCompute]
 [Graphics] BeginEvent 'PathTracer.Trace'

@@ -47,6 +47,11 @@ struct MaterialData
     float flakes;
     float flakeRoughness;
     float3 flakeColor;
+    // Subsurface scattering (Subsurface.hlsli): how far light spreads under the surface, per channel,
+    // metres (0: none; baseColor is then the colour the material reflects in all), and the anisotropy
+    // of its scattering inside. Dielectric only.
+    float3 subsurfaceRadius;
+    float subsurfaceAnisotropy;
     float pad0;
     float pad1;
     float pad2;
@@ -140,7 +145,7 @@ struct LightTreeNode
 
 #ifdef __cplusplus
 static_assert(sizeof(Vertex) == 32);
-static_assert(sizeof(MaterialData) == 96);
+static_assert(sizeof(MaterialData) == 112);
 static_assert(sizeof(TextureSetData) == 16);
 static_assert(sizeof(InstanceData) == 112);
 static_assert(sizeof(LightTriangle) == 80);

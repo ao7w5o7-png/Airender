@@ -140,6 +140,7 @@ Params MakeParams(const SceneTables& tables, const ReferenceSettings& settings, 
     params.coatModel = tables.neuralCoat.empty() && settings.coatModel == u32(CoatModel::Neural)
                            ? u32(CoatModel::Approximate)
                            : settings.coatModel;
+    params.subsurfaceModel = settings.subsurfaceModel;
     params.cloudEvents = settings.cloudEvents;
     params.volumeEvents = settings.volumeEvents;
     params.lightCount = tables.lightPower > 0.0 ? u32(tables.lights.size()) : 0u;
