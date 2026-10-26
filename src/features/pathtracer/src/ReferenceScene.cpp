@@ -164,6 +164,10 @@ SceneTables BuildSceneTables(const renderer::SceneDesc& scene)
     {
         tables.materials.push_back(m.ToGpu());
     }
+    for (const renderer::MaterialTextures& t : scene.textureSets)
+    {
+        tables.textureSets.push_back(&t);
+    }
     tables.lights = renderer::BuildLightTriangles(scene, &tables.lightPower);
     tables.lightTree = renderer::BuildLightTree(tables.lights);
     tables.lightGroups = renderer::BuildLightGroups(tables.lights, scene);

@@ -147,6 +147,51 @@ TEST(Integrator_WhiteFurnaceSpheresMatchEnvironment)
     EXPECT(Near(MeanLuminance(image), 0.18, 0.01, "furnace mean"));
 }
 
+// Textures scale the material: walls of a flat grey texture (sRGB 128, linear 0.2159), with neither
+// slope nor roughness or metallic taken away, render as walls of that colour without textures.
+TEST(Integrator_TexturesScaleTheMaterial)
+{
+    TaskSystem tasks(4);
+    const renderer::Material light{
+        .name = "Light", .baseColor = {0.5f, 0.5f, 0.5f}, .roughness = 0.6f, .emissionNits = 10.0f};
+    renderer::Material grey{.name = "Grey", .baseColor = {0.2158605f, 0.2158605f, 0.2158605f}, .roughness = 0.6f};
+    const renderer::SceneDesc plain = Room(grey, &light);
+    renderer::SceneDesc textured = plain;
+    renderer::MaterialTextures flat;
+    flat.name = "Flat";
+    flat.width = 4;
+    flat.height = 4;
+    flat.color.assign(16, 128u | 128u << 8 | 128u << 16 | 255u << 24);
+    flat.surface.assign(16, 128u | 128u << 8 | 255u << 16 | 0u << 24); // no slope, roughness 1, metallic 0
+    textured.textureSets.push_back(flat);
+    textured.materials[0].baseColor = {1.0f, 1.0f, 1.0f};
+    textured.materials[0].textures = 0;
+    textured.materials[0].uvScale = 3.0f;
+    pt::ReferenceSettings settings = Settings(tasks, 64, 6);
+    const double withTextures = MeanLuminance(pt::RenderReference(textured, textured.camera, settings));
+    const double withoutTextures = MeanLuminance(pt::RenderReference(plain, plain.camera, settings));
+    // 128 / 255 * 2 - 1 is not exactly 0: the normal tilts by 0.4 degrees.
+    EXPECT(Near(withTextures, withoutTextures, 0.01, "textured vs constant walls"));
+}
+
+// Normal maps in a white furnace (the textured scene, its colours white): rays a bent shading normal
+// sends below the surface are lost, so a little light is missing (3.2% at 256 spp, the grooves of
+// the mortar darkest); none may be gained.
+TEST(Integrator_NormalMapsLoseLittleInAWhiteFurnace)
+{
+    TaskSystem tasks(4);
+    const renderer::SceneDesc scene = airtest::BuiltinScene("textured");
+    pt::ReferenceSettings settings = Settings(tasks, 32, 16);
+    settings.width = 48;
+    settings.height = 27;
+    settings.furnace = true;
+    settings.applyExposure = true; // the furnace's exposure maps the environment to 0.18
+    const Image image = pt::RenderReference(scene, scene.camera, settings);
+    const double mean = MeanLuminance(image);
+    EXPECT(mean < 0.18 * 1.01);
+    EXPECT(Near(mean, 0.18, 0.05, "textured furnace mean"));
+}
+
 // Veach's MIS scene: lights from 3 cm to 90 cm reflected by smooth to rough plates. NEE with MIS
 // and pure BSDF sampling are both unbiased, so they must agree on the plates, where each alone
 // fails somewhere; this checks the MIS weights on glossy metal and spherical lights. Only the

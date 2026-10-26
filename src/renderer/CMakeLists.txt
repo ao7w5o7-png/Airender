@@ -16,6 +16,7 @@ add_library(air_renderer
     src/Sky.cpp
     src/TestScenes.cpp
     src/TextureSampling.cpp
+    src/MaterialTextures.cpp
     src/Vdb.cpp
     src/Volume.cpp
     src/VolumeBricks.cpp

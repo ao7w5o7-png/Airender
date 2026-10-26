@@ -29,6 +29,22 @@ struct MaterialData
     float roughness;  // perceptual
     float3 emission;  // emitted radiance, nits
     float metallic;
+    // Its textures (TextureSetData; kInvalidIndex: none), which scale baseColor, roughness and metallic
+    // and bend the shading normal, at the mesh's texture coordinates times uvScale.
+    uint textureSet;
+    float uvScale;
+    uint pad0;
+    uint pad1;
+};
+
+// A material's textures (renderer::MaterialTextures): bindless Texture2D<float4> indices on the GPU,
+// indices into the CPU renderers' tables there.
+struct TextureSetData
+{
+    uint color;   // RGBA8 sRGB: the base colour
+    uint surface; // RGBA8: the tangent-space normal's x and y (0.5 = 0, z follows), roughness, metallic
+    uint pad0;
+    uint pad1;
 };
 
 // One TLAS instance. InstanceID() indexes this array.
@@ -108,7 +124,8 @@ struct LightTreeNode
 
 #ifdef __cplusplus
 static_assert(sizeof(Vertex) == 32);
-static_assert(sizeof(MaterialData) == 32);
+static_assert(sizeof(MaterialData) == 48);
+static_assert(sizeof(TextureSetData) == 16);
 static_assert(sizeof(InstanceData) == 112);
 static_assert(sizeof(LightTriangle) == 80);
 static_assert(sizeof(LightGroup) == 64);

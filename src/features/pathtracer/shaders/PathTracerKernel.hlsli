@@ -214,6 +214,7 @@ void TracePixel(uint2 pixel)
     params.clouds = f.clouds;
     params.volumeCount = f.volumeCount;
     params.volumeTable = f.volumeTable;
+    params.textureSets = f.textureSets;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;

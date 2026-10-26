@@ -48,6 +48,8 @@ struct Camera
 // 1 / (1.2 * 2^EV100) (saturation-based sensitivity, Lagarde & de Rousiers 2014).
 float ExposureScale(float ev100);
 
+inline constexpr u32 kNoTextures = ~0u;
+
 struct Material
 {
     std::string name;
@@ -56,9 +58,27 @@ struct Material
     float metallic = 0.0f;
     float3 emissionColor = {1.0f, 1.0f, 1.0f}; // chromaticity; rescaled so its luminance is 1
     float emissionNits = 0.0f;                 // emitted luminance
+    // SceneDesc::textureSets entry (kNoTextures: none): its textures multiply baseColor, roughness and
+    // metallic (set those to 1 to take the textures as they are) and bend the normal; they repeat
+    // uvScale times over the mesh's texture coordinates.
+    u32 textures = kNoTextures;
+    float uvScale = 1.0f;
 
     gpu::MaterialData ToGpu() const;
     bool operator==(const Material&) const = default;
+};
+
+// A material's textures, all of one size, repeating (texel centres at (i + 0.5) / size).
+struct MaterialTextures
+{
+    std::string name;
+    u32 width = 0;
+    u32 height = 0;
+    // RGBA8 texels, x fastest, the red channel in the low byte: the base colour in sRGB, and the
+    // surface: the tangent-space normal's x and y mapped to [0, 1] (z follows), roughness, metallic.
+    std::vector<u32> color;
+    std::vector<u32> surface;
+    bool operator==(const MaterialTextures&) const = default;
 };
 
 struct Mesh
@@ -81,6 +101,7 @@ struct SceneDesc
     std::string name;
     std::vector<Mesh> meshes;
     std::vector<Material> materials;
+    std::vector<MaterialTextures> textureSets; // Material::textures indexes these
     std::vector<Instance> instances;
     Camera camera;
     float3 environment = {0.0f, 0.0f, 0.0f}; // uniform environment radiance, nits (sky.physical: unused)
@@ -115,8 +136,15 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //                  scattered in a medium from embers, the sun and the sky
 //   braziers       three plumes that overlap, lit by the dusk sun, their embers and a lantern among
 //                  them: several volumes and light groups near and inside them
+//   textured       a courtyard corner of textured materials (tiles, bricks, metal plates) in the
+//                  afternoon sun: normal maps, glazed and metallic texels (MaterialTextures)
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
+// Procedural material textures, size x size texels, repeating (MaterialTextures.cpp): red bricks in
+// mortar, glazed tiles in grout, brushed metal plates with seams and rivets (metallic).
+MaterialTextures MakeBrickTextures(u32 size);
+MaterialTextures MakeTileTextures(u32 size);
+MaterialTextures MakeMetalPlateTextures(u32 size);
 std::vector<std::string> BuiltinSceneNames();
 std::optional<SceneDesc> MakeBuiltinScene(std::string_view name);
 // Checks indices, references and values. Returns the first problem or an empty string.
@@ -146,6 +174,9 @@ struct GpuScene
     rhi::AccelStructHandle tlas;
     rhi::BufferHandle instances; // StructuredBuffer<gpu::InstanceData>, indexed by InstanceID()
     rhi::BufferHandle materials; // StructuredBuffer<gpu::MaterialData>
+    // StructuredBuffer<gpu::TextureSetData> (bindless indices of RGBA8 SRGB / UNORM Texture2Ds), one per
+    // SceneDesc::textureSets entry, at least one element.
+    rhi::BufferHandle textureSetTable;
     rhi::BufferHandle lights;    // StructuredBuffer<gpu::LightTriangle>, at least one element
     rhi::BufferHandle lightTree; // StructuredBuffer<gpu::LightTreeNode> over `lights`, at least one node
     // StructuredBuffer<uint> per instance: its first entry in `lights`, gpu::kInvalidIndex if it does
@@ -222,6 +253,7 @@ public:
 
 private:
     void Upload();
+    void UploadTextures();
     void WriteDynamicData();
 
     struct GpuMesh
@@ -235,6 +267,7 @@ private:
     SceneDesc mDesc;
     GpuScene mGpu;
     std::vector<GpuMesh> mMeshes;
+    std::vector<rhi::TextureHandle> mTextures; // of the texture sets, two each
     rhi::BufferHandle mInstances;
     // Host-visible rings, one slot per frame in flight + 1, so writing a slot never races the GPU.
     std::vector<rhi::BufferHandle> mMaterialRing;

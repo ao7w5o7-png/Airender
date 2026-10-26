@@ -702,4 +702,59 @@ SceneDesc MakeBraziers()
     return scene;
 }
 
+// A courtyard corner of textured materials (MaterialTextures.cpp) in the afternoon sun: tiled floor,
+// brick walls and a bench, a sphere of riveted metal plates and one of tiles. Normal maps, glossy
+// glaze and metal, textures repeating at a few per metre.
+SceneDesc MakeTextured()
+{
+    SceneDesc scene;
+    scene.name = "textured";
+    scene.textureSets.push_back(MakeTileTextures(512));
+    scene.textureSets.push_back(MakeBrickTextures(512));
+    scene.textureSets.push_back(MakeMetalPlateTextures(512));
+    auto textured = [&](const char* name, u32 set, float uvScale)
+    {
+        return AddMaterial(scene, {.name = name,
+                                   .baseColor = {1.0f, 1.0f, 1.0f},
+                                   .roughness = 1.0f,
+                                   .metallic = 1.0f,
+                                   .textures = set,
+                                   .uvScale = uvScale});
+    };
+    const u32 tiles = textured("Tiles", 0, 1.0f);
+    const u32 bricks = textured("Bricks", 1, 1.0f);
+    const u32 plates = textured("MetalPlates", 2, 2.0f);
+    const u32 tileBall = textured("TileBall", 0, 3.0f);
+    // A quad whose texture coordinates run in metres (one texture repeat per `metresPerRepeat`).
+    auto surface = [&](const char* name, float3 p0, float3 p1, float3 p2, float3 p3, float3 normal, u32 material,
+                       float metresPerRepeat)
+    {
+        Mesh mesh = MakeQuad(name, p0, p1, p2, p3, normal);
+        const float width = hlsl::length(p1 - p0) / metresPerRepeat;
+        const float height = hlsl::length(p3 - p0) / metresPerRepeat;
+        for (gpu::Vertex& v : mesh.vertices)
+        {
+            v.u *= width;
+            v.v *= height;
+        }
+        AddInstance(scene, name, AddMesh(scene, std::move(mesh)), material);
+    };
+    surface("Floor", {-4.0f, 0.0f, 4.0f}, {4.0f, 0.0f, 4.0f}, {4.0f, 0.0f, -4.0f}, {-4.0f, 0.0f, -4.0f},
+            {0.0f, 1.0f, 0.0f}, tiles, 1.2f);
+    surface("BackWall", {-4.0f, 0.0f, -2.0f}, {4.0f, 0.0f, -2.0f}, {4.0f, 3.0f, -2.0f}, {-4.0f, 3.0f, -2.0f},
+            {0.0f, 0.0f, 1.0f}, bricks, 1.6f);
+    surface("SideWall", {-2.5f, 0.0f, 4.0f}, {-2.5f, 0.0f, -2.0f}, {-2.5f, 3.0f, -2.0f}, {-2.5f, 3.0f, 4.0f},
+            {1.0f, 0.0f, 0.0f}, bricks, 1.6f);
+    AddBox(scene, "Bench", {0.9f, 0.25f, -1.3f}, {1.2f, 0.25f, 0.35f}, bricks);
+    SetTransform(AddInstance(scene, "PlateBall", AddMesh(scene, MakeSphere("PlateBall", 0.55f, 64)), plates),
+                 {-0.9f, 0.55f, -0.3f});
+    SetTransform(AddInstance(scene, "TileBall", AddMesh(scene, MakeSphere("TileBall", 0.4f, 64)), tileBall),
+                 {0.6f, 0.9f, -1.1f});
+    AddSky(scene, 32.0f, 125.0f);
+    LookAt(scene.camera, {1.6f, 1.5f, 3.4f}, {-0.4f, 0.6f, -1.0f});
+    scene.camera.verticalFov = 0.85f;
+    scene.camera.ev100 = 14.0f;
+    return scene;
+}
+
 } // namespace air::renderer::detail

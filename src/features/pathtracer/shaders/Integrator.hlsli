@@ -10,6 +10,8 @@
 //   uint          LoadIndex(InstanceData instance, uint index)
 //   Vertex        LoadVertex(InstanceData instance, uint index)
 //   MaterialData  LoadMaterial(uint material)
+//   TextureSetData LoadTextureSet(uint table, uint set)  a material's textures (IntegratorParams::textureSets)
+//   float4        MaterialTextureSample(uint texture, float2 uv)  one of them, bilinear, repeating
 //   LightTriangle LoadLight(uint light)
 //   LightTreeNode LoadLightNode(uint node)
 //   float         BsdfLutLoad(uint index)
@@ -115,6 +117,7 @@ struct IntegratorParams
     CloudData clouds; // enabled == 0: none
     uint volumeCount; // the scene's volumes, read with LoadVolume(volumeTable, i)
     uint volumeTable; // bindless StructuredBuffer<VolumeData> on the GPU
+    uint textureSets; // the materials' textures: bindless StructuredBuffer<TextureSetData> on the GPU
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
@@ -423,6 +426,44 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params)
     s.material.baseColor = m.baseColor;
     s.material.roughness = m.roughness;
     s.material.metallic = m.metallic;
+    if (m.textureSet != kInvalidIndex)
+    {
+        // The textures at the hit's texture coordinates (level 0: a path has no footprint to filter by).
+        float2 uv0 = float2(v0.u, v0.v) * m.uvScale;
+        float2 uv1 = float2(v1.u, v1.v) * m.uvScale;
+        float2 uv2 = float2(v2.u, v2.v) * m.uvScale;
+        TextureSetData textures = LoadTextureSet(params.textureSets, m.textureSet);
+        float2 uv = uv0 * b0 + uv1 * b1 + uv2 * b2;
+        float4 color = MaterialTextureSample(textures.color, uv);
+        float4 surface = MaterialTextureSample(textures.surface, uv);
+        s.material.baseColor *= float3(color.x, color.y, color.z);
+        s.material.roughness = saturate(s.material.roughness * surface.z);
+        s.material.metallic = saturate(s.material.metallic * surface.w);
+        // The normal map in the triangle's tangent frame (along increasing u and v), around the
+        // shading normal.
+        float2 d1 = uv1 - uv0;
+        float2 d2 = uv2 - uv0;
+        float det = d1.x * d2.y - d1.y * d2.x;
+        float2 bend = float2(surface.x, surface.y) * 2.0f - 1.0f;
+        if (abs(det) > 1e-12f && (bend.x != 0.0f || bend.y != 0.0f))
+        {
+            float3 tangent = ((p1 - p0) * d2.y - (p2 - p0) * d1.y) / det;
+            float3 bitangent = ((p2 - p0) * d1.x - (p1 - p0) * d2.x) / det;
+            float3 n = s.shadingNormal;
+            float3 t = tangent - n * dot(n, tangent);
+            if (dot(t, t) > 1e-20f)
+            {
+                t = normalize(t);
+                float3 b = cross(n, t);
+                b = dot(b, bitangent) < 0.0f ? -b : b;
+                float3 bent = normalize(t * bend.x + b * bend.y + n * sqrt(saturate(1.0f - dot(bend, bend))));
+                if (dot(bent, s.geometricNormal) > 0.0f)
+                {
+                    s.shadingNormal = bent;
+                }
+            }
+        }
+    }
     s.emission = frontFace ? m.emission : float3(0.0f, 0.0f, 0.0f);
     if ((params.flags & kFlagFurnace) != 0u)
     {

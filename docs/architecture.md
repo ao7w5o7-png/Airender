@@ -477,6 +477,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `cumulus` | a 4 km meadow, a farmstead and trees under fair-weather cumulus | volumetric clouds (§8.10): their light, shadows, cost |
   | `smoke` | smoke rising from a brazier in a walled yard, the low sun behind it | volumes (§8.12): scattering, NEE in a medium, its shadow |
   | `braziers` | three overlapping plumes over braziers at dusk, a lantern among them | several volumes and light groups near them (§8.13) |
+  | `textured` | a courtyard corner of tiles, bricks and riveted metal plates in the afternoon sun | material textures and normal maps (§8.15) |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -1434,6 +1435,33 @@ Validation: `Nrd_RefusesOnNullDevice`, `Taa_FiltersRealTimeFramesOnly`,
 `PathTracer_SignalsForDenoisersOfSurfaces` (the trace and ReSTIR write the signals, the march leaves
 the guides alone and filters its layer), `Editor_DenoiserChoice`; on the GPU the D3D12 debug layer
 reports no errors for `cornell_box` and `braziers` with `pathtracer,nrd,taa`.
+
+### 8.15 Material textures
+
+A material may take a texture set (`SceneDesc::textureSets`, `Material::textures`): two RGBA8
+textures of one size that repeat, `color` (the base colour, sRGB) and `surface` (the tangent-space
+normal's x and y mapped to [0, 1] with z following, roughness, metallic). They multiply the
+material's base colour, roughness and metallic (set those to 1 to take the textures as they are) at
+the mesh's texture coordinates times `Material::uvScale`.
+
+- **Shading** (`LoadSurface`, `Integrator.hlsli`): both textures bilinear at level 0 (a path has no
+  footprint to choose a level by; the real-time denoisers and TAA filter what it aliases). The normal
+  map bends the shading normal in the triangle's tangent frame along increasing u and v (from its
+  positions and texture coordinates), orthogonalized against the interpolated normal; a bent normal
+  below the geometric surface is ignored. Hooks: `LoadTextureSet` (a bindless
+  `StructuredBuffer<TextureSetData>`, `IntegratorParams::textureSets` from `FrameData::textureSets`)
+  and `MaterialTextureSample` (bindless `Texture2D`, the static linear wrap sampler); on the CPU,
+  `SampleTexture2DWrapRGBA8` emulates the hardware: 8 fractional bits, sRGB decoded before filtering.
+- **Procedural sets** (`MaterialTextures.cpp`): a height field per material whose slopes give the
+  normal map, with colour, roughness and metallic from the same pattern, from integer hashes and
+  value noise that repeat with the texture. `MakeBrickTextures` (red bricks in mortar),
+  `MakeTileTextures` (glazed tiles in grout), `MakeMetalPlateTextures` (brushed metal, seams, rivets).
+  The `textured` scene uses all three at 512 x 512.
+- **Validation**: `MaterialTextures_*` (sampling, the sets, Validate), `Integrator_TexturesScaleTheMaterial`
+  (a flat grey texture renders as that grey), `Integrator_NormalMapsLoseLittleInAWhiteFurnace`: rays
+  a bent normal sends below the surface are lost, so `textured` in a white furnace is 3.2% dark (the
+  mortar's grooves darkest; microfacet-based normal mapping, Schuessler et al. 2017, would keep that
+  light) and gains nothing. GPU against the CPU reference on `textured`: +0.05%.
 
 ---
 

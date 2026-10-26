@@ -44,6 +44,8 @@ gpu::MaterialData Material::ToGpu() const
     out.metallic = metallic;
     const float luminance = dot(emissionColor, float3(0.2126f, 0.7152f, 0.0722f));
     out.emission = luminance > 0.0f && emissionNits > 0.0f ? emissionColor * (emissionNits / luminance) : float3(0.0f);
+    out.textureSet = textures == kNoTextures ? gpu::kInvalidIndex : textures;
+    out.uvScale = uvScale;
     return out;
 }
 
@@ -326,6 +328,7 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"cumulus", detail::MakeCumulus},
     {"smoke", detail::MakeSmoke},
     {"braziers", detail::MakeBraziers},
+    {"textured", detail::MakeTextured},
 };
 
 } // namespace
@@ -410,6 +413,18 @@ std::string Validate(const SceneDesc& desc)
             !(m.emissionNits >= 0.0f))
         {
             return std::format("material '{}': roughness and metallic must be in [0, 1], emission >= 0", m.name);
+        }
+        if (m.textures != kNoTextures && m.textures >= desc.textureSets.size())
+        {
+            return std::format("material '{}' references missing textures {}", m.name, m.textures);
+        }
+    }
+    for (const MaterialTextures& t : desc.textureSets)
+    {
+        const size_t texels = size_t(t.width) * t.height;
+        if (texels == 0 || t.color.size() != texels || t.surface.size() != texels)
+        {
+            return std::format("textures '{}' need {}x{} colour and surface texels", t.name, t.width, t.height);
         }
     }
     for (const Instance& instance : desc.instances)

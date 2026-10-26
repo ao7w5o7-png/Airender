@@ -255,6 +255,7 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
     AIR_CHECK(problem.empty(), "scene '{}': {}", mDesc.name, problem);
     SceneBounds(mDesc, mGpu.boundsMin, mGpu.boundsMax);
     Upload();
+    UploadTextures();
     const u32 slots = mDevice.GetFramesInFlight() + 1;
     for (u32 i = 0; i < slots; ++i)
     {
@@ -323,8 +324,49 @@ Scene::~Scene()
         }
     }
     DestroyAerial();
+    for (rhi::TextureHandle texture : mTextures)
+    {
+        mDevice.DestroyTexture(texture);
+    }
+    mDevice.DestroyBuffer(mGpu.textureSetTable);
     mDevice.DestroyBuffer(mInstances);
     mDevice.DestroyAccelStruct(mGpu.tlas);
+}
+
+void Scene::UploadTextures()
+{
+    std::vector<gpu::TextureSetData> table;
+    for (const MaterialTextures& t : mDesc.textureSets)
+    {
+        auto make = [&](const std::vector<u32>& texels, rhi::Format format, const char* kind)
+        {
+            const rhi::TextureHandle texture =
+                CreateTextureWithData(mDevice,
+                                      {.format = format,
+                                       .width = t.width,
+                                       .height = t.height,
+                                       .usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDst,
+                                       .debugName = std::format("{}.{}", t.name, kind)},
+                                      texels.data());
+            AIR_CHECK(texture.IsValid(), "out of device memory uploading the textures '{}'", t.name);
+            mTextures.push_back(texture);
+            mGeometryBytes += texels.size() * sizeof(u32);
+            return mDevice.GetBindlessSRV(texture);
+        };
+        gpu::TextureSetData data{};
+        data.color = make(t.color, rhi::Format::RGBA8_SRGB, "Color");
+        data.surface = make(t.surface, rhi::Format::RGBA8_UNORM, "Surface");
+        table.push_back(data);
+    }
+    if (table.empty())
+    {
+        table.push_back({gpu::kInvalidIndex, gpu::kInvalidIndex, 0, 0});
+    }
+    mGpu.textureSetTable = CreateBufferWithData(mDevice,
+                                                {.stride = sizeof(gpu::TextureSetData),
+                                                 .usage = BufferUsage::ShaderResource,
+                                                 .debugName = mDesc.name + ".TextureSets"},
+                                                table.data(), table.size() * sizeof(gpu::TextureSetData));
 }
 
 void Scene::Upload()

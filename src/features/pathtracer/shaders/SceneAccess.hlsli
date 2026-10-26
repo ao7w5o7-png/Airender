@@ -47,6 +47,18 @@ MaterialData LoadMaterial(uint material)
     return materials[material];
 }
 
+TextureSetData LoadTextureSet(uint table, uint set)
+{
+    StructuredBuffer<TextureSetData> sets = ResourceDescriptorHeap[table];
+    return sets[set];
+}
+
+float4 MaterialTextureSample(uint texture, float2 uv)
+{
+    Texture2D<float4> t = ResourceDescriptorHeap[NonUniformResourceIndex(texture)];
+    return t.SampleLevel(gLinearWrap, uv, 0.0f);
+}
+
 LightTriangle LoadLight(uint light)
 {
     StructuredBuffer<LightTriangle> lights = ResourceDescriptorHeap[g.lights];

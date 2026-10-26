@@ -83,6 +83,8 @@ struct SceneTables
     std::vector<std::span<const Vertex>> vertices;
     std::vector<std::span<const u32>> indices;
     std::vector<MaterialData> materials;
+    // The materials' textures; TextureSetData::color / surface of set i are 2 i and 2 i + 1.
+    std::vector<const renderer::MaterialTextures*> textureSets;
     std::vector<LightTriangle> lights; // at least one entry, like the GPU list
     std::vector<LightTreeNode> lightTree;
     std::vector<LightGroup> lightGroups; // one per emissive instance
@@ -123,6 +125,7 @@ Params MakeParams(const SceneTables& tables, const ReferenceSettings& settings, 
     params.clouds = tables.clouds.data;
     params.volumeCount = u32(tables.volumes.size());
     params.volumeTable = 0;
+    params.textureSets = 0;
     params.cloudEvents = settings.cloudEvents;
     params.volumeEvents = settings.volumeEvents;
     params.lightCount = tables.lightPower > 0.0 ? u32(tables.lights.size()) : 0u;
@@ -146,6 +149,14 @@ struct SceneHooks
     uint LoadIndex(InstanceData instance, uint index) const { return tables.indices[instance.indexBuffer][index]; }
     Vertex LoadVertex(InstanceData instance, uint index) const { return tables.vertices[instance.vertexBuffer][index]; }
     MaterialData LoadMaterial(uint material) const { return tables.materials[material]; }
+    TextureSetData LoadTextureSet(uint /*table*/, uint set) const { return {set * 2, set * 2 + 1, 0, 0}; }
+    float4 MaterialTextureSample(uint texture, float2 uv) const
+    {
+        const renderer::MaterialTextures& t = *tables.textureSets[texture / 2];
+        const bool color = texture % 2 == 0;
+        return renderer::SampleTexture2DWrapRGBA8(color ? t.color.data() : t.surface.data(), t.width, t.height, color,
+                                                  uv.x, uv.y);
+    }
     LightTriangle LoadLight(uint light) const { return tables.lights[light]; }
     LightTreeNode LoadLightNode(uint node) const { return tables.lightTree[node]; }
     float3 SkyTableLoad(uint texel) const

@@ -57,5 +57,6 @@ SceneDesc MakeSunset();
 SceneDesc MakeCumulus();
 SceneDesc MakeSmoke();
 SceneDesc MakeBraziers();
+SceneDesc MakeTextured();
 
 } // namespace air::renderer::detail

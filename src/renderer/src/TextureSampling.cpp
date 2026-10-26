@@ -50,6 +50,26 @@ template <typename T, typename Load> T Trilinear(const Taps& x, const Taps& y, c
 
 } // namespace
 
+hlsl::float4 SampleTexture2DWrapRGBA8(const u32* texels, u32 width, u32 height, bool srgb, float u, float v)
+{
+    const Taps x = Axis(u, width, true);
+    const Taps y = Axis(v, height, true);
+    auto load = [&](int xi, int yi)
+    {
+        const u32 t = texels[size_t(yi) * width + size_t(xi)];
+        hlsl::float4 c(float(t & 0xFFu) / 255.0f, float((t >> 8) & 0xFFu) / 255.0f, float((t >> 16) & 0xFFu) / 255.0f,
+                       float(t >> 24) / 255.0f);
+        if (srgb)
+        {
+            auto decode = [](float s) { return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f); };
+            c = hlsl::float4(decode(c.x), decode(c.y), decode(c.z), c.w);
+        }
+        return c;
+    };
+    auto row = [&](int yi) { return load(x.first, yi) + (load(x.second, yi) - load(x.first, yi)) * x.weight; };
+    return row(y.first) + (row(y.second) - row(y.first)) * y.weight;
+}
+
 float SampleTexture3D(const u8* texels, u32 width, u32 height, u32 depth, float u, float v, float w)
 {
     return Trilinear<float>(Axis(u, width, true), Axis(v, height, true), Axis(w, depth, true), [&](int x, int y, int z)

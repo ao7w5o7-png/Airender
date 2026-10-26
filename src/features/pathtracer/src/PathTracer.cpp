@@ -331,6 +331,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.volumeEvents = mSettings.volumeEvents;
     frame.volumeCount = u32(scene.volumes.size());
     frame.volumeTable = volume ? mDevice.GetBindlessSRV(scene.volumeTable) : 0u;
+    frame.textureSets = mDevice.GetBindlessSRV(scene.textureSetTable);
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;

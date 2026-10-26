@@ -106,7 +106,7 @@ struct FrameData
     NrcData nrc;      // the neural radiance cache, with kFlagNrc
     uint volumeCount; // the scene's volumes (GpuScene::volumes)
     uint volumeTable; // StructuredBuffer<VolumeData> (GpuScene::volumeTable)
-    uint pad3;
+    uint textureSets; // StructuredBuffer<TextureSetData> (GpuScene::textureSetTable)
     uint pad4;
     VolumeShadowsData volumeShadows; // their moment shadow maps, with kFlagVolumeMarch
 };

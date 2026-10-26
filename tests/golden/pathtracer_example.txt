@@ -42,7 +42,7 @@ Resources:
 [Graphics] PushConstants 24 bytes
 [Graphics] Dispatch 8x4x1
 [Graphics] EndEvent
-[Compute] Wait Graphics fence 3
+[Compute] Wait Graphics fence 4
 [Compute] Barrier [tex 'Example.Pattern' None -> UAVCompute discard]
 [Compute] BeginEvent 'Example.Generate'
 [Compute] SetPipeline pipeline 'Example.Generate'
