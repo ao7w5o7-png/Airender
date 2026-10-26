@@ -12,7 +12,7 @@
 
 #include "CloudMarch.hlsli"
 
-static const float kCloudFreshBlend = 0.4f; // weight of a newly marched pixel against its history
+static const float kCloudFreshBlend = 0.25f; // weight of a newly marched pixel against its history
 
 [numthreads(8, 8, 1)]
 void Main(uint3 id : SV_DispatchThreadID)

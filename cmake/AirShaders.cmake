@@ -94,7 +94,13 @@ function(air_compile_shaders)
         endif()
         set(compiler "${AIR_DXC_EXECUTABLE}")
         set(previewArgs "")
-        set(debugArgs -Qembed_debug -Zi)
+        # Debug information (shader source in GPU debuggers) only on request: with it the driver's DXIL
+        # verifier prints, at every pipeline creation, the scopes it misplaces for loops in inlined functions
+        # (the ray queries' candidate loops of alpha cutouts, Cutout.hlsli).
+        set(debugArgs "")
+        if(AIR_SHADER_DEBUG_INFO)
+            set(debugArgs -Qembed_debug -Zi)
+        endif()
         if(profile MATCHES "_6_1[0-9]$")
             if(NOT AIR_DXC_PREVIEW_EXECUTABLE)
                 continue() # no preview compiler: the feature falls back to its portable kernels

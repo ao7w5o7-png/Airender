@@ -133,7 +133,8 @@ struct CloudRay
 };
 
 // The clouds along o + t d up to tMax. `offset` and `lightOffset` in [0, 1) shift the steps along the
-// ray and towards the sun (a frame's jitter).
+// ray and towards the sun (a frame's jitter); each step along the ray shifts its samples towards the
+// sun on by the golden ratio, so that one ray already averages over their places.
 CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, float lightOffset, uint maxSteps,
                      uint lightSamples)
 {
@@ -188,7 +189,8 @@ CloudRay MarchClouds(FrameData f, float3 o, float3 d, float tMax, float offset, 
                 float3 inscattered = float3(0.0f, 0.0f, 0.0f);
                 if (sun)
                 {
-                    float depth = CloudSunDepth(c, p, sunDirection, lightSamples, lightOffset);
+                    float jitter = frac(lightOffset + float(steps) * 0.618034f);
+                    float depth = CloudSunDepth(c, p, sunDirection, lightSamples, jitter);
                     float multiple = kCloudMsScale * pow(density, kCloudMsEdge) /
                                      (4.0f * kPi * (1.0f + kCloudMsSlope * depth));
                     inscattered = sunLight * (cloudPhase * exp(-depth) + multiple);

@@ -26,6 +26,7 @@ option(AIR_WITH_NTC "Neural texture compression (Windows x64, NVIDIA RTXNTC's pr
 # Preview Agility SDK + DXC: Shader Model 6.10 linear algebra (tensor-core matrix-vector products for
 # the neural radiance cache). Off: the retail SDK, and neural networks run their portable kernels.
 option(AIR_D3D12_PREVIEW "Use the preview Agility SDK and DXC for Shader Model 6.10 linear algebra" ${AIR_D3D12_DEFAULT})
+option(AIR_SHADER_DEBUG_INFO "Embed debug information (source) in the shaders, for GPU debuggers" OFF)
 option(AIR_WITH_MODEL_FILES "Scenes made from downloaded model files (ufbx, cgltf, stb_image)" ON)
 option(AIR_ENABLE_ASAN "Build with AddressSanitizer" OFF)
 option(AIR_ENABLE_TSAN "Build with ThreadSanitizer" OFF)

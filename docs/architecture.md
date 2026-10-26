@@ -1882,7 +1882,12 @@ that use it and shows the result within about 100 ms:
 
 `python3 tools/air.py shaders [filter]` compiles every shader from the same manifest into
 `<build>/shader-check/`, a quick HLSL check that needs no C++ build and leaves a running editor's
-shaders alone.
+shaders alone. (It does not write `<build>/shaders`: after editing shaders outside the editor, build
+the feature's `air_feature_<name>_shaders` target.)
+
+Shaders carry no debug information unless `-DAIR_SHADER_DEBUG_INFO=ON` (source in GPU debuggers):
+with it the driver's DXIL verifier prints, at every pipeline creation, the scopes DXC misplaces for
+loops in inlined functions, such as the ray queries' candidate loops of alpha cutouts.
 
 ### 9.2 Profile report (HTML)
 
