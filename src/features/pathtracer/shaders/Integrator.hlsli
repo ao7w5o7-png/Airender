@@ -450,6 +450,9 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params, u
     s.material.coat = m.coat != 0u ? params.coatModel : kCoatNone;
     s.material.coatRoughness = m.coatRoughness;
     s.material.coatColor = m.coatColor;
+    s.material.flakes = m.flakes;
+    s.material.flakeRoughness = m.flakeRoughness;
+    s.material.flakeColor = m.flakeColor;
     // The coat's random walks (kCoatRandomWalk): new for every hit and frame, the same wherever the
     // frame loads the hit again.
     s.material.coatSeed = Pcg(hit.instance * 0x9e3779b9u ^ Pcg(hit.primitive ^ Pcg(asuint(hit.barycentrics.x) ^
@@ -514,6 +517,7 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params, u
     {
         s.material.baseColor = float3(1.0f, 1.0f, 1.0f);
         s.material.coatColor = float3(1.0f, 1.0f, 1.0f);
+        s.material.flakeColor = float3(1.0f, 1.0f, 1.0f);
         s.emission = float3(0.0f, 0.0f, 0.0f);
     }
     s.lightIndex = any(s.emission) ? LoadInstanceLight(hit.instance) + hit.primitive : kInvalidIndex;

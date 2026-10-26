@@ -1230,6 +1230,15 @@ void EditorApp::BuildScenePanel()
             changed |= ImGui::SliderFloat("Coat roughness", &m.coatRoughness, 0.0f, 1.0f);
             changed |= ImGui::ColorEdit3("Coat color", &m.coatColor.x, ImGuiColorEditFlags_Float);
             m.coatColor = hlsl::saturate(m.coatColor);
+            changed |= ImGui::SliderFloat("Flakes", &m.flakes, 0.0f, 1.0f);
+            ImGui::SetItemTooltip("Metallic flakes under the coat (car paint): their share of what the light meets\n"
+                                  "there, the rest being the material's own colour (its pigment).");
+            if (m.flakes > 0.0f)
+            {
+                changed |= ImGui::SliderFloat("Flake roughness", &m.flakeRoughness, 0.0f, 1.0f);
+                changed |= ImGui::ColorEdit3("Flake color", &m.flakeColor.x, ImGuiColorEditFlags_Float);
+                m.flakeColor = hlsl::saturate(m.flakeColor);
+            }
         }
         if (changed)
         {

@@ -51,6 +51,9 @@ gpu::MaterialData Material::ToGpu() const
     out.coat = coat ? 1u : 0u;
     out.coatRoughness = coatRoughness;
     out.coatColor = coatColor;
+    out.flakes = coat ? flakes : 0.0f;
+    out.flakeRoughness = flakeRoughness;
+    out.flakeColor = flakeColor;
     out.alphaCutoff = textures == kNoTextures ? 0.0f : alphaCutoff;
     return out;
 }
@@ -336,6 +339,7 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"braziers", detail::MakeBraziers},
     {"textured", detail::MakeTextured},
     {"coated", detail::MakeCoated},
+    {"car_paint", detail::MakeCarPaint},
 };
 
 } // namespace
@@ -426,6 +430,12 @@ std::string Validate(const SceneDesc& desc)
                          std::max({m.coatColor.x, m.coatColor.y, m.coatColor.z}) <= 1.0f)))
         {
             return std::format("material '{}': coat roughness and colour must be in [0, 1]", m.name);
+        }
+        if (!(m.flakes >= 0.0f && m.flakes <= 1.0f) || !(m.flakeRoughness >= 0.0f && m.flakeRoughness <= 1.0f) ||
+            !(std::min({m.flakeColor.x, m.flakeColor.y, m.flakeColor.z}) >= 0.0f &&
+              std::max({m.flakeColor.x, m.flakeColor.y, m.flakeColor.z}) <= 1.0f))
+        {
+            return std::format("material '{}': flakes, their roughness and colour must be in [0, 1]", m.name);
         }
         if (m.textures != kNoTextures && m.textures >= desc.textureSets.size())
         {

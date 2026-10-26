@@ -13,7 +13,7 @@
 #ifndef AIR_PT_NEURAL_COAT_HLSLI
 #define AIR_PT_NEURAL_COAT_HLSLI
 
-AIR_CONST uint kNeuralCoatInputs = 32u;
+AIR_CONST uint kNeuralCoatInputs = 40u;
 AIR_CONST uint kNeuralCoatHidden = 16u;
 AIR_CONST uint kNeuralCoatW0 = 0u;
 AIR_CONST uint kNeuralCoatW1 = kNeuralCoatHidden * kNeuralCoatInputs;
@@ -26,11 +26,11 @@ AIR_CONST float kNeuralCoatMaxCorrection = 6.0f; // |z|: the correction stays wi
 // The inputs, four per float4.
 struct NeuralCoatInput
 {
-    float4 v[8];
+    float4 v[10];
 };
 
 // The network's view of a shading situation: the directions outside and refracted into the layer,
-// their half vectors and azimuth, how far the base's lobe peaks there, and the material.
+// their half vectors and azimuth, how far the base's lobe and the flakes' peak there, and the material.
 NeuralCoatInput NeuralCoatEncode(BsdfMaterial m, float3 wo, float3 wi)
 {
     float3 wo2 = CoatRefracted(wo);
@@ -52,6 +52,13 @@ NeuralCoatInput NeuralCoatEncode(BsdfMaterial m, float3 wo, float3 wi)
     x.v[5] = float4(m.roughness, wo.z * wi.z, sin(kPi * wo2.z), sin(kPi * wi2.z));
     x.v[6] = float4(cos(kPi * wo2.z), cos(kPi * wi2.z), sin(kPi * h2.z), cos(kPi * h2.z));
     x.v[7] = float4(sin(kTwoPi * h2.z), cos(kTwoPi * h2.z), sin(kPi * cosPhi), cos(kPi * cosPhi));
+    // The flakes' inputs are 0 without flakes: a coat over a plain base sees the network it did before.
+    float has = m.flakes > 0.0f ? 1.0f : 0.0f;
+    float flakeAlpha = RoughnessToAlpha(m.flakeRoughness);
+    float flakePeak = has * log(1.0f + GgxD(h2, flakeAlpha)) * 0.125f;
+    float flakeSpread = has * min((1.0f - h2.z) / (flakeAlpha + 0.01f), 4.0f);
+    x.v[8] = float4(m.flakes, has * m.flakeRoughness, flakePeak, flakeSpread);
+    x.v[9] = float4(has * m.flakeColor.x, has * m.flakeColor.y, has * m.flakeColor.z, m.flakes * flakePeak);
     return x;
 }
 
@@ -64,13 +71,14 @@ struct NeuralCoatHiddenLayer
     float4 v[4];
 };
 
-// The row of 32 weights at `row` times the inputs.
+// The row of 40 weights at `row` times the inputs.
 float NeuralCoatInputRow(uint row, NeuralCoatInput x)
 {
     return dot(NeuralCoatWeights4(row), x.v[0]) + dot(NeuralCoatWeights4(row + 4u), x.v[1]) +
            dot(NeuralCoatWeights4(row + 8u), x.v[2]) + dot(NeuralCoatWeights4(row + 12u), x.v[3]) +
            dot(NeuralCoatWeights4(row + 16u), x.v[4]) + dot(NeuralCoatWeights4(row + 20u), x.v[5]) +
-           dot(NeuralCoatWeights4(row + 24u), x.v[6]) + dot(NeuralCoatWeights4(row + 28u), x.v[7]);
+           dot(NeuralCoatWeights4(row + 24u), x.v[6]) + dot(NeuralCoatWeights4(row + 28u), x.v[7]) +
+           dot(NeuralCoatWeights4(row + 32u), x.v[8]) + dot(NeuralCoatWeights4(row + 36u), x.v[9]);
 }
 
 // The row of 16 weights at `row` times a hidden layer.
@@ -89,8 +97,9 @@ float4 NeuralCoatRelu(float4 s)
 float4 NeuralCoatFirstNeurons(uint r, NeuralCoatInput x)
 {
     uint row = kNeuralCoatW0 + r * kNeuralCoatInputs;
-    return NeuralCoatRelu(float4(NeuralCoatInputRow(row, x), NeuralCoatInputRow(row + 32u, x),
-                                 NeuralCoatInputRow(row + 64u, x), NeuralCoatInputRow(row + 96u, x)));
+    return NeuralCoatRelu(float4(NeuralCoatInputRow(row, x), NeuralCoatInputRow(row + kNeuralCoatInputs, x),
+                                 NeuralCoatInputRow(row + 2u * kNeuralCoatInputs, x),
+                                 NeuralCoatInputRow(row + 3u * kNeuralCoatInputs, x)));
 }
 
 // Four neurons of the second, from row r on.

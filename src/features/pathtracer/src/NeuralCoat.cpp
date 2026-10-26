@@ -53,7 +53,7 @@ constexpr u32 kParameters = coat::kNeuralCoatParameters;
 constexpr u32 kChunk = 64; // samples a task trains on
 constexpr char kCacheMagic[8] = {'A', 'I', 'R', 'C', 'O', 'A', 'T', '1'};
 
-static_assert(kInputs == 32 && kHidden == 16, "the shader code reads the layers as 8 and 4 float4s");
+static_assert(kInputs == 40 && kHidden == 16, "the shader code reads the layers as 10 and 4 float4s");
 
 coat::BsdfMaterial ToShader(const CoatMaterialSample& s, uint model, uint seed)
 {
@@ -65,6 +65,9 @@ coat::BsdfMaterial ToShader(const CoatMaterialSample& s, uint model, uint seed)
     m.coatRoughness = s.coatRoughness;
     m.coatColor = float3(s.coatColor[0], s.coatColor[1], s.coatColor[2]);
     m.coatSeed = seed;
+    m.flakes = s.flakes;
+    m.flakeRoughness = s.flakeRoughness;
+    m.flakeColor = float3(s.flakeColor[0], s.flakeColor[1], s.flakeColor[2]);
     return m;
 }
 
@@ -182,10 +185,7 @@ Situation MakeSituation(std::span<const CoatMaterialSample> materials, uint seed
     const coat::float2 u = coat::Rand2(rng);
     if (choice < 0.5f)
     {
-        s.wi = uLobe < c.coatProbability
-                   ? coat::reflect(-s.wo, coat::SampleGgxVndf(s.wo, c.coatAlpha, u))
-                   : coat::SampleBaseDirection(
-                         c, std::min((uLobe - c.coatProbability) / (1.0f - c.coatProbability), 0.99999994f), u);
+        s.wi = coat::SampleBsdfDirection(c, uLobe, u); // the coat, the flakes, the base
     }
     else
     {
@@ -212,7 +212,7 @@ float3 WalkMean(const Situation& s, u32 walks, uint seed)
 void Encode(const Situation& s, Forward& f)
 {
     const coat::NeuralCoatInput x = coat::NeuralCoatEncode(s.material, s.wo, s.wi);
-    for (u32 i = 0; i < 8; ++i)
+    for (u32 i = 0; i < kInputs / 4; ++i)
     {
         f.x[i * 4] = x.v[i].x;
         f.x[i * 4 + 1] = x.v[i].y;
@@ -289,6 +289,11 @@ std::vector<CoatMaterialSample> CollectCoatMaterials(const renderer::SceneDesc& 
             s.coatColor[0] = m->coatColor.x;
             s.coatColor[1] = m->coatColor.y;
             s.coatColor[2] = m->coatColor.z;
+            s.flakes = m->flakes;
+            s.flakeRoughness = m->flakeRoughness;
+            s.flakeColor[0] = m->flakeColor.x;
+            s.flakeColor[1] = m->flakeColor.y;
+            s.flakeColor[2] = m->flakeColor.z;
             if (t)
             {
                 const size_t texel = std::min(size_t(coat::Rand(rng) * float(t->color.size())), t->color.size() - 1);
@@ -318,7 +323,7 @@ NeuralCoatResult TrainNeuralCoat(std::span<const CoatMaterialSample> materials, 
     u64 key = 0xcbf29ce484222325ull;
     key = Fnv1a(key, materials.data(), materials.size_bytes());
     // The last value is the coat's version: raise it whenever Bsdf.hlsli's coat or NeuralCoat.hlsli changes.
-    const u32 header[] = {settings.steps, settings.batch, settings.walks, settings.seed, kParameters, 4u};
+    const u32 header[] = {settings.steps, settings.batch, settings.walks, settings.seed, kParameters, 5u};
     key = Fnv1a(key, header, sizeof(header));
     key = Fnv1a(key, &settings.learningRate, sizeof(float));
     const std::filesystem::path entry =
@@ -340,10 +345,24 @@ NeuralCoatResult TrainNeuralCoat(std::span<const CoatMaterialSample> materials, 
     // He-initialized hidden layers; the output layer starts at zero, the approximation unchanged.
     std::vector<float>& p = result.parameters;
     p.assign(kParameters, 0.0f);
+    // The first layer's weights of the coat's own 32 inputs are drawn as before the flakes' 8 were added
+    // (in that order, at that scale), theirs after: without flakes their inputs are 0, so a coat over a
+    // plain base trains exactly the network it did.
     uint init = coat::Pcg(settings.seed * 0x85ebca6bu + 1u);
-    for (u32 i = 0; i < kHidden * kInputs; ++i)
+    constexpr u32 kCoatInputs = 32;
+    const float scale = std::sqrt(6.0f / float(kCoatInputs));
+    for (u32 i = 0; i < kHidden * kCoatInputs; ++i)
     {
-        p[coat::kNeuralCoatW0 + i] = (coat::Rand(init) * 2.0f - 1.0f) * std::sqrt(6.0f / float(kInputs));
+        p[coat::kNeuralCoatW0 + (i / kCoatInputs) * kInputs + i % kCoatInputs] =
+            (coat::Rand(init) * 2.0f - 1.0f) * scale;
+    }
+    uint flakeInit = coat::Pcg(settings.seed * 0x27d4eb2fu + 7u);
+    for (u32 r = 0; r < kHidden; ++r)
+    {
+        for (u32 k = kCoatInputs; k < kInputs; ++k)
+        {
+            p[coat::kNeuralCoatW0 + r * kInputs + k] = (coat::Rand(flakeInit) * 2.0f - 1.0f) * scale;
+        }
     }
     for (u32 i = 0; i < kHidden * kHidden; ++i)
     {
@@ -535,6 +554,7 @@ json::Value CheckNeuralCoat(std::span<const CoatMaterialSample> materials, std::
         item["roughness"] = m.roughness;
         item["metallic"] = m.metallic;
         item["coatRoughness"] = m.coatRoughness;
+        item["flakes"] = m.flakes;
         item["neuralError"] = std::sqrt(e.neural / std::max(e.reference, 1e-12));
         item["approximateError"] = std::sqrt(e.approximate / std::max(e.reference, 1e-12));
         json::Value albedo = json::Value::MakeArray();

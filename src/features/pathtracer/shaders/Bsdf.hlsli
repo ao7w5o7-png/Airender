@@ -72,6 +72,12 @@ struct BsdfMaterial
     float coatRoughness; // perceptual, of the coat's interface
     float3 coatColor;    // what the coat's layer lets through at normal incidence, one way
     uint coatSeed;       // kCoatRandomWalk: the walks' random numbers at this shading point and frame
+    // Metallic flakes in the layer under the coat (car paint): this fraction of what the light meets
+    // there is a metal of flakeColor whose flakes' normals spread like a GGX surface of flakeRoughness,
+    // the rest the base's pigment. Only under a coat.
+    float flakes;
+    float flakeRoughness;
+    float3 flakeColor;
 };
 
 struct BsdfEval
@@ -234,6 +240,10 @@ struct BsdfContext
     // the base's lobes above).
     float coatAlpha;
     float coatProbability;
+    // With flakes under the coat: their alpha, and the share of the base's samples drawn from their
+    // lobe (from the outside, GGX of that alpha about the mirror direction).
+    float flakeAlpha;
+    float flakeProbability;
 };
 
 BsdfContext PrepareBsdf(BsdfMaterial m, float3 wo)
@@ -257,8 +267,11 @@ BsdfContext PrepareBsdf(BsdfMaterial m, float3 wo)
     c.specularProbability = saturate(lerp(pDielectric, pMetal, saturate(m.metallic)));
     c.coatAlpha = RoughnessToAlpha(m.coatRoughness);
     c.coatProbability = 0.0f;
+    c.flakeAlpha = RoughnessToAlpha(m.flakeRoughness);
+    c.flakeProbability = 0.0f;
     if (AIR_BSDF_COATS != 0 && m.coat != kCoatNone)
     {
+        c.flakeProbability = m.flakes > 0.0f ? clamp(m.flakes, 0.1f, 0.9f) : 0.0f;
         // The interface reflects F(wo) of the light; the base what passes twice through the layer.
         float f = FrDielectric(wo.z, kCoatIor);
         float3 through = m.coatColor * m.coatColor;
@@ -468,6 +481,60 @@ BsdfMaterial CoatBase(BsdfMaterial m)
     return b;
 }
 
+// The base's flakes as a material of their own: a metal of flakeColor, their roughness its.
+BsdfMaterial CoatFlakes(BsdfMaterial m)
+{
+    BsdfMaterial f = CoatBase(m);
+    f.baseColor = m.flakeColor;
+    f.roughness = m.flakeRoughness;
+    f.metallic = 1.0f;
+    return f;
+}
+
+// What the light meets under the coat: the pigment (the base) and the flakes, mixed by their share.
+struct CoatBaseContext
+{
+    BsdfContext pigment;
+    BsdfContext flakes;
+    float share;
+};
+
+CoatBaseContext PrepareCoatBase(BsdfMaterial m, float3 wo)
+{
+    CoatBaseContext b;
+    b.pigment = PrepareBsdf(CoatBase(m), wo);
+    b.share = saturate(m.flakes);
+    b.flakes = b.pigment;
+    if (b.share > 0.0f)
+    {
+        b.flakes = PrepareBsdf(CoatFlakes(m), wo);
+    }
+    return b;
+}
+
+BsdfEval EvaluateCoatBase(CoatBaseContext b, float3 wi)
+{
+    BsdfEval e = EvaluateBaseBsdf(b.pigment, wi);
+    if (b.share > 0.0f)
+    {
+        BsdfEval f = EvaluateBaseBsdf(b.flakes, wi);
+        e.fCos = lerp(e.fCos, f.fCos, b.share);
+        e.fCosDiffuse = e.fCosDiffuse * (1.0f - b.share);
+        e.pdf = lerp(e.pdf, f.pdf, b.share);
+    }
+    return e;
+}
+
+// A direction drawn from EvaluateCoatBase's pdf.
+float3 SampleCoatBaseDirection(CoatBaseContext b, float uLobe, float2 u)
+{
+    if (uLobe < b.share)
+    {
+        return SampleBaseDirection(b.flakes, uLobe / b.share, u);
+    }
+    return SampleBaseDirection(b.pigment, min((uLobe - b.share) / (1.0f - b.share), 0.99999994f), u);
+}
+
 // What the layer lets through along w (either way).
 float3 CoatTransmittance(BsdfMaterial m, float3 w)
 {
@@ -492,10 +559,12 @@ float3 CoatInnerApproximate(BsdfContext c, float3 wi)
     BsdfMaterial base = CoatBase(c.material);
     float3 wo2 = CoatRefracted(c.wo);
     float3 wi2 = CoatRefracted(wi);
-    float3 f = EvaluateBaseBsdf(PrepareBsdf(base, wo2), wi2).fCos / max(wi2.z, 1e-4f);
+    float3 f = EvaluateCoatBase(PrepareCoatBase(c.material, wo2), wi2).fCos / max(wi2.z, 1e-4f);
     float crossings = (1.0f - FrDielectric(c.wo.z, kCoatIor)) * (1.0f - FrDielectric(wi.z, kCoatIor));
     float3 through = CoatTransmittance(base, wo2) * CoatTransmittance(base, wi2);
-    float3 albedo = c.material.coatColor * c.material.coatColor * base.baseColor * (1.0f - saturate(base.metallic));
+    // (Flakes reflect like mirrors: their light leaves near the way it came in, as a metal base's does.)
+    float3 albedo = c.material.coatColor * c.material.coatColor * base.baseColor * (1.0f - saturate(base.metallic)) *
+                    (1.0f - saturate(c.material.flakes));
     float3 bounces = float3(1.0f, 1.0f, 1.0f) / (float3(1.0f, 1.0f, 1.0f) - albedo * kCoatInternalReflectance);
     return f * through * bounces * (crossings / (kCoatIor * kCoatIor) * wi.z);
 }
@@ -549,8 +618,8 @@ float3 CoatInnerWalk(BsdfContext c, float3 wi, AIR_INOUT(uint) seed)
         else
         {
             // At the base: connect to wi through the presampled transmission...
-            BsdfContext b = PrepareBsdf(base, -w);
-            BsdfEval toExit = EvaluateBaseBsdf(b, -exit.wi);
+            CoatBaseContext b = PrepareCoatBase(c.material, -w);
+            BsdfEval toExit = EvaluateCoatBase(b, -exit.wi);
             if (toExit.pdf > 0.0f)
             {
                 float weight = PowerHeuristic(exit.pdf, toExit.pdf);
@@ -558,12 +627,12 @@ float3 CoatInnerWalk(BsdfContext c, float3 wi, AIR_INOUT(uint) seed)
             }
             // ...then scatter, and connect through the new direction.
             float uLobe = Rand(seed);
-            float3 next = SampleBaseDirection(b, uLobe, Rand2(seed));
+            float3 next = SampleCoatBaseDirection(b, uLobe, Rand2(seed));
             if (next.z <= 0.0f)
             {
                 break;
             }
-            BsdfEval e = EvaluateBaseBsdf(b, next);
+            BsdfEval e = EvaluateCoatBase(b, next);
             if (e.pdf <= 0.0f)
             {
                 break;
@@ -631,8 +700,14 @@ BsdfEval EvaluateBsdf(BsdfContext c, float3 wi)
     }
     float3 inner = CoatInner(c, wi);
     e.fCos = inner + CoatReflectionFCos(c, wi);
-    e.fCosDiffuse = inner * (1.0f - saturate(c.material.metallic));
-    e.pdf = c.coatProbability * CoatReflectionPdf(c, wi) + (1.0f - c.coatProbability) * EvaluateBaseBsdf(c, wi).pdf;
+    // The flakes' light is specular, like a metal base's.
+    e.fCosDiffuse = inner * ((1.0f - saturate(c.material.metallic)) * (1.0f - saturate(c.material.flakes)));
+    float basePdf = EvaluateBaseBsdf(c, wi).pdf;
+    if (c.flakeProbability > 0.0f)
+    {
+        basePdf = lerp(basePdf, GgxVndfReflectionPdf(c.wo, normalize(c.wo + wi), c.flakeAlpha), c.flakeProbability);
+    }
+    e.pdf = c.coatProbability * CoatReflectionPdf(c, wi) + (1.0f - c.coatProbability) * basePdf;
     return e;
 #endif
 }
@@ -645,6 +720,11 @@ float3 SampleBsdfDirection(BsdfContext c, float uLobe, float2 u)
         return reflect(-c.wo, SampleGgxVndf(c.wo, c.coatAlpha, u));
     }
     float rest = (uLobe - c.coatProbability) / (1.0f - c.coatProbability);
+    if (rest < c.flakeProbability)
+    {
+        return reflect(-c.wo, SampleGgxVndf(c.wo, c.flakeAlpha, u)); // the flakes under the coat
+    }
+    rest = (rest - c.flakeProbability) / (1.0f - c.flakeProbability);
     return SampleBaseDirection(c, min(rest, 0.99999994f), u);
 }
 
@@ -813,14 +893,24 @@ void GuideAlbedos(BsdfMaterial m, float muO, AIR_OUT(float3) diffuse, AIR_OUT(fl
         float3 baseDiffuse;
         float3 baseSpecular;
         BaseAlbedos(base, wo2.z, baseDiffuse, baseSpecular);
+        if (m.flakes > 0.0f)
+        {
+            float3 flakeDiffuse;
+            float3 flakeSpecular;
+            BaseAlbedos(CoatFlakes(m), wo2.z, flakeDiffuse, flakeSpecular);
+            float share = saturate(m.flakes);
+            baseDiffuse = baseDiffuse * (1.0f - share);
+            baseSpecular = lerp(baseSpecular, flakeDiffuse + flakeSpecular, share);
+        }
         float3 a = baseDiffuse + baseSpecular;
         float3 up = m.coatColor * m.coatColor; // a diffuse way out crosses the layer at 1 / cos = 2 on average
         float3 inner = (1.0f - FrDielectric(muO, kCoatIor)) * CoatTransmittance(base, wo2) * a * up *
                        (1.0f - kCoatInternalReflectance) /
                        (float3(1.0f, 1.0f, 1.0f) - a * up * kCoatInternalReflectance);
         float f = FrDielectric(muO, kCoatIor);
-        diffuse = inner * (1.0f - saturate(m.metallic));
-        specular = float3(f, f, f) + inner * saturate(m.metallic);
+        float diffuseShare = (1.0f - saturate(m.metallic)) * (1.0f - saturate(m.flakes));
+        diffuse = inner * diffuseShare;
+        specular = float3(f, f, f) + inner * (1.0f - diffuseShare);
     }
 #endif
 }

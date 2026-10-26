@@ -25,6 +25,9 @@ struct CoatMaterialSample
     float metallic = 0.0f;
     float coatRoughness = 0.05f;
     float coatColor[3] = {1.0f, 1.0f, 1.0f};
+    float flakes = 0.0f; // metallic flakes under the coat (renderer::Material::flakes)
+    float flakeRoughness = 0.3f;
+    float flakeColor[3] = {0.9f, 0.9f, 0.9f};
 };
 
 // The scene's coated materials, up to `count` samples spread over them: a textured one by texels of

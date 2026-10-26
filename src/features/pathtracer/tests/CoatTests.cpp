@@ -69,6 +69,62 @@ TEST(Coat_WhiteFurnaceRandomWalk)
     std::printf("  albedo %.3f .. %.3f\n", lowest, highest);
 }
 
+Material Flaked(Rgb pigment, Rgb flakeColor, float flakes, float flakeRoughness,
+                CoatModel model = CoatModel::RandomWalk)
+{
+    Material m = Coated(pigment, 0.8f, 0.0f, 0.03f, {1.0f, 1.0f, 1.0f}, model);
+    m.flakes = flakes;
+    m.flakeRoughness = flakeRoughness;
+    m.flakeColor = flakeColor;
+    return m;
+}
+
+// Car paint (Material::flakes): white flakes in a white pigment under a clear coat reflect all the
+// light too, whatever their share and spread; coloured flakes keep their colour where they reflect
+// (towards the mirror direction) and the pigment's elsewhere.
+TEST(Coat_FlakesConserveEnergy)
+{
+    for (float flakes : {0.3f, 0.8f})
+    {
+        for (float flakeRoughness : {0.2f, 0.6f})
+        {
+            for (float mu : {0.3f, 0.9f})
+            {
+                const Material m = Flaked({1.0f, 1.0f, 1.0f}, {1.0f, 1.0f, 1.0f}, flakes, flakeRoughness);
+                const float albedo = air::pt::EstimateAlbedo(m, mu, 1 << 15)[1];
+                const bool ok = albedo > 0.94f && albedo < 1.02f;
+                if (!ok)
+                {
+                    std::fprintf(stderr, "  albedo %.4f (flakes %.1f roughness %.1f mu %.1f)\n", albedo, flakes,
+                                 flakeRoughness, mu);
+                }
+                EXPECT(ok);
+            }
+        }
+    }
+    // Gold flakes in a blue pigment: towards the mirror direction the flakes' red dominates.
+    const Material paint = Flaked({0.05f, 0.1f, 0.6f}, {1.0f, 0.75f, 0.3f}, 0.5f, 0.15f);
+    const air::pt::Direction wo = FromCos(0.7f);
+    const air::pt::Direction mirror = {-wo[0], -wo[1], wo[2]};
+    const air::pt::Direction away = FromCos(0.9f, 1.4f);
+    Rgb atMirror{};
+    Rgb atAway{};
+    for (air::u32 i = 0; i < 1 << 12; ++i)
+    {
+        Material m = paint;
+        m.coatSeed = i * 2654435761u;
+        const auto a = air::pt::EvaluateBsdf(m, wo, mirror);
+        const auto b = air::pt::EvaluateBsdf(m, wo, away);
+        for (int c = 0; c < 3; ++c)
+        {
+            atMirror[c] += a.fCos[c];
+            atAway[c] += b.fCos[c];
+        }
+    }
+    EXPECT(atMirror[0] > atMirror[2]);
+    EXPECT(atAway[2] > atAway[0]);
+}
+
 // The layer's colour absorbs on the way in and out: twice through a layer of 0.5 at normal incidence
 // leaves well under half of the inner light, the interface's reflection unchanged.
 TEST(Coat_AbsorptionDarkensTheInnerLight)
@@ -113,7 +169,10 @@ TEST(Coat_SamplingMatchesUniformIntegration)
     {
         for (float mu : {0.3f, 0.8f})
         {
-            const Material m = Coated({0.6f, 0.4f, 0.2f}, 0.5f, 0.3f, 0.2f, {0.9f, 0.9f, 0.8f}, model);
+            Material m = Coated({0.6f, 0.4f, 0.2f}, 0.5f, 0.3f, 0.2f, {0.9f, 0.9f, 0.8f}, model);
+            // Flakes too: their lobe is part of the sampling.
+            m.flakes = mu > 0.5f ? 0.4f : 0.0f;
+            m.flakeRoughness = 0.25f;
             const float sampled = air::pt::EstimateAlbedo(m, mu, 1 << 16)[0];
             const float uniform = air::pt::EstimateAlbedoUniform(m, mu, 1 << 17)[0];
             if (std::abs(sampled - uniform) > 0.02f)
@@ -140,7 +199,7 @@ TEST(NeuralCoat_LearnsTheRandomWalk)
     std::error_code ignored;
     std::filesystem::remove_all(settings.cache, ignored);
     const air::pt::NeuralCoatResult trained = air::pt::TrainNeuralCoat(materials, settings, &tasks);
-    EXPECT(!trained.cached && trained.parameters.size() == 852);
+    EXPECT(!trained.cached && trained.parameters.size() == 980);
     air::json::Value check = air::pt::CheckNeuralCoat(materials, trained.parameters, 64, &tasks);
     const double neural = check["neuralError"].AsNumber();
     const double approximate = check["approximateError"].AsNumber();

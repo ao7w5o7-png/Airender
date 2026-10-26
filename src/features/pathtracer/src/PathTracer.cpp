@@ -247,7 +247,7 @@ void PathTracer::UpdateNeuralCoat(const renderer::GpuScene& scene)
     mNeuralCoatLoss = coat.loss;
     std::vector<float> padded = coat.parameters; // a constant buffer: 256-byte multiples
     padded.resize((padded.size() + 63) / 64 * 64, 0.0f);
-    static_assert(gpu::kNeuralCoatParameterVectors * 4 == 852, "PathTracerShared.h: kNeuralCoatParameters / 4");
+    static_assert(gpu::kNeuralCoatParameterVectors * 4 == 980, "PathTracerShared.h: kNeuralCoatParameters / 4");
     mNeuralCoat = renderer::CreateBufferWithData(
         mDevice, {.usage = rhi::BufferUsage::Constant, .debugName = "PathTracer.NeuralCoat"}, padded.data(),
         padded.size() * sizeof(float));

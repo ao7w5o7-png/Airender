@@ -798,4 +798,63 @@ SceneDesc MakeCoated()
     return scene;
 }
 
+// Car paints (Material::flakes): metallic flakes in a pigment under a clear coat, on a long body-like
+// ellipsoid and five spheres in the afternoon sun. Their colour changes from where the flakes face the
+// viewer (face) to grazing (flop).
+SceneDesc MakeCarPaint()
+{
+    SceneDesc scene;
+    scene.name = "car_paint";
+    // Candy and metallic paints tint the flakes' light through a coloured layer (Material::coatColor).
+    struct Paint
+    {
+        const char* name;
+        float3 pigment;
+        float3 flakeColor;
+        float flakes;
+        float flakeRoughness;
+        float3 tint;
+    };
+    const Paint paints[] = {
+        {"CandyRed", {0.3f, 0.01f, 0.01f}, {0.95f, 0.93f, 0.9f}, 0.5f, 0.25f, {0.95f, 0.28f, 0.22f}},
+        {"GoldPearl", {0.5f, 0.38f, 0.2f}, {1.0f, 0.8f, 0.4f}, 0.6f, 0.35f, {1.0f, 0.95f, 0.85f}},
+        {"MidnightBlue", {0.01f, 0.02f, 0.12f}, {0.85f, 0.9f, 1.0f}, 0.35f, 0.18f, {0.35f, 0.5f, 0.95f}},
+        {"Silver", {0.25f, 0.25f, 0.26f}, {0.95f, 0.95f, 0.95f}, 0.8f, 0.4f, {1.0f, 1.0f, 1.0f}},
+        {"SolidBlack", {0.015f, 0.015f, 0.015f}, {0.9f, 0.9f, 0.9f}, 0.0f, 0.3f, {1.0f, 1.0f, 1.0f}},
+    };
+    std::vector<u32> materials;
+    for (const Paint& p : paints)
+    {
+        materials.push_back(AddMaterial(scene, {.name = p.name,
+                                                .baseColor = p.pigment,
+                                                .roughness = 0.8f,
+                                                .metallic = 0.0f,
+                                                .coat = true,
+                                                .coatRoughness = 0.02f,
+                                                .coatColor = p.tint,
+                                                .flakes = p.flakes,
+                                                .flakeRoughness = p.flakeRoughness,
+                                                .flakeColor = p.flakeColor}));
+    }
+    const u32 sphere = AddMesh(scene, MakeSphere("Ball", 0.4f, 96));
+    for (u32 i = 0; i < 5; ++i)
+    {
+        const float x = (float(i) - 2.0f) * 1.05f;
+        SetTransform(AddInstance(scene, paints[i].name, sphere, materials[i]), {x, 0.4f, -1.2f - 0.25f * std::abs(x)});
+    }
+    // The body: the unit sphere stretched to 4.2 x 0.9 x 1.7 m, in candy red.
+    Instance& body = AddInstance(scene, "Body", AddMesh(scene, MakeSphere("Body", 1.0f, 128)), materials[0]);
+    SetBasis(body, {2.1f, 0.0f, 0.0f}, {0.0f, 0.45f, 0.0f}, {0.0f, 0.0f, 0.85f}, {0.0f, 0.45f, 1.0f});
+    const u32 floor = AddMaterial(scene, {.name = "Floor", .baseColor = {0.18f, 0.18f, 0.18f}, .roughness = 0.6f});
+    AddInstance(scene, "Floor",
+                AddMesh(scene, MakeQuad("Floor", {-30.0f, 0.0f, 30.0f}, {30.0f, 0.0f, 30.0f}, {30.0f, 0.0f, -30.0f},
+                                        {-30.0f, 0.0f, -30.0f}, {0.0f, 1.0f, 0.0f})),
+                floor);
+    AddSky(scene, 35.0f, 150.0f);
+    LookAt(scene.camera, {1.3f, 1.3f, 4.4f}, {0.0f, 0.4f, -0.2f});
+    scene.camera.verticalFov = 0.8f;
+    scene.camera.ev100 = 14.0f;
+    return scene;
+}
+
 } // namespace air::renderer::detail

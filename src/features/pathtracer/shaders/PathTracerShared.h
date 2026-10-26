@@ -73,7 +73,7 @@ AIR_CONST float kMissReflectionDistance = 1000.0f; // a reflected ray that leave
 
 // The neural coat's parameters as float4s (NeuralCoat.hlsli kNeuralCoatParameters / 4), the size of its
 // constant buffer before padding to 256 bytes (FrameData::neuralCoat).
-AIR_CONST uint kNeuralCoatParameterVectors = 213u;
+AIR_CONST uint kNeuralCoatParameterVectors = 245u;
 
 // Result of TraceClosest() in the integrator (not stored in buffers).
 struct HitInfo

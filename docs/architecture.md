@@ -499,6 +499,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `braziers` | three overlapping plumes over braziers at dusk, a lantern among them | several volumes and light groups near them (§8.13) |
   | `textured` | a courtyard corner of tiles, bricks and riveted metal plates in the afternoon sun | material textures and normal maps (§8.15), neural texture compression (§8.16) |
   | `coated` | the courtyard with clear coats: red car paint, blue lacquer, amber-lacquered tiles, coated plates | clear coats and their network (§8.17) |
+  | `car_paint` | candy red, gold pearl, midnight blue, silver and solid black paints on a stretched body and five spheres | metallic flakes under clear coats and the network's flake inputs (§8.17) |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -1696,9 +1697,24 @@ part is evaluated (`Bsdf.hlsli`):
   A walk limited to 10 events (pbrt's default) lost 8% of a white coated base: light the interface
   traps by total internal reflection keeps much of its weight for several round trips, so the limit is
   64 and Russian roulette ends walks early.
+- **Car paint** (`Material::flakes`, `flakeRoughness`, `flakeColor`; scene `car_paint`): under the
+  coat, a share of what the light meets is metallic flakes, a metal of `flakeColor` whose flakes'
+  normals spread like a GGX surface of `flakeRoughness`; the rest is the material's own base (its
+  pigment). The walk's base is that mixture (`CoatBaseContext`: both lobes evaluated, either sampled
+  by the share), the approximation takes it too, and from the outside the base's samples draw the
+  flakes' GGX lobe about the mirror direction in that share (`BsdfContext::flakeProbability`), so
+  sampling, evaluation and MIS agree. A coloured layer over them (`coatColor`) tints the flakes'
+  light as a candy paint's does. The network's inputs grew from 32 to 40: the flakes' share,
+  roughness and colour, and how far their lobe peaks at the refracted half vector; without flakes
+  they are 0, and the first layer's other weights are drawn as before, so a coat over a plain base
+  trains exactly the network it did (980 parameters). On `car_paint` (accumulated, 640 x 360, 256
+  frames): the network against the walk -0.02% (16 x 16 blocks within -0.4% .. +0.2%), the
+  approximation -0.31% (5th percentile -6.1%). Not modelled: the sparkle of single flakes (glints).
 - **Validation**: `aircli coat-check [--scene NAME]` (the network and the approximation against the
   walk: errors, albedos), `Coat_*` (white furnace, absorption, reciprocity of the walk, sampling against
-  uniform integration for the walk and the approximation, kernels on the Null device),
+  uniform integration for the walk and the approximation, with flakes too, kernels on the Null device),
+  `Coat_FlakesConserveEnergy` (white flakes in a white pigment reflect all the light; gold flakes in a
+  blue pigment reflect gold towards the mirror direction and blue elsewhere),
   `NeuralCoat_LearnsTheRandomWalk`.
 
 ### 8.18 Scenes from model files

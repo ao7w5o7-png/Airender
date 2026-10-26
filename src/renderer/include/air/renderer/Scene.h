@@ -70,6 +70,12 @@ struct Material
     bool coat = false;
     float coatRoughness = 0.05f;
     float3 coatColor = {1.0f, 1.0f, 1.0f};
+    // Under a coat, metallic flakes (car paint, docs/architecture.md §8.17): this share of what the light
+    // meets under the coat is a metal of flakeColor whose flakes' normals spread like a GGX surface of
+    // flakeRoughness; the rest is the material itself (its pigment).
+    float flakes = 0.0f;
+    float flakeRoughness = 0.3f;
+    float3 flakeColor = {0.9f, 0.9f, 0.9f};
     // A cutout (leaves, chains, decals): where the colour texture's alpha is below this the surface is
     // a hole that rays pass through; 0: opaque. Its instances are non-opaque in the acceleration
     // structure, so it is fixed once the scene is uploaded (SetMaterial keeps it).
@@ -155,6 +161,7 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //                  afternoon sun: normal maps, glazed and metallic texels (MaterialTextures)
 //   coated         the courtyard with clear coats: car paint, lacquered tiles, coated metal plates
 //                  (Material::coat)
+//   car_paint      metallic flake paints under clear coats on a body and five spheres (Material::flakes)
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 // Procedural material textures, size x size texels, repeating (MaterialTextures.cpp): red bricks in

@@ -154,6 +154,9 @@ shader::BsdfMaterial ToShader(const Material& m)
     out.coatRoughness = m.coatRoughness;
     out.coatColor = float3(m.coatColor[0], m.coatColor[1], m.coatColor[2]);
     out.coatSeed = m.coatSeed;
+    out.flakes = m.flakes;
+    out.flakeRoughness = m.flakeRoughness;
+    out.flakeColor = float3(m.flakeColor[0], m.flakeColor[1], m.flakeColor[2]);
     return out;
 }
 
