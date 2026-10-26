@@ -47,7 +47,9 @@ struct EditorOptions
 {
     std::filesystem::path shaderRoot = AIR_DEFAULT_SHADER_DIR;
     std::string scene = "cornell_box";
-    std::vector<std::string> features = {"pathtracer", "tonemap"}; // "dlss" is inserted when available
+    // NRD denoises real-time frames and TAA smooths their edges by default (where they run: D3D12);
+    // "dlss" is inserted in their place when chosen.
+    std::vector<std::string> features = {"pathtracer", "nrd", "taa", "tonemap"};
     u32 width = 1280; // initial render resolution; follows the viewport afterwards
     u32 height = 720;
     bool vsync = true; // off: present as fast as possible (uncapped frame rate, tearing when supported)
@@ -117,6 +119,16 @@ public:
     // Index into kDlssModes; recreates the runner at the mode's render scale while dlss is enabled.
     void SetDlssMode(u32 mode);
     u32 GetDlssMode() const { return mOptions.dlssMode; }
+    // What turns the path tracer's samples into the image: accumulation over frames (progressive, no
+    // denoiser), NRD on real-time frames (with TAA), or DLSS Ray Reconstruction.
+    enum class Denoiser
+    {
+        Accumulate,
+        Nrd,
+        Dlss
+    };
+    Denoiser GetDenoiser() const;
+    void SetDenoiser(Denoiser denoiser);
     // A feature parameter as text ("" if the feature or parameter is missing).
     std::string GetParameter(std::string_view feature, std::string_view name) const;
     // Shader hot reload: polled every BuildUi(); a successful compile recreates the runner.

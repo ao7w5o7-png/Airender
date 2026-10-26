@@ -21,6 +21,7 @@
 
 #include "PathTracerShared.h"
 
+#include <array>
 #include <filesystem>
 #include <vector>
 
@@ -54,22 +55,43 @@ public:
     // (The trace's surfaces trace their own opaque shadows: they read the volumes' slices only.)
     // What a pass that reads the maps (the trace) declares.
     void DeclareShadowReads(rdg::PassBuilder& builder) const;
+    // What a frame's march is for.
+    struct Frame
+    {
+        u32 width = 0;
+        u32 height = 0;
+        u32 samplesPerPixel = 0;
+        u32 debugView = 0;
+        bool reset = false;        // discard the accumulation
+        bool accumulating = false; // the frames are averaged
+        bool furnace = false;
+        // Filter the volumes' layer over frames (VolumeMarch.Temporal) before laying it over the surfaces,
+        // continuing last frame's history when historyValid.
+        bool temporal = false;
+        bool historyValid = false;
+    };
     // The probes (with the trace's scene bindings), then the march of the trace's samples (`surface`)
-    // into `accumulation`; it describes the volumes in the guides where they hide the surfaces.
+    // into `accumulation`; it describes the volumes in the guides where they hide the surfaces (when
+    // they are valid) and writes what they let through of the surfaces' light into
+    // `surfaceTransmittance` (R16F, when valid).
     void AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& scene, const gpu::TraceConstants& trace,
-                   rdg::TextureRef surface, rdg::TextureRef accumulation, const DenoiserGuides& guides, u32 width,
-                   u32 height, u32 samplesPerPixel, u32 debugView, bool reset, bool accumulating, bool furnace);
+                   rdg::TextureRef surface, rdg::TextureRef accumulation, const DenoiserGuides& guides,
+                   rdg::TextureRef surfaceTransmittance, const Frame& frame);
 
     u32 GetLightCount() const { return u32(mLights.size()); }
     u32 GetShadowRenders() const { return mShadowRenders; } // times the maps were rendered
 
 private:
     void ReleaseShadows();
+    void AddTemporalPass(rdg::RenderGraph& graph, const gpu::TraceConstants& trace, rdg::TextureRef surface,
+                         rdg::TextureRef accumulation, rdg::TextureRef surfaceTransmittance, rdg::TextureRef layer,
+                         rdg::TextureRef layerDepth, const Frame& frame);
 
     rhi::Device& mDevice;
     renderer::LazyComputePipeline mShadowPipeline;
     renderer::LazyComputePipeline mProbePipeline;
     renderer::LazyComputePipeline mMarchPipeline;
+    renderer::LazyComputePipeline mTemporalPipeline;
     rhi::BufferHandle mBlueNoise; // StructuredBuffer<uint>, 64 x 64 ranks
 
     // The moment shadow maps: one slice per map (the sun's first, then the light groups', one or
@@ -97,6 +119,15 @@ private:
     u64 mProbeVersion = ~0ull;
     u32 mProbeFrames = 0; // blended into them since they were reset
     u32 mFrame = 0;
+
+    // VolumeMarch.Temporal's filtered layers (RGBA16F): [mLayerCurrent] is written this frame, the other
+    // holds last frame's when mLayerHistory.
+    std::array<rhi::TextureHandle, 2> mLayers;
+    std::array<rhi::Access, 2> mLayersAccess{rhi::Access::None, rhi::Access::None};
+    u32 mLayersWidth = 0;
+    u32 mLayersHeight = 0;
+    u32 mLayerCurrent = 0;
+    bool mLayerHistory = false;
 
     // This frame, from BeginFrame.
     VolumeMarchSettings mSettings;

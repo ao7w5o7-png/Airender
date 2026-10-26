@@ -40,14 +40,16 @@ struct BsdfMaterial
 
 struct BsdfEval
 {
-    float3 fCos; // f(wo, wi) * cos(theta_i)
-    float pdf;   // solid angle pdf of SampleBsdf producing wi
+    float3 fCos;        // f(wo, wi) * cos(theta_i)
+    float3 fCosDiffuse; // the part of fCos from the diffuse base (the rest is specular), for denoisers
+    float pdf;          // solid angle pdf of SampleBsdf producing wi
 };
 
 struct BsdfSample
 {
     float3 wi;
-    float3 weight; // f * cos / pdf
+    float3 weight;        // f * cos / pdf
+    float3 diffuseWeight; // the diffuse base's part of it
     float pdf;
     bool valid;
 };
@@ -203,6 +205,7 @@ BsdfEval EvaluateBsdf(BsdfContext c, float3 wi)
 {
     BsdfEval e;
     e.fCos = float3(0.0f, 0.0f, 0.0f);
+    e.fCosDiffuse = float3(0.0f, 0.0f, 0.0f);
     e.pdf = 0.0f;
     float3 wo = c.wo;
     if (wo.z <= 0.0f || wi.z <= 0.0f)
@@ -220,6 +223,7 @@ BsdfEval EvaluateBsdf(BsdfContext c, float3 wi)
     float esi = LutBilinear(kLutEs, wi.z, c.roughness);
     float3 diffuse = c.material.baseColor * ((1.0f - c.eso) * (1.0f - esi) * c.diffuseScale * wi.z);
     e.fCos = lerp(dielectricSpecular + diffuse, metal, saturate(c.material.metallic));
+    e.fCosDiffuse = diffuse * (1.0f - saturate(c.material.metallic));
     e.pdf = c.specularProbability * GgxVndfReflectionPdf(wo, h, c.alpha) +
             (1.0f - c.specularProbability) * wi.z * kInvPi;
     return e;
@@ -230,6 +234,7 @@ BsdfSample SampleBsdf(BsdfContext c, float uLobe, float2 u)
     BsdfSample s;
     s.wi = float3(0.0f, 0.0f, 1.0f);
     s.weight = 0.0f;
+    s.diffuseWeight = 0.0f;
     s.pdf = 0.0f;
     s.valid = false;
     if (c.wo.z <= 0.0f)
@@ -256,6 +261,7 @@ BsdfSample SampleBsdf(BsdfContext c, float uLobe, float2 u)
     }
     s.pdf = e.pdf;
     s.weight = e.fCos / e.pdf;
+    s.diffuseWeight = e.fCosDiffuse / e.pdf;
     s.valid = true;
     return s;
 }

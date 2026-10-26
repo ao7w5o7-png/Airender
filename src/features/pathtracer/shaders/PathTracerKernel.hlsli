@@ -248,6 +248,8 @@ void TracePixel(uint2 pixel)
 
     uint seed = Pcg(pixel.x + Pcg(pixel.y + Pcg(f.frameIndex)));
     float3 sum = 0.0f;
+    float3 diffuseSum = 0.0f; // kFlagSignals
+    float3 specularSum = 0.0f;
     PathSample first = (PathSample)0;
     float2 firstPixel = float2(pixel) + 0.5f;
     for (uint i = 0; i < f.samplesPerPixel; ++i)
@@ -293,6 +295,8 @@ void TracePixel(uint2 pixel)
         }
 #endif
         sum += value;
+        diffuseSum += s.diffuseRadiance;
+        specularSum += s.specularRadiance;
         if (i == 0)
         {
             first = s;
@@ -347,6 +351,17 @@ void TracePixel(uint2 pixel)
         giReservoirs[pixel.y * f.width + pixel.x] = r;
     }
 #endif
+
+    if ((f.flags & kFlagSignals) != 0u)
+    {
+        // Per sample and exposed (as the resolve makes sceneColor), and the reflected ray's length (the
+        // samples share the camera ray under global jitter).
+        RWTexture2D<float4> diffuseSignal = ResourceDescriptorHeap[g.diffuseSignal];
+        RWTexture2D<float4> specularSignal = ResourceDescriptorHeap[g.specularSignal];
+        float scale = f.exposure / float(f.samplesPerPixel);
+        diffuseSignal[pixel] = float4(diffuseSum * scale, first.reflectionDistance);
+        specularSignal[pixel] = float4(specularSum * scale, first.reflectionDistance);
+    }
 
     if ((f.flags & kFlagGuides) != 0u)
     {

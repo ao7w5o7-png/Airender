@@ -57,6 +57,10 @@ AIR_CONST uint kFlagNrcUnbiased = 1024u; // that training path is never ended by
 // their first hit's distance (a) instead of adding to the accumulation.
 AIR_CONST uint kFlagVolumeMarch = 2048u;
 AIR_CONST uint kFlagProbe = 4096u; // a probe's path for the march's ambient light (VolumeProbes.hlsl)
+// Write the first surface's reflected light split by lobe for a denoiser (TraceConstants::diffuseSignal,
+// specularSignal; the ReSTIR passes add theirs).
+AIR_CONST uint kFlagSignals = 8192u;
+AIR_CONST float kMissReflectionDistance = 1000.0f; // a reflected ray that leaves the scene, metres
 
 // Result of TraceClosest() in the integrator (not stored in buffers).
 struct HitInfo
@@ -128,6 +132,10 @@ struct TraceConstants
     uint primaryHits;     // RWStructuredBuffer<PrimaryHit>, written with kFlagReSTIR or kFlagReSTIRGI
     uint giReservoirs;    // RWStructuredBuffer<GiReservoir>, written with kFlagReSTIRGI
     uint skyTable;        // StructuredBuffer<float>: the sky radiance table (SkyShared.h)
+    // With kFlagSignals (RWTexture2D<float4>): the first surface's reflected light per sample through
+    // its diffuse base and its specular lobes, a = the reflected ray's length.
+    uint diffuseSignal;
+    uint specularSignal;
 };
 
 struct ResolveConstants

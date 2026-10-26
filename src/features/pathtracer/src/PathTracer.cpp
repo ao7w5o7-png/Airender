@@ -228,6 +228,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     mLastSettings = mSettings;
     blackboard.SetValue(slots::kHistoryReset, historyInvalid ? 1.0 : 0.0);
     blackboard.SetValue(slots::kOutputIsDisplay, IsDisplayDebugView(mSettings.debugView) ? 1.0 : 0.0);
+    blackboard.SetValue(slots::kRealTime, mSettings.accumulate ? 0.0 : 1.0);
 
     // Converged: keep showing the result without tracing more samples.
     const bool trace = !IsConverged();
@@ -344,11 +345,13 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     blackboard.SetValue(slots::kJitterX, frame.jitter.x);
     blackboard.SetValue(slots::kJitterY, frame.jitter.y);
     frame.frameIndex = mFrameIndex++;
+    // The first surface's light split by lobe, for a denoiser of the surfaces (real time, lit view).
+    const bool signals = mSettings.signals && mSettings.guides && !mSettings.accumulate && view == gpu::kDebugNone;
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
                   (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restirDi ? gpu::kFlagReSTIR : 0u) |
                   (restirGi ? gpu::kFlagReSTIRGI : 0u) | (nrc ? gpu::kFlagNrc : 0u) |
-                  (march ? gpu::kFlagVolumeMarch | gpu::kFlagGlobalJitter : 0u);
+                  (march ? gpu::kFlagVolumeMarch | gpu::kFlagGlobalJitter : 0u) | (signals ? gpu::kFlagSignals : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -423,6 +426,24 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             blackboard.SetTexture(slots::kViewDepth, guides.viewDepth);
             blackboard.SetTexture(slots::kMotionVectors, guides.motionVectors);
         }
+        rdg::TextureRef diffuseSignal;
+        rdg::TextureRef specularSignal;
+        if (signals)
+        {
+            auto make = [&](const char* name)
+            {
+                return graph.CreateTexture(
+                    {.format = rhi::Format::RGBA16_FLOAT,
+                     .width = width,
+                     .height = height,
+                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                     .debugName = name});
+            };
+            diffuseSignal = make("PathTracer.DiffuseSignal");
+            specularSignal = make("PathTracer.SpecularSignal");
+            blackboard.SetTexture(slots::kDiffuseSignal, diffuseSignal);
+            blackboard.SetTexture(slots::kSpecularSignal, specularSignal);
+        }
 
         ReSTIR::TraceOutputs restirOutputs;
         if (restirDi || restirGi)
@@ -450,7 +471,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                                      .height = height,
                                      .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
                                      .debugName = "PathTracer.FrameSamples"});
-            if (mSettings.guides && !mSettings.accumulate)
+            if (mSettings.transparencyGuides && !mSettings.accumulate)
             {
                 frameSamples = target;
                 colorBefore = graph.CreateTexture(
@@ -480,7 +501,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     }
                 }
                 for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
-                                          guides.viewDepth, guides.motionVectors})
+                                          guides.viewDepth, guides.motionVectors, diffuseSignal, specularSignal})
                 {
                     if (t.IsValid())
                     {
@@ -502,6 +523,11 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     constants.normalRoughness = ctx.UAV(guides.normalRoughness);
                     constants.viewDepth = ctx.UAV(guides.viewDepth);
                     constants.motionVectors = ctx.UAV(guides.motionVectors);
+                }
+                if (diffuseSignal.IsValid())
+                {
+                    constants.diffuseSignal = ctx.UAV(diffuseSignal);
+                    constants.specularSignal = ctx.UAV(specularSignal);
                 }
                 if (primaryHits.IsValid())
                 {
@@ -525,8 +551,37 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
 
         if (march)
         {
-            mVolumeMarcher->AddPasses(graph, scene, constants, target, accumulation, guides, width, height, spp, view,
-                                      (frame.flags & gpu::kFlagReset) != 0u, mSettings.accumulate, mSettings.furnace);
+            // What the volumes leave of the surfaces' light, for a denoiser of the surfaces.
+            rdg::TextureRef surfaceTransmittance;
+            if (signals)
+            {
+                surfaceTransmittance = graph.CreateTexture(
+                    {.format = rhi::Format::R16_FLOAT,
+                     .width = width,
+                     .height = height,
+                     .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                     .debugName = "PathTracer.SurfaceTransmittance"});
+                blackboard.SetTexture(slots::kSurfaceTransmittance, surfaceTransmittance);
+            }
+            // A denoiser of the whole frame wants the guides to describe the volumes where they hide the
+            // surfaces; one of the surfaces alone wants them as they are.
+            const DenoiserGuides marchGuides = mSettings.transparencyGuides ? guides : DenoiserGuides{};
+            VolumeMarcher::Frame marchFrame;
+            marchFrame.width = width;
+            marchFrame.height = height;
+            marchFrame.samplesPerPixel = spp;
+            marchFrame.debugView = view;
+            marchFrame.reset = (frame.flags & gpu::kFlagReset) != 0u;
+            marchFrame.accumulating = mSettings.accumulate;
+            marchFrame.furnace = mSettings.furnace;
+            // In real time the volumes' layer changes from frame to frame; a denoiser of the whole frame
+            // filters it, otherwise the march does (the lit views).
+            marchFrame.temporal = mSettings.volumeMarch.temporal && !mSettings.accumulate &&
+                                  !mSettings.transparencyGuides &&
+                                  (view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect);
+            marchFrame.historyValid = !historyInvalid;
+            mVolumeMarcher->AddPasses(graph, scene, constants, target, accumulation, marchGuides, surfaceTransmittance,
+                                      marchFrame);
         }
 
         if (restirDi || restirGi)
@@ -542,8 +597,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.lightTree = constants.lightTree;
             restirScene.bsdfLut = constants.bsdfLut;
             restirScene.skyTable = constants.skyTable;
-            mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, view != gpu::kDebugIndirect,
-                               view != gpu::kDebugDirect);
+            mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, diffuseSignal, specularSignal,
+                               view != gpu::kDebugIndirect, view != gpu::kDebugDirect);
         }
         if (nrc)
         {

@@ -442,15 +442,28 @@ void Main(uint3 groupId : SV_GroupID, uint index : SV_GroupIndex)
     {
         value = sum; // the surfaces' own views
     }
-    else if ((g.flags & kMarchAir) != 0u && r.transmittance < 1.0f)
-    {
-        Aerial air = AerialPerspective(f.sky, d, r.depth);
-        value = (air.inscatter * (1.0f - r.transmittance) + air.transmittance * r.radiance) * samples +
-                sum * r.transmittance;
-    }
     else
     {
-        value = r.radiance * samples + sum * r.transmittance;
+        float3 front = r.radiance;
+        if ((g.flags & kMarchAir) != 0u && r.transmittance < 1.0f)
+        {
+            Aerial air = AerialPerspective(f.sky, d, r.depth);
+            front = air.inscatter * (1.0f - r.transmittance) + air.transmittance * r.radiance;
+        }
+        if ((g.flags & kMarchLayer) != 0u)
+        {
+            RWTexture2D<float4> layer = ResourceDescriptorHeap[g.layer];
+            RWTexture2D<float> layerDepth = ResourceDescriptorHeap[g.layerDepth];
+            layer[pixel] = float4(front, r.transmittance);
+            layerDepth[pixel] = r.transmittance < 1.0f ? r.depth : 0.0f;
+            return; // VolumeMarch.Temporal lays it over the surfaces
+        }
+        value = front * samples + sum * r.transmittance;
+    }
+    if ((g.flags & kMarchSurfaceTransmittance) != 0u)
+    {
+        RWTexture2D<float> surfaceTransmittance = ResourceDescriptorHeap[g.surfaceTransmittance];
+        surfaceTransmittance[pixel] = r.transmittance;
     }
     RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
     float4 previous = (g.flags & kMarchReset) != 0u ? float4(0.0f, 0.0f, 0.0f, 0.0f) : accumulation[pixel];

@@ -581,8 +581,8 @@ were added:
 
 | Stage | Resolution | Writes | Features |
 |---|---|---|---|
-| `Scene` | render (`FrameContext::renderWidth/Height`) | `FrameContext::sceneColor` | pathtracer |
-| `Upscale` | render -> output | `FrameContext::output`, sets `outputWritten` | dlss |
+| `Scene` | render (`FrameContext::renderWidth/Height`) | `FrameContext::sceneColor` | pathtracer, nrd |
+| `Upscale` | render -> output | `FrameContext::output`, sets `outputWritten` | dlss, taa |
 | `Post` | output (`FrameContext::width/height`) | `FrameContext::output` in place | tonemap, example |
 
 The render resolution is the output resolution times `FrameRunnerDesc::renderScale` (`aircli
@@ -593,7 +593,9 @@ wrote the output (dlss missing, disabled, failed, or a debug view) FrameRunner a
 the output is always defined.
 
 Features communicate only through `renderer::Blackboard` (`FrameContext::blackboard`), never by
-including each other. Slots live in `renderer::slots`:
+including each other. FrameRunner asks every feature for the slots it consumes each frame (a feature
+a parameter switched off consumes none), and producers skip what nobody consumes. Slots live in
+`renderer::slots`:
 
 | Slot | Producer | Contents |
 |---|---|---|
@@ -601,7 +603,10 @@ including each other. Slots live in `renderer::slots`:
 | `kNormalRoughness` | pathtracer | World normal + roughness |
 | `kViewDepth` | pathtracer | Distance along the view axis in metres |
 | `kMotionVectors` | pathtracer | Previous minus current position, in pixels |
-| `kColorBeforeTransparency` | pathtracer (real-time volumes, §8.13) | The frame resolved without the volumes over it |
+| `kColorBeforeTransparency` | pathtracer (real-time volumes, §8.13) | The frame resolved without the volumes over it; consuming it marks a denoiser of the whole frame |
+| `kDiffuseSignal`, `kSpecularSignal` | pathtracer (real time, lit view) | The first surface's reflected light per lobe, a = its reflected ray's length (§8.14) |
+| `kSurfaceTransmittance` | pathtracer (real-time volumes) | What the volumes leave of the surfaces' light (absent: 1) |
+| `kRealTime` | pathtracer | The frame holds its own jittered samples only (not accumulated) |
 | `kJitterX/Y`, `kHistoryReset` | pathtracer | Sub-pixel jitter; history is invalid this frame |
 | `kOutputIsDisplay` | pathtracer | Output is a display-referred debug view: do not tonemap or denoise |
 
@@ -1281,6 +1286,15 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
   0.02 m a frame 0.152 -> 0.017. Over the last four frames the difference's own change from frame to
   frame (flicker) fell from 0.0126 to 0.0045 (99th percentile). Turning in place had no trails (no
   parallax), and a static camera's image is unchanged (within 0.0005).
+- **Over frames** (`volumeTemporal`, `VolumeTemporal.hlsl`): what the march lights changes from frame
+  to frame (its jitter, the maps it reads in turn, the blocks that share light). Accumulation and a
+  denoiser of the whole frame average that; under a denoiser of the surfaces alone (NRD, §8.14) or
+  none, `VolumeMarch.Temporal` does: the march writes its layer (the light in front, the transmittance,
+  the depth that light comes from) instead of laying it over the surfaces, and the pass follows each
+  pixel's layer point back to the previous frame along that depth, clamps the history found there to
+  the 3 x 3 pixels around and blends in `volumeTemporalBlend` (0.1) of this frame. Under NRD at the
+  `braziers` default view, the frame-to-frame deviation's 99th percentile went from 0.0079 to 0.0047
+  (display luminance), and the grain over the embers is gone. 0.1 ms at 1080p.
 - **Debug views** 11 (march steps per pixel, `debugScale` steps to the top of the Turbo colormap),
   12 (sampling rate: blue every pixel, green 2 x 2, red 4 x 4) and 13 (volumes per ray). Direct-only
   (8) and indirect-only (9) leave the probes' and the lights' light out of the march respectively.
@@ -1290,7 +1304,8 @@ volumes; lights cast volume shadows by default, those that matter most to the vo
 Parameters: `volumeMarch`, `volumeStep`, `volumeLevel`, `volumeShadowSize` (256), `volumeShadowLevel`,
 `volumeShadowStep`, `volumeLights`, `volumeLightOrigins`, `volumeAdaptive`, `volumeShareBelow2`,
 `volumeShareBelow4`, `volumeShareFootprint2`, `volumeShareFootprint4`, `volumeAir`,
-`volumeShadowsEveryFrame` (render the maps every frame, to time them). Status: `volumeMarch` (whether it runs), `volumeMarchLights` (light groups with maps).
+`volumeShadowsEveryFrame` (render the maps every frame, to time them), `volumeTemporal`,
+`volumeTemporalBlend`. Status: `volumeMarch` (whether it runs), `volumeMarchLights` (light groups with maps).
 
 **CPU twin** (`pt::RenderVolumeMarchReference`, `VolumeMarchReference.cpp`; `aircli reference
 --volume-march [--frames N] [--probe-frames N] [--volume-step S] [--volume-shadow-size N]
@@ -1357,6 +1372,69 @@ surfaces do not meet them), more than four volumes per 8 x 8 pixels, the march t
 layer (§8.10, which the trace kernels still render), detail finer than the probes beyond what the
 occlusion grid restores, emission.
 
+### 8.14 Real-time denoising: NRD and TAA
+
+In real time (`pathtracer.accumulate=0`, 1 spp) the path tracer's frame is noise. Two chains turn it
+into an image:
+
+| Chain | Features | What it denoises |
+|---|---|---|
+| default (editor) | `pathtracer,nrd,taa,tonemap` | NRD the surfaces' reflected light, TAA the edges; the volumes filter themselves (§8.13) |
+| DLSS | `pathtracer,dlss,tonemap` | Ray Reconstruction the whole frame (§8.5), also anti-aliasing and upscaling |
+
+A feature that consumes `kColorBeforeTransparency` denoises the whole frame: nrd and taa then stand
+aside, and the path tracer describes the volumes in the guides (§8.13).
+
+**Signals** (`slots::kDiffuseSignal`, `kSpecularSignal`, `Integrator.hlsli`): NRD denoises diffuse
+and specular light separately, divided by their albedos, with the length of the ray that brought it.
+`TracePath` (with `kFlagSignals`) splits the light its first vertex reflects by lobe: next event
+estimation there by the BSDF's diffuse part (`BsdfEval::fCosDiffuse`), the rest of the path by the
+diffuse part of the BSDF sample it continued with (`BsdfSample::diffuseWeight`), a medium's
+scattering as diffuse; its own emission and a miss's sky are in neither. ReSTIR DI and GI split their
+shading alike and add it to the signals. The signals are exposed like sceneColor and dimmed by the air
+like it, but not by the volumes in front: those pass `kSurfaceTransmittance`.
+
+**nrd** (`src/features/nrd/`, D3D12, `AIR_WITH_NRD`): NVIDIA's NRD 4.18 built from source
+(`cmake/AirThirdParty.cmake`: NRD, ShaderMake and MathLib downloaded into `.deps`, its shaders compiled
+to DXIL with our dxc; normal encoding R10G10B10A2, linear roughness). Three passes after the path
+tracer, at the render resolution:
+
+| Pass | What it does |
+|---|---|
+| `NRD.Prepare` | each lobe's light divided by its albedo (at least 0.01), sanitized and packed with NRD.hlsli (RELAX: with the hit distance; REBLUR: YCoCg and the normalized hit distance), the normal and roughness packed |
+| `NRD.Denoise` | NRD's own dispatches, recorded with D3D12 into the RHI's command list: a root signature and pipeline per NRD pipeline (root CBV, one descriptor table, static samplers), its textures (committed, states tracked across dispatches), a shader-visible descriptor heap and an upload buffer for its constants, both rings over the frames in flight. The render graph's textures end in the states it declared |
+| `NRD.Composite` | `color += transmittance * (diffuseAlbedo * (denoised - noisy) + specularAlbedo * (...))`: exactly the signals NRD saw are replaced; emission, sky, volumes and anything the signals do not carry stay as they were |
+
+Parameters: `enabled`, `denoiser` (0 RELAX, the default; 1 REBLUR), `historyFrames` (30),
+`antiFirefly`. Camera matrices are the left-handed view with the path tracer's view depth, the motion
+vectors the path tracer's (pixels, previous - current) scaled to UV, the jitter its own.
+
+**taa** (`src/features/taa/`, any backend): the Upscale stage behind nrd. Each output pixel gathers
+the 3 x 3 render samples around it (at pixel + 0.5 + jitter, a Gaussian of the distance), reprojects
+its last result with the motion vectors (Catmull-Rom), clips it to the neighbourhood's colour box in
+YCoCg (mean +- 1.25 deviations) and blends in 0.1 of the frame; so it also upsamples a frame rendered
+below the output size. It stands aside for accumulated frames (`kRealTime` 0) and debug views.
+Weighing samples by 1 / (1 + luminance) against fireflies (Karis) took 5% of the Cornell box's ceiling
+light, whose few pixels hold half the image's energy: the input is denoised, so it is not done.
+
+Measured (RTX 5070, D3D12; display luminance after x / (1 + x)):
+
+- `cornell_box` 960 x 540: one frame's RMSE against 4096 accumulated spp 0.027 noisy, 0.013 NRD,
+  0.0067 NRD + TAA. The mean of 16 frames: noisy -0.3%, NRD -1.2% (RELAX; -1.0% without its
+  anti-firefly, REBLUR -1.5%), NRD + TAA -1.1%.
+- `braziers` 960 x 540: RMSE 0.128 noisy, 0.016 NRD, 0.014 NRD + TAA; mean +0.01%.
+- `braziers` 1920 x 1080 static: the frame-to-frame deviation's 99.9th percentile 0.073 with NRD
+  alone (jittered edges crawl), 0.0084 with TAA (DLSS RR 0.0064). Strafing past the plumes up close
+  at 0.015 m a frame, the last frame against a static camera's at its place: 99th percentile 0.013,
+  the error's flicker 0.0035 (DLSS RR 0.012 and 0.0045).
+- Cost at 1920 x 1080: `NRD.Denoise` 1.7 ms (`cornell_box`) to 2.0 ms (`braziers`), `NRD.Prepare`
+  and `NRD.Composite` 0.1 ms each, TAA 0.1 ms.
+
+Validation: `Nrd_RefusesOnNullDevice`, `Taa_FiltersRealTimeFramesOnly`,
+`PathTracer_SignalsForDenoisersOfSurfaces` (the trace and ReSTIR write the signals, the march leaves
+the guides alone and filters its layer), `Editor_DenoiserChoice`; on the GPU the D3D12 debug layer
+reports no errors for `cornell_box` and `braziers` with `pathtracer,nrd,taa`.
+
 ---
 
 ## 9. Editor
@@ -1372,12 +1450,14 @@ occlusion grid restores, emission.
 
 Panels: Viewport (fly camera: hold right mouse to look, WASD/QE to move, wheel for speed, Shift
 for fast; F12 saves a screenshot), Scene (scene picker, camera,
-EV100, materials), Render (VSync, DLSS toggle and mode, shader hot reload, feature parameters),
+EV100, materials), Render (VSync, the denoiser: accumulation, NRD with TAA (the default where NRD
+runs) or DLSS Ray Reconstruction and its mode; shader hot reload, feature parameters),
 Debug (debug views, furnace, NEE), Profiler (GPU pass timeline with one lane per queue, per-thread CPU scopes,
 frame/GPU/CPU/samples-per-second history; pause with P or Pause and step frame by frame; Export
 HTML writes the profile report of §9.2), Profiler (HTML) (that report, live, inside the editor),
 Memory (VRAM budget, process memory, allocator pools and heaps, a filterable resource table) and Log.
-Command line: `aireditor [--scene NAME] [--features pathtracer,example,tonemap] [--no-vsync] [--dlss]
+Command line (default features `pathtracer,nrd,taa,tonemap`, real time where nrd runs):
+`aireditor [--scene NAME] [--features pathtracer,example,tonemap] [--no-vsync] [--dlss]
 [--dlss-mode quality|...] [--focus WINDOW]`; `--features` replaces the feature chain, e.g. to try a
 new feature or an async compute pass in the editor; `--focus "Profiler (HTML)"` selects that
 window's dock tab at startup (handy for screenshots, as nothing else selects a tab without a click).

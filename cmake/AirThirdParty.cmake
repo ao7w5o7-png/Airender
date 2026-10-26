@@ -11,6 +11,7 @@
 #     preview (AIR_D3D12_PREVIEW) 1.10.2605.37-preview AIR_DXC_PREVIEW_EXECUTABLE  cs_6_10 shaders only
 #   Dear ImGui (docking)        1.93.0          AIR_IMGUI_DIR          editor
 #   NVIDIA DLSS SDK             310.9.1         AIR_DLSS_SDK_DIR       dlss feature (Ray Reconstruction)
+#   NVIDIA NRD (+ ShaderMake, MathLib) 4.18.0   AIR_NRD_DIR            nrd feature (denoisers), built from source
 #   Microsoft WebView2 SDK      1.0.4314.35     AIR_WEBVIEW2_SDK_DIR   editor's HTML profiler panel (Windows)
 #
 # Targets / functions defined here:
@@ -36,6 +37,9 @@ set(AIR_DXC_PREVIEW_VERSION 1.10.2605.37-preview)
 set(AIR_DXC_PREVIEW_SHA256 8cf5ec1a8abb832de43251bae1ffcec89b22240677c599c38d30a18dee2f4de6)
 set(AIR_IMGUI_TAG v1.93.0-docking)
 set(AIR_DLSS_TAG v310.9.1)
+set(AIR_NRD_TAG v4.18.0)
+set(AIR_SHADERMAKE_COMMIT 3f01623a76b092ac127d2debd79a672f55d77665) # NRD v4.18.0's
+set(AIR_MATHLIB_TAG v11)                                             # NRD v4.18.0's
 set(AIR_WEBVIEW2_VERSION 1.0.4314.35)
 set(AIR_WEBVIEW2_SHA256 90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4)
 
@@ -285,6 +289,67 @@ if(AIR_WITH_DLSS)
     else()
         message(WARNING "Airender: DLSS SDK not available, building without DLSS")
         set(AIR_WITH_DLSS OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# NVIDIA Real-time Denoisers (NRD), built from source with its shaders compiled to DXIL by ShaderMake
+# with our dxc. Its own dependencies (ShaderMake, MathLib) are downloaded here too, at the commits its
+# CMakeLists.txt names, and handed to its FetchContent declarations.
+# ---------------------------------------------------------------------------
+# Downloads a GitHub archive (a zip of one top-level folder) and extracts it. Sets <outVar> to that
+# folder or "".
+function(air_fetch_github_archive url name outVar)
+    set(dir "${AIR_DEPS_DIR}/${name}")
+    if(NOT EXISTS "${dir}/.complete")
+        file(MAKE_DIRECTORY "${AIR_DEPS_DIR}")
+        air_download("${url}" "${dir}.zip" ok)
+        if(NOT ok)
+            set(${outVar} "" PARENT_SCOPE)
+            return()
+        endif()
+        file(REMOVE_RECURSE "${dir}")
+        file(ARCHIVE_EXTRACT INPUT "${dir}.zip" DESTINATION "${dir}")
+        file(TOUCH "${dir}/.complete")
+    endif()
+    file(GLOB top LIST_DIRECTORIES true "${dir}/*")
+    list(FILTER top EXCLUDE REGEX "\\.complete$")
+    list(GET top 0 root)
+    set(${outVar} "${root}" PARENT_SCOPE)
+endfunction()
+
+if(AIR_WITH_NRD)
+    set(AIR_NRD_DIR "" CACHE PATH "Local NRD source (github.com/NVIDIA-RTX/NRD)")
+    set(nrdDir "${AIR_NRD_DIR}")
+    if(NOT nrdDir)
+        air_fetch_github_archive("https://github.com/NVIDIA-RTX/NRD/archive/refs/tags/${AIR_NRD_TAG}.zip"
+                                 nrd-${AIR_NRD_TAG} nrdDir)
+    endif()
+    air_fetch_github_archive(
+        "https://github.com/NVIDIA-RTX/ShaderMake/archive/${AIR_SHADERMAKE_COMMIT}.zip"
+        shadermake-${AIR_SHADERMAKE_COMMIT} shaderMakeDir)
+    air_fetch_github_archive("https://github.com/NVIDIA-RTX/MathLib/archive/refs/tags/${AIR_MATHLIB_TAG}.zip"
+                             mathlib-${AIR_MATHLIB_TAG} mathLibDir)
+    if(nrdDir AND shaderMakeDir AND mathLibDir AND AIR_DXC_EXECUTABLE AND EXISTS "${nrdDir}/Include/NRD.h")
+        set(FETCHCONTENT_SOURCE_DIR_SHADERMAKE "${shaderMakeDir}" CACHE PATH "" FORCE)
+        set(FETCHCONTENT_SOURCE_DIR_MATHLIB "${mathLibDir}" CACHE PATH "" FORCE)
+        set(SHADERMAKE_FIND_COMPILERS OFF CACHE BOOL "" FORCE)
+        set(SHADERMAKE_DXC_PATH "${AIR_DXC_EXECUTABLE}" CACHE INTERNAL "")
+        set(NRD_STATIC_LIBRARY ON CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_DXIL_SHADERS ON CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_SPIRV_SHADERS OFF CACHE BOOL "" FORCE)
+        set(NRD_EMBEDS_DXBC_SHADERS OFF CACHE BOOL "" FORCE)
+        # NRD's recommended encoding (octahedral R10G10B10A2, linear roughness): the nrd feature packs the
+        # path tracer's guide into it (the RGBA16 encodings do not compile with this dxc).
+        set(NRD_NORMAL_ENCODING 2 CACHE STRING "" FORCE)
+        set(NRD_ROUGHNESS_ENCODING 1 CACHE STRING "" FORCE)
+        set(NRD_SHADERS_PATH "${CMAKE_BINARY_DIR}/nrd/Shaders" CACHE STRING "" FORCE)
+        add_subdirectory("${nrdDir}" "${CMAKE_BINARY_DIR}/nrd" EXCLUDE_FROM_ALL SYSTEM)
+        set(AIR_NRD_SHADER_INCLUDE "${nrdDir}/Shaders" CACHE INTERNAL "") # NRD.hlsli, for our own passes
+        message(STATUS "Airender: NRD ${nrdDir}")
+    else()
+        message(WARNING "Airender: NRD not available, building without the nrd feature")
+        set(AIR_WITH_NRD OFF CACHE BOOL "" FORCE)
     endif()
 endif()
 

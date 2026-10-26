@@ -143,6 +143,7 @@ VolumeMarchSettings ClampVolumeMarchSettings(const VolumeMarchSettings& settings
     out.shadowLevel = std::min(settings.shadowLevel, air::gpu::kVolumeLevels - 1);
     out.step = std::max(settings.step, 0.05f);
     out.shadowStep = std::max(settings.shadowStep, 0.05f);
+    out.temporalBlend = std::clamp(settings.temporalBlend, 0.01f, 1.0f);
     return out;
 }
 

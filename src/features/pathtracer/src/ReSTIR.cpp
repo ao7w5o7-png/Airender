@@ -147,7 +147,8 @@ ReSTIR::TraceOutputs ReSTIR::BeginFrame(rdg::RenderGraph& graph, u32 width, u32 
 }
 
 void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, const gpu::ReSTIRConstants& scene,
-                       rdg::TextureRef accumulation, bool shadeDirect, bool shadeIndirect)
+                       rdg::TextureRef accumulation, rdg::TextureRef diffuseSignal, rdg::TextureRef specularSignal,
+                       bool shadeDirect, bool shadeIndirect)
 {
     AIR_CHECK(mHitsRef.IsValid(), "ReSTIR::AddPasses without BeginFrame()");
     const u32 width = mWidth;
@@ -175,7 +176,8 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                        auto bind)
     {
         gpu::ReSTIRConstants constants = base;
-        constants.flags = flags;
+        const bool signals = shades && diffuseSignal.IsValid();
+        constants.flags = flags | (signals ? gpu::kReSTIRSignals : 0u);
         graph.AddPass(
             name, rdg::PassFlags::Compute,
             [&](rdg::PassBuilder& b)
@@ -195,6 +197,11 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                 {
                     b.Write(accumulation, Access::UAVCompute);
                 }
+                if (signals)
+                {
+                    b.Write(diffuseSignal, Access::UAVCompute);
+                    b.Write(specularSignal, Access::UAVCompute);
+                }
             },
             [=](rdg::PassContext& ctx) mutable
             {
@@ -202,6 +209,11 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                 if (shades)
                 {
                     constants.accumulation = ctx.UAV(accumulation);
+                }
+                if (signals)
+                {
+                    constants.diffuseSignal = ctx.UAV(diffuseSignal);
+                    constants.specularSignal = ctx.UAV(specularSignal);
                 }
                 bind(ctx, constants);
                 ctx.cmd.SetPipeline(pipeline);

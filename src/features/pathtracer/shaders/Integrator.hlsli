@@ -176,6 +176,12 @@ struct PathSample
     uint primitive;
     float2 barycentrics;
     GiPath gi; // with kFlagRecordGi
+    // With kFlagSignals, for denoisers: the light the first vertex reflects, split by the lobe that
+    // reflects it (its own emission, and the sky a miss sees, are in neither), and how far its
+    // reflected ray went (0: none).
+    float3 diffuseRadiance;
+    float3 specularRadiance;
+    float reflectionDistance;
 };
 
 float3 TransformRow3(float4 r0, float4 r1, float4 r2, float3 p, float w)
@@ -533,6 +539,8 @@ void AddAerialPerspective(IntegratorParams params, float3 direction, AIR_INOUT(P
         Aerial air = AerialPerspective(params.sky, direction, s.hitDistance);
         s.radiance = air.inscatter + air.transmittance * s.radiance;
         s.directRadiance = air.inscatter + air.transmittance * s.directRadiance;
+        s.diffuseRadiance *= air.transmittance;
+        s.specularRadiance *= air.transmittance;
     }
 }
 
@@ -645,6 +653,15 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.gi.radianceFixed = float3(0.0f, 0.0f, 0.0f);
     result.gi.lightPdf = 0.0f;
     result.gi.weight = 0.0f;
+    result.diffuseRadiance = float3(0.0f, 0.0f, 0.0f);
+    result.specularRadiance = float3(0.0f, 0.0f, 0.0f);
+    result.reflectionDistance = 0.0f;
+    // The split: the first vertex's next event estimation goes by its BSDF's parts, the rest of the
+    // path (from `reflectedFrom` on) by those of the BSDF sample it continued with.
+    bool signals = (params.flags & kFlagSignals) != 0u;
+    bool reflected = false;
+    float3 reflectedFrom = float3(0.0f, 0.0f, 0.0f);
+    float3 diffuseShare = float3(0.0f, 0.0f, 0.0f);
 
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
     bool sunNee = HasSun(params.sky) && (params.flags & (kFlagNoNee | kFlagFurnace)) == 0u;
@@ -710,6 +727,10 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     {
         HitInfo hit = TraceClosest(origin, direction, bounce);
         bool direct = bounce <= 1u;
+        if (bounce == 1u && reflected)
+        {
+            result.reflectionDistance = hit.hit ? hit.t : kMissReflectionDistance;
+        }
         bool beyondX2 = gi && bounce >= 2u; // light found here is the continuation candidate's
 
 #if AIR_PT_VOLUME
@@ -779,6 +800,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     if (bounce == 0u)
                     {
                         result.directRadiance += contribution;
+                        result.diffuseRadiance += contribution;
                     }
                 }
             }
@@ -797,11 +819,18 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     if (bounce == 0u)
                     {
                         result.directRadiance += contribution;
+                        result.diffuseRadiance += contribution;
                     }
                 }
             }
             // Continue along a direction the phase function chose.
             float3 next = SampleVolumePhase(volume, direction, Rand2(seed));
+            if (bounce == 0u)
+            {
+                reflected = true; // a medium reflects like a diffuse surface
+                reflectedFrom = result.radiance;
+                diffuseShare = float3(1.0f, 1.0f, 1.0f);
+            }
             previousBsdfPdf = VolumePhase(volume, dot(direction, next));
             previousPosition = p;
             previousNormal = float3(0.0f, 0.0f, 0.0f);
@@ -1074,6 +1103,9 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                         if (bounce == 0u)
                         {
                             result.directRadiance += contribution;
+                            float3 diffuse = throughput * e.fCosDiffuse * light.radiance * (weight / lightPdf);
+                            result.diffuseRadiance += diffuse;
+                            result.specularRadiance += contribution - diffuse;
                         }
                     }
                 }
@@ -1119,6 +1151,9 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                         if (bounce == 0u)
                         {
                             result.directRadiance += contribution;
+                            float3 diffuse = throughput * e.fCosDiffuse * sunRadiance * (weight / sunPdf);
+                            result.diffuseRadiance += diffuse;
+                            result.specularRadiance += contribution - diffuse;
                         }
                     }
                 }
@@ -1139,6 +1174,13 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             break; // shading normal sent the ray into the surface
         }
         throughput *= bs.weight;
+        if (bounce == 0u)
+        {
+            reflected = true;
+            reflectedFrom = result.radiance;
+            // diffuseWeight is 0 wherever weight is.
+            diffuseShare = bs.diffuseWeight / max(bs.weight, float3(1e-30f, 1e-30f, 1e-30f));
+        }
         if (gi && bounce == 0u)
         {
             firstBsdfPdf = bs.pdf;
@@ -1243,6 +1285,12 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         }
     }
 #endif
+    if (signals && reflected)
+    {
+        float3 rest = result.radiance - reflectedFrom;
+        result.diffuseRadiance += rest * diffuseShare;
+        result.specularRadiance += rest * (1.0f - diffuseShare);
+    }
     return result;
 }
 

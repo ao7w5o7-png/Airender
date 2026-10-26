@@ -110,6 +110,10 @@ struct VolumeMarchSettings
     float shareFootprint4 = 4.0f;
     // Render the shadow maps every frame (to measure them) instead of when what they show changed.
     bool everyFrame = false;
+    // In real time without a denoiser of the whole frame: filter the volumes' layer over frames
+    // (VolumeTemporal.hlsl), this frame's weight temporalBlend.
+    bool temporal = true;
+    float temporalBlend = 0.1f;
 
     bool operator==(const VolumeMarchSettings&) const = default;
 };
@@ -125,6 +129,11 @@ struct PathTracerSettings
     // which needs the frame's jitter from the blackboard).
     bool accumulate = true;
     bool guides = true; // write the denoiser guide textures (blackboard slots::kDiffuseAlbedo ...)
+    // Set by the feature from what other features consume (not parameters): the first surface's light
+    // split by lobe (slots::kDiffuseSignal ...), and, under real-time volumes, guides that describe the
+    // volumes where they hide the surfaces with the frame without them (slots::kColorBeforeTransparency).
+    bool signals = false;
+    bool transparencyGuides = false;
     bool nextEventEstimation = true;
     // NEE at the first lightTreeBounces path vertices chooses lights with the light tree (power,
     // distance and orientation from the vertex), deeper ones by power alone (O(1)). 0: by power only.

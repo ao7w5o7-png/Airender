@@ -49,7 +49,12 @@ VolumeMarcher::~VolumeMarcher()
     ReleaseShadows();
     Destroy(mDevice, mProbes);
     Destroy(mDevice, mBlueNoise);
-    for (renderer::LazyComputePipeline* pipeline : {&mShadowPipeline, &mProbePipeline, &mMarchPipeline})
+    for (rhi::TextureHandle& layer : mLayers)
+    {
+        Destroy(mDevice, layer);
+    }
+    for (renderer::LazyComputePipeline* pipeline :
+         {&mShadowPipeline, &mProbePipeline, &mMarchPipeline, &mTemporalPipeline})
     {
         pipeline->Destroy(mDevice);
     }
@@ -61,11 +66,14 @@ void VolumeMarcher::Initialize(const std::filesystem::path& shaderDir)
                          sizeof(gpu::VolumeShadowConstants));
     mProbePipeline.Load(mDevice, shaderDir, "VolumeProbes.cs", "VolumeMarch.Probes", sizeof(gpu::VolumeProbeConstants));
     mMarchPipeline.Load(mDevice, shaderDir, "VolumeMarch.cs", "VolumeMarch.March", sizeof(gpu::VolumeMarchConstants));
+    mTemporalPipeline.Load(mDevice, shaderDir, "VolumeTemporal.cs", "VolumeMarch.Temporal",
+                           sizeof(gpu::VolumeTemporalConstants));
 }
 
 bool VolumeMarcher::IsAvailable() const
 {
-    return mShadowPipeline.IsAvailable() && mProbePipeline.IsAvailable() && mMarchPipeline.IsAvailable();
+    return mShadowPipeline.IsAvailable() && mProbePipeline.IsAvailable() && mMarchPipeline.IsAvailable() &&
+           mTemporalPipeline.IsAvailable();
 }
 
 void VolumeMarcher::ReleaseShadows()
@@ -102,6 +110,8 @@ void VolumeMarcher::BeginFrame(rdg::RenderGraph& graph, const renderer::GpuScene
     shadowKey.step = 0.0f;
     shadowKey.level = 0;
     shadowKey.air = false;
+    shadowKey.temporal = false;
+    shadowKey.temporalBlend = 0.0f;
     mRenderShadows = mShadowSize != mSettings.shadowSize || scene.version != mShadowVersion ||
                      !(shadowKey == mShadowSettings) || mSettings.everyFrame || !mMaps.IsValid();
     if (mRenderShadows)
@@ -218,9 +228,12 @@ void VolumeMarcher::DeclareShadowReads(rdg::PassBuilder& builder) const
 
 void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& scene,
                               const gpu::TraceConstants& trace, rdg::TextureRef surface, rdg::TextureRef accumulation,
-                              const DenoiserGuides& guides, u32 width, u32 height, u32 samplesPerPixel, u32 debugView,
-                              bool reset, bool accumulating, bool furnace)
+                              const DenoiserGuides& guides, rdg::TextureRef surfaceTransmittance, const Frame& frame)
 {
+    const u32 width = frame.width;
+    const u32 height = frame.height;
+    const u32 debugView = frame.debugView;
+    const bool accumulating = frame.accumulating;
     const u32 volumes = u32(scene.volumeMarch.size());
     AIR_CHECK(volumes > 0 && volumes <= air::gpu::kMaxVolumes, "VolumeMarch: {} volumes", volumes);
 
@@ -303,18 +316,37 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
     c.marchLightCount = u32(mLights.size());
     c.level = mSettings.level;
     c.stepScale = mSettings.step;
+    // The layer of the volumes, filtered over frames by VolumeMarch.Temporal, which lays it over the surfaces.
+    const bool temporal = frame.temporal && mTemporalPipeline.IsAvailable();
+    rdg::TextureRef layer;
+    rdg::TextureRef layerDepth;
+    if (temporal)
+    {
+        auto make = [&](rhi::Format format, const char* name)
+        {
+            return graph.CreateTexture({.format = format,
+                                        .width = width,
+                                        .height = height,
+                                        .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                                        .debugName = name});
+        };
+        layer = make(rhi::Format::RGBA16_FLOAT, "VolumeMarch.Layer");
+        layerDepth = make(rhi::Format::R32_FLOAT, "VolumeMarch.LayerDepth");
+    }
     c.flags =
-        (reset ? gpu::kMarchReset : 0u) |
+        (frame.reset ? gpu::kMarchReset : 0u) |
         (mSettings.air && scene.sky.aerialDistance > 0.0f && scene.aerialInscatter.IsValid() ? gpu::kMarchAir : 0u) |
         (debugView == gpu::kDebugIndirect ? gpu::kMarchNoDirect : 0u) |
-        (debugView == gpu::kDebugDirect ? gpu::kMarchNoIndirect : 0u) | (furnace ? gpu::kMarchFurnace : 0u) |
-        (mSettings.adaptive ? gpu::kMarchAdaptive : 0u) | (guides.diffuseAlbedo.IsValid() ? gpu::kMarchGuides : 0u);
+        (debugView == gpu::kDebugDirect ? gpu::kMarchNoIndirect : 0u) | (frame.furnace ? gpu::kMarchFurnace : 0u) |
+        (mSettings.adaptive ? gpu::kMarchAdaptive : 0u) | (guides.diffuseAlbedo.IsValid() ? gpu::kMarchGuides : 0u) |
+        (surfaceTransmittance.IsValid() && !temporal ? gpu::kMarchSurfaceTransmittance : 0u) |
+        (temporal ? gpu::kMarchLayer : 0u);
     c.shareBelow2 = mSettings.shareBelow2;
     c.shareBelow4 = std::min(mSettings.shareBelow4, mSettings.shareBelow2);
     c.shareFootprint2 = mSettings.shareFootprint2;
     c.shareFootprint4 = std::max(mSettings.shareFootprint4, mSettings.shareFootprint2);
     c.view = debugView;
-    c.samplesPerPixel = samplesPerPixel;
+    c.samplesPerPixel = frame.samplesPerPixel;
     c.probeVolumes = volumes;
     graph.AddPass(
         "VolumeMarch.March", rdg::PassFlags::Compute,
@@ -325,7 +357,15 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
             b.Read(moments, kRest);
             b.Read(occluders, kRest);
             b.Read(probes, kRest);
-            b.Write(accumulation, Access::UAVCompute);
+            if (temporal)
+            {
+                b.Write(layer, Access::UAVCompute);
+                b.Write(layerDepth, Access::UAVCompute);
+            }
+            else
+            {
+                b.Write(accumulation, Access::UAVCompute);
+            }
             if (guides.diffuseAlbedo.IsValid())
             {
                 for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
@@ -334,11 +374,23 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
                     b.Write(t, Access::UAVCompute);
                 }
             }
+            if (surfaceTransmittance.IsValid() && !temporal)
+            {
+                b.Write(surfaceTransmittance, Access::UAVCompute);
+            }
         },
         [=](rdg::PassContext& ctx) mutable
         {
             c.surface = ctx.SRV(surface);
-            c.accumulation = ctx.UAV(accumulation);
+            if (temporal)
+            {
+                c.layer = ctx.UAV(layer);
+                c.layerDepth = ctx.UAV(layerDepth);
+            }
+            else
+            {
+                c.accumulation = ctx.UAV(accumulation);
+            }
             c.probes = ctx.SRV(probes);
             if (guides.diffuseAlbedo.IsValid())
             {
@@ -348,11 +400,108 @@ void VolumeMarcher::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene&
                 c.viewDepth = ctx.UAV(guides.viewDepth);
                 c.motionVectors = ctx.UAV(guides.motionVectors);
             }
+            if (surfaceTransmittance.IsValid() && !temporal)
+            {
+                c.surfaceTransmittance = ctx.UAV(surfaceTransmittance);
+            }
             ctx.cmd.SetPipeline(pipeline);
             ctx.cmd.PushConstants(&c, sizeof(c));
             // Tiles over the image moved by up to kMarchTile - 1 pixels (VolumeMarch.hlsl moves them every frame).
             constexpr u32 kReach = 2 * gpu::kMarchTile - 2;
             ctx.cmd.Dispatch((width + kReach) / gpu::kMarchTile, (height + kReach) / gpu::kMarchTile, 1);
+        });
+    if (temporal)
+    {
+        AddTemporalPass(graph, trace, surface, accumulation, surfaceTransmittance, layer, layerDepth, frame);
+    }
+    else
+    {
+        mLayerHistory = false;
+    }
+}
+
+void VolumeMarcher::AddTemporalPass(rdg::RenderGraph& graph, const gpu::TraceConstants& trace, rdg::TextureRef surface,
+                                    rdg::TextureRef accumulation, rdg::TextureRef surfaceTransmittance,
+                                    rdg::TextureRef layer, rdg::TextureRef layerDepth, const Frame& frame)
+{
+    if (mLayersWidth != frame.width || mLayersHeight != frame.height || !mLayers[0].IsValid())
+    {
+        for (u32 i = 0; i < 2; ++i)
+        {
+            Destroy(mDevice, mLayers[i]);
+            mLayers[i] = mDevice.CreateTexture(
+                {.format = rhi::Format::RGBA16_FLOAT,
+                 .width = frame.width,
+                 .height = frame.height,
+                 .usage = rhi::TextureUsage::UnorderedAccess | rhi::TextureUsage::ShaderResource,
+                 .debugName = i == 0 ? "VolumeMarch.FilteredLayer[0]" : "VolumeMarch.FilteredLayer[1]"});
+            mLayersAccess[i] = Access::None;
+        }
+        mLayersWidth = frame.width;
+        mLayersHeight = frame.height;
+        mLayerHistory = false;
+    }
+    const bool history = mLayerHistory && frame.historyValid;
+    const u32 current = mLayerCurrent;
+    const rdg::TextureRef filtered = graph.ImportTexture(mLayers[current], mLayersAccess[current], kRest);
+    mLayersAccess[current] = kRest;
+    rdg::TextureRef past;
+    if (history)
+    {
+        past = graph.ImportTexture(mLayers[current ^ 1u], mLayersAccess[current ^ 1u], kRest);
+        mLayersAccess[current ^ 1u] = kRest;
+    }
+    mLayerCurrent ^= 1u;
+    mLayerHistory = true;
+
+    const rhi::PipelineHandle pipeline = mTemporalPipeline.Get(mDevice);
+    AIR_CHECK(pipeline.IsValid(), "VolumeMarch.Temporal did not compile");
+    gpu::VolumeTemporalConstants c{};
+    c.frameData = trace.frameData;
+    c.frameSlot = trace.frameSlot;
+    c.samplesPerPixel = frame.samplesPerPixel;
+    c.reset = frame.reset ? 1u : 0u;
+    c.blend = mSettings.temporalBlend;
+    c.history = air::gpu::kInvalidIndex;
+    c.surfaceTransmittance = air::gpu::kInvalidIndex;
+    const u32 width = frame.width;
+    const u32 height = frame.height;
+    graph.AddPass(
+        "VolumeMarch.Temporal", rdg::PassFlags::Compute,
+        [&](rdg::PassBuilder& b)
+        {
+            b.Read(layer, kRest);
+            b.Read(layerDepth, kRest);
+            b.Read(surface, kRest);
+            if (past.IsValid())
+            {
+                b.Read(past, kRest);
+            }
+            b.Write(filtered, Access::UAVCompute);
+            b.Write(accumulation, Access::UAVCompute);
+            if (surfaceTransmittance.IsValid())
+            {
+                b.Write(surfaceTransmittance, Access::UAVCompute);
+            }
+        },
+        [=](rdg::PassContext& ctx) mutable
+        {
+            c.layer = ctx.SRV(layer);
+            c.layerDepth = ctx.SRV(layerDepth);
+            c.surface = ctx.SRV(surface);
+            c.accumulation = ctx.UAV(accumulation);
+            c.filtered = ctx.UAV(filtered);
+            if (past.IsValid())
+            {
+                c.history = ctx.SRV(past);
+            }
+            if (surfaceTransmittance.IsValid())
+            {
+                c.surfaceTransmittance = ctx.UAV(surfaceTransmittance);
+            }
+            ctx.cmd.SetPipeline(pipeline);
+            ctx.cmd.PushConstants(&c, sizeof(c));
+            ctx.cmd.Dispatch((width + 7) / 8, (height + 7) / 8, 1);
         });
 }
 

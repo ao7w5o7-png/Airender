@@ -14,6 +14,7 @@ using namespace air::hlsl;
 AIR_CONST uint kReSTIRUnbiased = 1u; // trace the visibility the MIS weights need (else a darkening bias)
 AIR_CONST uint kReSTIRTemporal = 2u; // last frame's primary hits and reservoirs are valid
 AIR_CONST uint kReSTIRShade = 4u;    // the spatial pass adds its estimate to the accumulation
+AIR_CONST uint kReSTIRSignals = 8u;  // and its split by lobe to the denoiser signals (kFlagSignals)
 AIR_CONST uint kReSTIRMaxSpatialSamples = 16u;
 AIR_CONST uint kReSTIRMaxLight = 0xFFFFFFu; // light indices have 24 bits in a reservoir
 
@@ -80,7 +81,8 @@ struct ReSTIRConstants
     float spatialRadius;      // pixels
     float maxConfidence;      // cap of the temporal history's M
     uint skyTable;            // StructuredBuffer<float> (SkyShared.h), for the integrator's hooks
-    uint pad1;
+    uint diffuseSignal;       // RWTexture2D<float4>, with kReSTIRSignals (TraceConstants::diffuseSignal)
+    uint specularSignal;
 };
 
 #ifdef __cplusplus

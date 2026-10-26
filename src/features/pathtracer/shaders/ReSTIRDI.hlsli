@@ -37,6 +37,7 @@ struct LightSample
 struct LightPoint
 {
     float3 contribution;
+    float3 diffuse; // the part of it the diffuse base reflects
     float3 wi; // towards the point
     float dist;
     float cosLight;
@@ -47,6 +48,7 @@ LightPoint EvaluateLightPoint(Receiver r, LightTriangle light, float2 b)
 {
     LightPoint lp;
     lp.contribution = float3(0.0f, 0.0f, 0.0f);
+    lp.diffuse = float3(0.0f, 0.0f, 0.0f);
     lp.wi = float3(0.0f, 0.0f, 1.0f);
     lp.dist = 0.0f;
     lp.cosLight = 0.0f;
@@ -67,6 +69,7 @@ LightPoint EvaluateLightPoint(Receiver r, LightTriangle light, float2 b)
     BsdfEval e = EvaluateBsdf(r.bsdf, ToLocal(r.frame, lp.wi));
     lp.bsdfPdf = e.pdf;
     lp.contribution = e.fCos * light.radiance * (lp.cosLight / dist2);
+    lp.diffuse = e.fCosDiffuse * light.radiance * (lp.cosLight / dist2);
     return lp;
 }
 
@@ -372,6 +375,7 @@ void SpatialPass(uint2 pixel)
     float pc = canonical.W > 0.0f ? Luminance(canonicalPoint.contribution) : 0.0f; // visible: zeroed otherwise
     float canonicalMis = cc / total;
     float3 direct = float3(0.0f, 0.0f, 0.0f);
+    float3 directDiffuse = float3(0.0f, 0.0f, 0.0f);
     uint seed = StreamSeed(pixel, f.frameIndex, 4u);
     Resampler s = MakeResampler();
     draw = firstDraw;
@@ -399,6 +403,7 @@ void SpatialPass(uint2 pixel)
                 float m = (neighbourConfidence / total) * n.M * pn / (neighbourConfidence * pn + cc * pq);
                 Stream(s, n.y, pq, m * pq * n.W, j + 1u, seed);
                 direct += lp.contribution * (m * n.W);
+                directDiffuse += lp.diffuse * (m * n.W);
             }
         }
     }
@@ -406,12 +411,21 @@ void SpatialPass(uint2 pixel)
     {
         Stream(s, canonical.y, pc, canonicalMis * pc * canonical.W, 0u, seed);
         direct += canonicalPoint.contribution * (canonicalMis * canonical.W);
+        directDiffuse += canonicalPoint.diffuse * (canonicalMis * canonical.W);
     }
     ReservoirState result = Finish(s, total);
     if ((g.flags & kReSTIRShade) != 0u && any(direct > 0.0f) && all(isfinite(direct)))
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
-        accumulation[pixel] += float4(direct * CameraAirTransmittance(f, r.position) * float(f.samplesPerPixel), 0.0f);
+        float3 air = CameraAirTransmittance(f, r.position);
+        accumulation[pixel] += float4(direct * air * float(f.samplesPerPixel), 0.0f);
+        if ((g.flags & kReSTIRSignals) != 0u)
+        {
+            RWTexture2D<float4> diffuseSignal = ResourceDescriptorHeap[g.diffuseSignal];
+            RWTexture2D<float4> specularSignal = ResourceDescriptorHeap[g.specularSignal];
+            diffuseSignal[pixel] += float4(directDiffuse * air * f.exposure, 0.0f);
+            specularSignal[pixel] += float4((direct - directDiffuse) * air * f.exposure, 0.0f);
+        }
     }
     history[index] = Pack(result);
 }

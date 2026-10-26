@@ -74,13 +74,27 @@ inline constexpr std::string_view kNormalRoughness = "guide.normalRoughness"; //
 inline constexpr std::string_view kViewDepth = "guide.viewDepth";             // R32F, metres along the view axis
 inline constexpr std::string_view kMotionVectors = "guide.motionVectors";     // RG16F, previous - current, pixels
 // RGBA16F, like sceneColor: the frame before transparent media (real-time volumes) were laid over it.
+// Consumed by a denoiser of the whole frame, which also wants the guides to describe those media where
+// they hide the surfaces.
 inline constexpr std::string_view kColorBeforeTransparency = "guide.colorBeforeTransparency";
+// Noisy signals for denoisers that work on the surfaces' light alone (RGBA16F, scene-linear like
+// sceneColor): the light the first surface reflects through its diffuse base and through its specular
+// lobes (not divided by the albedos), a = the length of its reflected ray (0: none). Its own emission,
+// the sky, and media in front of it are in neither.
+inline constexpr std::string_view kDiffuseSignal = "signal.diffuse";
+inline constexpr std::string_view kSpecularSignal = "signal.specular";
+// R16F: how much of the surface's light reaches the camera through media in front of it (real-time
+// volumes); absent means 1. sceneColor = what lies in front + this * (emission + diffuse + specular).
+inline constexpr std::string_view kSurfaceTransmittance = "signal.surfaceTransmittance";
 // Values.
 inline constexpr std::string_view kJitterX = "camera.jitterX"; // sub-pixel offset of the frame's samples, pixels
 inline constexpr std::string_view kJitterY = "camera.jitterY";
 // 1 when temporal history is meaningless (first frame, scene or render settings changed); camera
 // motion alone does not reset it.
 inline constexpr std::string_view kHistoryReset = "history.reset";
+// 1 when sceneColor holds this frame's samples alone (at the jitter above), for temporal filters; 0
+// when the producer averages frames itself (accumulation).
+inline constexpr std::string_view kRealTime = "frame.realTime";
 // 1 when the output is already display-referred (debug views): no tone curve.
 inline constexpr std::string_view kOutputIsDisplay = "output.isDisplay";
 } // namespace slots
@@ -145,7 +159,8 @@ public:
     virtual json::Value GetStatus() const { return {}; }
     // Fixed for the feature's lifetime. Post is right for anything that works on the output.
     virtual FeatureStage GetStage() const { return FeatureStage::Post; }
-    // Blackboard slots this feature reads, so their producers know someone needs them.
+    // Blackboard slots this feature reads, so their producers know someone needs them. Asked every
+    // frame: a feature that a parameter switched off returns none.
     virtual std::vector<std::string_view> ConsumedSlots() const { return {}; }
 
     ParameterSet& Parameters() { return mParameters; }

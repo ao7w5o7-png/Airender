@@ -199,6 +199,11 @@ public:
 
     std::vector<std::string_view> ConsumedSlots() const override
     {
+        std::lock_guard lock(mHandleMutex);
+        if (!mEnabled || mCreateFailed)
+        {
+            return {};
+        }
         return {slots::kDiffuseAlbedo, slots::kSpecularAlbedo, slots::kNormalRoughness,
                 slots::kViewDepth,     slots::kMotionVectors,  slots::kColorBeforeTransparency};
     }

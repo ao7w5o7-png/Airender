@@ -3,7 +3,7 @@
 # Each directory under src/features/ with a CMakeLists.txt is a feature. It calls:
 #
 #   air_add_feature(NAME pathtracer SOURCES src/PathTracer.cpp ... TESTS tests/PathTracerTests.cpp
-#                   [LIBRARIES <extra third-party targets>])
+#                   [LIBRARIES <extra third-party targets>] [SHADER_INCLUDE_DIRS <dirs for its HLSL>])
 #
 # which creates the library air_feature_<NAME> (linked against air_renderer only), adds the
 # feature's include/ and shaders/ directories, compiles every shaders/*.hlsl with DXC into
@@ -14,7 +14,7 @@
 set_property(GLOBAL PROPERTY AIR_FEATURE_NAMES "")
 
 function(air_add_feature)
-    cmake_parse_arguments(ARG "" "NAME" "SOURCES;TESTS;LIBRARIES" ${ARGN})
+    cmake_parse_arguments(ARG "" "NAME" "SOURCES;TESTS;LIBRARIES;SHADER_INCLUDE_DIRS" ${ARGN})
     if(NOT ARG_NAME MATCHES "^[a-z][a-z0-9_]*$")
         message(FATAL_ERROR "air_add_feature: NAME '${ARG_NAME}' must be lower_snake_case")
     endif()
@@ -28,7 +28,7 @@ function(air_add_feature)
     air_target_defaults(${target})
     file(GLOB shaders CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.hlsl)
     air_compile_shaders(TARGET ${target} NAME ${ARG_NAME} SOURCES ${shaders}
-                        INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+                        INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${ARG_SHADER_INCLUDE_DIRS})
     set_property(GLOBAL APPEND PROPERTY AIR_FEATURE_NAMES ${ARG_NAME})
     foreach(test IN LISTS ARG_TESTS)
         set_property(GLOBAL APPEND PROPERTY AIR_FEATURE_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/${test})

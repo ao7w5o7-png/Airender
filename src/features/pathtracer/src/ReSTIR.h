@@ -45,9 +45,11 @@ public:
 
     // Adds the passes of the kinds BeginFrame started. `scene` carries the trace pass's frame and scene
     // indices. The spatial passes add their estimates into `accumulation` when shadeDirect /
-    // shadeIndirect (the views that show that light).
+    // shadeIndirect (the views that show that light), and split by lobe into the denoiser signals when
+    // they are valid (slots::kDiffuseSignal, kSpecularSignal).
     void AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, const gpu::ReSTIRConstants& scene,
-                   rdg::TextureRef accumulation, bool shadeDirect, bool shadeIndirect);
+                   rdg::TextureRef accumulation, rdg::TextureRef diffuseSignal, rdg::TextureRef specularSignal,
+                   bool shadeDirect, bool shadeIndirect);
 
     // A frame without ReSTIR: the next one starts without history.
     void Invalidate();

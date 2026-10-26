@@ -126,6 +126,10 @@ public:
         mParameters.Add(
             "volumeShadowsEveryFrame", &march.everyFrame,
             "Real-time volumes: render the shadow maps every frame (to time them), not only when they change");
+        mParameters.Add("volumeTemporal", &march.temporal,
+                        "Real-time volumes: filter their light over frames when no denoiser of the whole frame does");
+        mParameters.Add("volumeTemporalBlend", &march.temporalBlend,
+                        "Real-time volumes: the weight of a frame in that filter", 0.01f, 1.0f);
         mParameters.Add("furnace", &mSettings.furnace,
                         "White furnace: white materials, lights off; energy conservation shows as a flat grey image");
         mParameters.Add("debugView", &mSettings.debugView,
@@ -164,8 +168,14 @@ public:
         live.width = width;
         live.height = height;
         live.jitterPhases = phases;
-        // The guides cost about a tenth of the trace: only write them for a consumer (dlss).
-        live.guides = mSettings.guides && context.Consumes(renderer::slots::kDiffuseAlbedo);
+        // The guides cost about a tenth of the trace: only write them for a consumer (a denoiser, TAA).
+        namespace slots = renderer::slots;
+        live.guides =
+            mSettings.guides && (context.Consumes(slots::kDiffuseAlbedo) || context.Consumes(slots::kSpecularAlbedo) ||
+                                 context.Consumes(slots::kNormalRoughness) || context.Consumes(slots::kViewDepth) ||
+                                 context.Consumes(slots::kMotionVectors));
+        live.signals = live.guides && context.Consumes(slots::kDiffuseSignal);
+        live.transparencyGuides = live.guides && context.Consumes(slots::kColorBeforeTransparency);
         mTracer->AddPasses(context.graph, context.scene, context.camera, context.blackboard, context.sceneColor);
     }
 

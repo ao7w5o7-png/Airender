@@ -59,6 +59,7 @@ u32 FormatBytesPerPixel(Format format)
     case Format::R32_FLOAT:
     case Format::R32_UINT:
     case Format::R11G11B10_FLOAT:
+    case Format::R10G10B10A2_UNORM:
     case Format::D32_FLOAT:
     case Format::D24_UNORM_S8_UINT: return 4;
     case Format::RGBA16_FLOAT:
@@ -104,6 +105,7 @@ const char* ToString(Format format)
         AIR_FORMAT_CASE(RG32_UINT)
         AIR_FORMAT_CASE(RGBA32_UINT)
         AIR_FORMAT_CASE(R11G11B10_FLOAT)
+        AIR_FORMAT_CASE(R10G10B10A2_UNORM)
         AIR_FORMAT_CASE(D32_FLOAT)
         AIR_FORMAT_CASE(D24_UNORM_S8_UINT)
 #undef AIR_FORMAT_CASE

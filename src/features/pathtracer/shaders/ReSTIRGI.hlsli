@@ -115,6 +115,7 @@ SecondaryVertex LoadSecondaryVertex(GiSample x, IntegratorParams params)
 struct GiPoint
 {
     float3 contribution;
+    float3 diffuse; // the part of it the receiver's diffuse base reflects
     float3 wi; // from r towards x2
     float dist;
 };
@@ -123,6 +124,7 @@ GiPoint EvaluateGi(Receiver r, SecondaryVertex v, GiSample x)
 {
     GiPoint p;
     p.contribution = float3(0.0f, 0.0f, 0.0f);
+    p.diffuse = float3(0.0f, 0.0f, 0.0f);
     p.wi = float3(0.0f, 0.0f, 1.0f);
     p.dist = 0.0f;
     float3 toX2 = v.position - r.origin;
@@ -153,7 +155,9 @@ GiPoint EvaluateGi(Receiver r, SecondaryVertex v, GiSample x)
     {
         mis = PowerHeuristic(e2.pdf, x.lightPdf);
     }
-    p.contribution = e1.fCos * (cos2 / dist2) * e2.fCos * (x.radianceMis * mis + x.radianceFixed);
+    float3 arriving = (cos2 / dist2) * e2.fCos * (x.radianceMis * mis + x.radianceFixed);
+    p.contribution = e1.fCos * arriving;
+    p.diffuse = e1.fCosDiffuse * arriving;
     return p;
 }
 
@@ -371,6 +375,7 @@ void GiSpatialPass(uint2 pixel)
     bool canonicalShifts = Shifts(vc);
     float canonicalMis = cc / total;
     float3 indirect = float3(0.0f, 0.0f, 0.0f);
+    float3 indirectDiffuse = float3(0.0f, 0.0f, 0.0f);
     uint seed = StreamSeed(pixel, f.frameIndex, 7u);
     GiChoice c = MakeGiChoice();
     draw = firstDraw;
@@ -403,6 +408,7 @@ void GiSpatialPass(uint2 pixel)
                 float m = (neighbourConfidence / total) * n.M * pn / (neighbourConfidence * pn + cc * pq);
                 StreamGi(c, pq, m * pq * n.W, neighbour, seed);
                 indirect += here.contribution * (m * n.W);
+                indirectDiffuse += here.diffuse * (m * n.W);
             }
         }
     }
@@ -410,6 +416,7 @@ void GiSpatialPass(uint2 pixel)
     {
         StreamGi(c, pc, canonicalMis * pc * canonical.W, index, seed);
         indirect += canonicalPoint.contribution * (canonicalMis * canonical.W);
+        indirectDiffuse += canonicalPoint.diffuse * (canonicalMis * canonical.W);
     }
     GiSample chosen = canonical;
     if (c.chosen && c.source != index)
@@ -420,7 +427,15 @@ void GiSpatialPass(uint2 pixel)
     if ((g.flags & kReSTIRShade) != 0u && any(indirect > 0.0f) && all(isfinite(indirect)))
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
-        accumulation[pixel] += float4(indirect * CameraAirTransmittance(f, r.position) * float(f.samplesPerPixel), 0.0f);
+        float3 air = CameraAirTransmittance(f, r.position);
+        accumulation[pixel] += float4(indirect * air * float(f.samplesPerPixel), 0.0f);
+        if ((g.flags & kReSTIRSignals) != 0u)
+        {
+            RWTexture2D<float4> diffuseSignal = ResourceDescriptorHeap[g.diffuseSignal];
+            RWTexture2D<float4> specularSignal = ResourceDescriptorHeap[g.specularSignal];
+            diffuseSignal[pixel] += float4(indirectDiffuse * air * f.exposure, 0.0f);
+            specularSignal[pixel] += float4((indirect - indirectDiffuse) * air * f.exposure, 0.0f);
+        }
     }
     history[index] = PackGi(result);
 }

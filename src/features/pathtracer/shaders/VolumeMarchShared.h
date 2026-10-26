@@ -42,6 +42,10 @@ AIR_CONST uint kMarchNoDirect = 8u;    // leave the sun's and the lights' light 
 AIR_CONST uint kMarchNoIndirect = 16u; // leave the probes' light out (direct view)
 AIR_CONST uint kMarchFurnace = 32u;    // the white furnace (kFlagFurnace): albedo 1, the light groups off
 AIR_CONST uint kMarchGuides = 64u;     // describe the volumes in the denoiser's guides where they hide the surfaces
+AIR_CONST uint kMarchSurfaceTransmittance = 128u; // write what they let through of the surfaces' light
+// Write the volumes' layer (VolumeMarchConstants::layer, layerDepth) for VolumeMarch.Temporal, which
+// lays it over the surfaces, instead of adding to the accumulation.
+AIR_CONST uint kMarchLayer = 256u;
 
 // How the trace kernel and the march read the volumes' shadows.
 struct VolumeShadowsData
@@ -126,6 +130,30 @@ struct VolumeMarchConstants
     uint normalRoughness;
     uint viewDepth;
     uint motionVectors;
+    uint surfaceTransmittance; // RWTexture2D<float>, with kMarchSurfaceTransmittance
+    // kMarchLayer: the light the volumes send towards the camera (the air in front included) and their
+    // transmittance (RWTexture2D<float4>), and the depth that light comes from (RWTexture2D<float>, 0:
+    // no volume).
+    uint layer;
+    uint layerDepth;
+};
+
+// Root constants of VolumeMarch.Temporal: the volumes' layer filtered over frames (reprojected along its
+// depth, the history clamped to the frame's neighbourhood), laid over the surfaces.
+struct VolumeTemporalConstants
+{
+    uint frameData; // StructuredBuffer<FrameData>
+    uint frameSlot;
+    uint layer;                // Texture2D<float4>: this frame's layer
+    uint layerDepth;           // Texture2D<float>
+    uint surface;              // Texture2D<float4>: this frame's samples (rgb sum)
+    uint accumulation;         // RWTexture2D<float4>
+    uint history;              // Texture2D<float4>: last frame's filtered layer; kInvalidIndex: none
+    uint filtered;             // RWTexture2D<float4>: this frame's
+    uint surfaceTransmittance; // RWTexture2D<float>; kInvalidIndex: none
+    uint samplesPerPixel;
+    uint reset;  // discard the accumulation
+    float blend; // weight of this frame
 };
 
 #ifdef __cplusplus
@@ -135,6 +163,7 @@ static_assert(kVolumeProbes % kProbesPerGroup == 0 && kProbesPerGroup * kVolumeP
 static_assert(sizeof(VolumeShadowConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(VolumeProbeConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(VolumeMarchConstants) <= 128, "push constants are limited to 128 bytes");
+static_assert(sizeof(VolumeTemporalConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu
 #endif
 

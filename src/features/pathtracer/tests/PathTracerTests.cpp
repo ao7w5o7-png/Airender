@@ -71,18 +71,40 @@ TEST(PathTracer_StopsTracingWhenConverged)
 namespace
 {
 
-// Stands in for a denoiser: declares the guides as consumed and reads them.
+// Stands in for a denoiser: declares the guides as consumed and reads them, and, as one of the whole
+// frame (DLSS RR) or of the surfaces alone (NRD), the frame without its transparent media or the
+// surfaces' light split by lobe.
 class GuideReader final : public air::renderer::RenderFeature
 {
 public:
+    enum class Kind
+    {
+        Guides,
+        WholeFrame,
+        Surfaces
+    };
+    explicit GuideReader(Kind kind = Kind::Guides) : mKind(kind) {}
     bool Initialize(const air::renderer::FeatureInitContext&) override { return true; }
     void AddPasses(air::renderer::FrameContext&) override {}
     std::vector<std::string_view> ConsumedSlots() const override
     {
         namespace slots = air::renderer::slots;
-        return {slots::kDiffuseAlbedo, slots::kSpecularAlbedo, slots::kNormalRoughness, slots::kViewDepth,
-                slots::kMotionVectors};
+        std::vector<std::string_view> consumed = {slots::kDiffuseAlbedo, slots::kSpecularAlbedo,
+                                                  slots::kNormalRoughness, slots::kViewDepth, slots::kMotionVectors};
+        if (mKind == Kind::WholeFrame)
+        {
+            consumed.push_back(slots::kColorBeforeTransparency);
+        }
+        if (mKind == Kind::Surfaces)
+        {
+            consumed.insert(consumed.end(),
+                            {slots::kDiffuseSignal, slots::kSpecularSignal, slots::kSurfaceTransmittance});
+        }
+        return consumed;
     }
+
+private:
+    Kind mKind;
 };
 
 } // namespace
@@ -327,17 +349,19 @@ TEST(PathTracer_RealTimeVolumesAreMarched)
     EXPECT(CountLines(h.Frame().commands, "BeginEvent 'VolumeMarch.March'") == 1);
 }
 
-// Under a denoiser the real-time volumes keep it from reprojecting them with what lies behind them: the
-// march describes them in its guides where they hide the surfaces, and the resolve also writes the
-// frame without them (slots::kColorBeforeTransparency). Accumulating there is no such frame.
+// Under a denoiser of the whole frame the real-time volumes keep it from reprojecting them with what
+// lies behind them: the march describes them in its guides where they hide the surfaces, and the
+// resolve also writes the frame without them (slots::kColorBeforeTransparency); the denoiser filters
+// their light over frames. Accumulating there is no such frame.
 TEST(PathTracer_RealTimeVolumesGuideDenoisers)
 {
     Headless h({"pathtracer", "tonemap"});
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
     h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f}});
     EXPECT(h.Frame().graphText.find("PathTracer.ColorBeforeVolumes") == std::string::npos); // nobody reads it
-    EXPECT(h.runner->AddFeature("denoiser", std::make_unique<GuideReader>()));
+    EXPECT(h.runner->AddFeature("denoiser", std::make_unique<GuideReader>(GuideReader::Kind::WholeFrame)));
     const auto result = h.Frame();
+    EXPECT(CountLines(result.commands, "BeginEvent 'VolumeMarch.Temporal'") == 0);
     EXPECT(result.validationErrors.empty());
     // The graph's passes in order, each with its accesses.
     const std::string& graph = result.graphText;
@@ -357,4 +381,47 @@ TEST(PathTracer_RealTimeVolumesGuideDenoisers)
     EXPECT(accumulating.validationErrors.empty());
     EXPECT(CountLines(accumulating.commands, "BeginEvent 'VolumeMarch.March'") == 1);
     EXPECT(accumulating.graphText.find("PathTracer.ColorBeforeVolumes") == std::string::npos);
+}
+
+// Under a denoiser of the surfaces alone (NRD) the path tracer writes their light split by lobe (the
+// trace, then the ReSTIR passes add theirs), the guides keep describing the surfaces, and the volumes'
+// layer is filtered over frames by VolumeMarch.Temporal, which also writes what it lets through of the
+// surfaces' light. Without volumes ReSTIR DI and GI add to the signals.
+TEST(PathTracer_SignalsForDenoisersOfSurfaces)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    EXPECT(h.runner->AddFeature("denoiser", std::make_unique<GuideReader>(GuideReader::Kind::Surfaces)));
+    const auto plain = h.Frame();
+    EXPECT(plain.validationErrors.empty());
+    for (const char* pass : {"PathTracer.Trace (RayTracing)", "PathTracer.ReSTIRDI.Spatial (Compute)",
+                             "PathTracer.ReSTIRGI.Spatial (Compute)"})
+    {
+        const size_t at = plain.graphText.find(pass);
+        EXPECT(at != std::string::npos);
+        const size_t next = plain.graphText.find("\n  [", at);
+        for (const char* signal :
+             {"write PathTracer.DiffuseSignal as UAVCompute", "write PathTracer.SpecularSignal as UAVCompute"})
+        {
+            const size_t write = plain.graphText.find(signal, at);
+            EXPECT(write != std::string::npos && write < next);
+        }
+    }
+    h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f}});
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        const auto result = h.Frame();
+        EXPECT(result.validationErrors.empty());
+        const std::string& graph = result.graphText;
+        const size_t march = graph.find("VolumeMarch.March (Compute)");
+        const size_t temporal = graph.find("VolumeMarch.Temporal (Compute)");
+        EXPECT(march != std::string::npos && temporal != std::string::npos && march < temporal);
+        EXPECT(graph.find("write PathTracer.MotionVectors as UAVCompute", march) == std::string::npos);
+        EXPECT(graph.find("write PathTracer.SurfaceTransmittance as UAVCompute", temporal) != std::string::npos);
+        EXPECT(graph.find("PathTracer.ColorBeforeVolumes") == std::string::npos);
+        // The second frame continues the first's filtered layer.
+        const std::string past =
+            "read  VolumeMarch.FilteredLayer[" + std::to_string((frame + 1) % 2) + "] as SRVCompute";
+        EXPECT((graph.find(past) != std::string::npos) == (frame > 0));
+    }
 }

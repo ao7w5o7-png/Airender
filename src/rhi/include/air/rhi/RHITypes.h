@@ -48,6 +48,7 @@ enum class Format : u16
     RG32_UINT,
     RGBA32_UINT,
     R11G11B10_FLOAT,
+    R10G10B10A2_UNORM,
     D32_FLOAT,
     D24_UNORM_S8_UINT,
 };

@@ -76,7 +76,8 @@ TEST(Editor_RunsFramesHeadless)
     {
         HeadlessUi ui;
         editor::EditorApp app(*device, tasks, SmallOptions());
-        EXPECT(app.GetActiveFeatures().size() == 2);
+        // nrd needs D3D12 and declines here: pathtracer, taa, tonemap.
+        EXPECT(app.GetActiveFeatures().size() == 3);
         for (int i = 0; i < 4; ++i)
         {
             ui.Frame(app);
@@ -312,6 +313,28 @@ TEST(Editor_DlssToggleRestoresAccumulation)
     app.SetDlssEnabled(false);
     EXPECT(!app.IsDlssEnabled());
     EXPECT(app.GetParameter("pathtracer", "accumulate") == "true" && app.GetParameter("pathtracer", "spp") == "8");
+    ui.Frame(app);
+    EXPECT(app.GetLastResult().validationErrors.empty());
+}
+
+// The denoiser choice: without nrd (it declines on the Null device) the editor accumulates; choosing
+// DLSS inserts it and switches to real-time frames, choosing accumulation again restores progressive
+// frames.
+TEST(Editor_DenoiserChoice)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorApp app(*device, tasks, SmallOptions());
+    EXPECT(app.GetDenoiser() == editor::EditorApp::Denoiser::Accumulate);
+    EXPECT(app.GetParameter("pathtracer", "accumulate") == "true");
+    app.SetDenoiser(editor::EditorApp::Denoiser::Dlss);
+    EXPECT(app.GetDenoiser() == editor::EditorApp::Denoiser::Dlss);
+    EXPECT(app.GetParameter("pathtracer", "accumulate") == "false");
+    ui.Frame(app);
+    app.SetDenoiser(editor::EditorApp::Denoiser::Accumulate);
+    EXPECT(!app.IsDlssEnabled());
+    EXPECT(app.GetParameter("pathtracer", "accumulate") == "true");
     ui.Frame(app);
     EXPECT(app.GetLastResult().validationErrors.empty());
 }

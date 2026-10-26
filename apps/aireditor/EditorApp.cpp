@@ -129,6 +129,7 @@ void EditorApp::CreateRunner(u32 width, u32 height)
     height = std::max(height, 8u);
     // Keep parameter values and render graph settings across the rebuild; the first runner takes
     // the startup ones.
+    const bool first = !mRunner;
     std::vector<std::pair<std::string, std::string>> saved = mRunner ? decltype(saved){} : mOptions.parameters;
     rdg::RenderGraph::Config graphConfig;
     if (mRunner)
@@ -172,6 +173,14 @@ void EditorApp::CreateRunner(u32 width, u32 height)
         {
             mActiveFeatures.push_back(name);
         }
+    }
+    if (first && !IsDlssEnabled() &&
+        std::find(mActiveFeatures.begin(), mActiveFeatures.end(), "nrd") != mActiveFeatures.end())
+    {
+        // Real-time frames where a real-time denoiser runs (before the startup parameters, which may
+        // say otherwise).
+        SetParameter("pathtracer.accumulate", "false");
+        SetParameter("pathtracer.spp", "1");
     }
     for (const auto& [name, value] : saved)
     {
@@ -275,6 +284,46 @@ void EditorApp::SetDlssEnabled(bool enabled)
         if (!mPreDlssSpp.empty())
         {
             SetParameter("pathtracer.spp", mPreDlssSpp);
+        }
+    }
+}
+
+EditorApp::Denoiser EditorApp::GetDenoiser() const
+{
+    if (IsDlssEnabled())
+    {
+        return Denoiser::Dlss;
+    }
+    const bool nrd = std::find(mActiveFeatures.begin(), mActiveFeatures.end(), "nrd") != mActiveFeatures.end();
+    return nrd && GetParameter("nrd", "enabled") == "true" && GetParameter("pathtracer", "accumulate") == "false"
+               ? Denoiser::Nrd
+               : Denoiser::Accumulate;
+}
+
+void EditorApp::SetDenoiser(Denoiser denoiser)
+{
+    if (denoiser == GetDenoiser())
+    {
+        return;
+    }
+    if (denoiser == Denoiser::Dlss)
+    {
+        SetDlssEnabled(true);
+        return;
+    }
+    SetDlssEnabled(false);
+    if (denoiser == Denoiser::Nrd)
+    {
+        SetParameter("nrd.enabled", "true");
+        SetParameter("pathtracer.accumulate", "false");
+        SetParameter("pathtracer.spp", "1");
+    }
+    else
+    {
+        SetParameter("pathtracer.accumulate", "true");
+        if (GetParameter("pathtracer", "spp") == "1")
+        {
+            SetParameter("pathtracer.spp", "4"); // the path tracer's default for progressive frames
         }
     }
 }
@@ -1114,14 +1163,32 @@ void EditorApp::BuildRenderPanel()
 
     renderer::FeatureRegistry registry;
     renderer::RegisterBuiltinFeatures(registry);
-    if (registry.Find("dlss"))
+    const bool nrdAvailable = std::find(mActiveFeatures.begin(), mActiveFeatures.end(), "nrd") != mActiveFeatures.end();
+    const bool dlssAvailable = registry.Find("dlss") != nullptr;
+    if (nrdAvailable || dlssAvailable)
     {
-        bool dlss = std::find(mOptions.features.begin(), mOptions.features.end(), "dlss") != mOptions.features.end();
-        if (ImGui::Checkbox("DLSS Ray Reconstruction", &dlss))
+        constexpr const char* kNames[] = {"Accumulate (no denoiser)", "NRD (real time)", "DLSS Ray Reconstruction"};
+        const Denoiser denoiser = GetDenoiser();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+        if (ImGui::BeginCombo("Denoiser", kNames[u32(denoiser)]))
         {
-            SetDlssEnabled(dlss);
+            for (u32 i = 0; i < std::size(kNames); ++i)
+            {
+                if ((i == u32(Denoiser::Nrd) && !nrdAvailable) || (i == u32(Denoiser::Dlss) && !dlssAvailable))
+                {
+                    continue;
+                }
+                if (ImGui::Selectable(kNames[i], i == u32(denoiser)))
+                {
+                    SetDenoiser(Denoiser(i));
+                }
+            }
+            ImGui::EndCombo();
         }
-        if (dlss)
+        ImGui::SetItemTooltip("Accumulate: the frames average while nothing moves (moving restarts them).\n"
+                              "NRD: single jittered frames denoised by NVIDIA's NRD (RELAX), edges by TAA.\n"
+                              "DLSS Ray Reconstruction: denoises, anti-aliases and upscales (NVIDIA RTX).");
+        if (denoiser == Denoiser::Dlss)
         {
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
             if (ImGui::BeginCombo("DLSS mode", kDlssModes[mOptions.dlssMode].name))

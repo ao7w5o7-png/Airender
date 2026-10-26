@@ -62,6 +62,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Render below the output size with `--render-scale S` (dlss upscales; without it FrameRunner
   upscales bilinearly). Stages: Scene (render size, writes `sceneColor`) -> Upscale -> Post
   (output size); see docs/architecture.md §8.5.
+- Real-time denoising (docs/architecture.md §8.14): the editor's default chain is
+  `pathtracer,nrd,taa,tonemap` (NRD on the surfaces' light split by lobe, TAA for edges; nrd needs
+  D3D12), the alternative `pathtracer,dlss`. Anything that adds light at the first surface must also
+  add its lobe split to `kDiffuseSignal` / `kSpecularSignal` (as ReSTIR does), or NRD leaves it noisy;
+  check a denoised frame's mean (average 16 frames) against an accumulated reference.
 - Real time is judged over frames, and a static camera hides trails: `--camera-motion
   RIGHT,UP,FORWARD[,YAW[,PITCH]]` moves the camera every frame and `--output-frames N` writes the last
   N frames. Compare a moving camera's last frame with a static camera's at the same place (trails,
