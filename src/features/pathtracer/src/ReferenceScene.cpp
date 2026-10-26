@@ -2,6 +2,7 @@
 
 #include "air/core/Assert.h"
 #include "air/features/pathtracer/Bsdf.h"
+#include "air/features/pathtracer/NeuralCoat.h"
 
 #include <algorithm>
 #include <cmath>
@@ -137,7 +138,7 @@ bool Bvh::IntersectTriangle(const Triangle& tri, float3 origin, float3 direction
     return true;
 }
 
-SceneTables BuildSceneTables(const renderer::SceneDesc& scene)
+SceneTables BuildSceneTables(const renderer::SceneDesc& scene, TaskSystem* tasks)
 {
     SceneTables tables;
     tables.instanceLights = renderer::FirstLightIndices(scene);
@@ -176,6 +177,7 @@ SceneTables BuildSceneTables(const renderer::SceneDesc& scene)
         tables.lights.emplace_back(); // like the GPU list: NEE reads entry 0 when no light is chosen
     }
     tables.lut = GetBsdfLut();
+    tables.neuralCoat = TrainNeuralCoat(CollectCoatMaterials(scene), {}, tasks).parameters;
     tables.sky = renderer::BuildSkyTable(scene.sky, scene.environment);
     tables.clouds = renderer::BuildCloudVolume(scene.clouds);
     for (const renderer::Volume& volume : scene.volumes)

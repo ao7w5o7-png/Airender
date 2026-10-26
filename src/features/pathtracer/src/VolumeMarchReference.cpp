@@ -130,6 +130,7 @@ struct MarchKernel : SceneHooks
 // NOLINTBEGIN(readability-identifier-naming)
 #include "air/renderer/shader/MomentShadow.hlsli"
 #define AIR_PT_VOLUME_SHADOWS 1 // the surfaces, lit through the maps (PathTracerVolumeShadows.hlsl)
+#define AIR_BSDF_COATS 1
 #include "Integrator.hlsli"
 #include "VolumeMarch.hlsli"
 #include "VolumeProbes.hlsli"

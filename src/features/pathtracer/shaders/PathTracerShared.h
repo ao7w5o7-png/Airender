@@ -62,6 +62,10 @@ AIR_CONST uint kFlagProbe = 4096u; // a probe's path for the march's ambient lig
 AIR_CONST uint kFlagSignals = 8192u;
 AIR_CONST float kMissReflectionDistance = 1000.0f; // a reflected ray that leaves the scene, metres
 
+// The neural coat's parameters as float4s (NeuralCoat.hlsli kNeuralCoatParameters / 4), the size of its
+// constant buffer before padding to 256 bytes (FrameData::neuralCoat).
+AIR_CONST uint kNeuralCoatParameterVectors = 213u;
+
 // Result of TraceClosest() in the integrator (not stored in buffers).
 struct HitInfo
 {
@@ -97,17 +101,17 @@ struct FrameData
     uint maxBounces;
     uint lightCount;
     uint debugView;
-    float debugScale;      // normalizes depth / intersection debug views
-    uint lightTreeBounces; // NEE uses the light tree at path vertices below this, power beyond
-    float exposure;        // radiance -> scene-linear, applied by Resolve
-    uint cloudEvents;      // scattering events a walk through the clouds may take
-    uint volumeEvents;     // scattering events a path may take in the volumes, besides its bounces
-    uint pad2;
-    NrcData nrc;      // the neural radiance cache, with kFlagNrc
-    uint volumeCount; // the scene's volumes (GpuScene::volumes)
-    uint volumeTable; // StructuredBuffer<VolumeData> (GpuScene::volumeTable)
-    uint textureSets; // StructuredBuffer<TextureSetData> (GpuScene::textureSetTable)
-    uint pad4;
+    float debugScale;                // normalizes depth / intersection debug views
+    uint lightTreeBounces;           // NEE uses the light tree at path vertices below this, power beyond
+    float exposure;                  // radiance -> scene-linear, applied by Resolve
+    uint cloudEvents;                // scattering events a walk through the clouds may take
+    uint volumeEvents;               // scattering events a path may take in the volumes, besides its bounces
+    uint coatModel;                  // kCoat*: how coated materials evaluate their coat (IntegratorParams::coatModel)
+    NrcData nrc;                     // the neural radiance cache, with kFlagNrc
+    uint volumeCount;                // the scene's volumes (GpuScene::volumes)
+    uint volumeTable;                // StructuredBuffer<VolumeData> (GpuScene::volumeTable)
+    uint textureSets;                // StructuredBuffer<TextureSetData> (GpuScene::textureSetTable)
+    uint neuralCoat;                 // ByteAddressBuffer: the neural coat's parameters (NeuralCoat.hlsli)
     VolumeShadowsData volumeShadows; // their moment shadow maps, with kFlagVolumeMarch
 };
 

@@ -76,6 +76,8 @@ void Main(uint3 group : SV_GroupID, uint index : SV_GroupIndex)
     params.volumeTable = f.volumeTable;
     params.textureSets = f.textureSets;
     params.textureSeed = f.frameIndex;
+    params.coatModel = f.coatModel;
+    gNeuralCoat = f.neuralCoat;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = (f.flags & (kFlagFurnace | kFlagNoNee)) | kFlagProbe;

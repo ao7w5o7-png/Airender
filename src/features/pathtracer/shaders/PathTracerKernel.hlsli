@@ -1,8 +1,8 @@
 // GPU path tracer kernel: one pixel per thread, bindless resources. Compiled nine times:
 // PathTracer.hlsl (DXR 1.1, SM 6.6, every RTX GPU), PathTracerSer.hlsl (AIR_PT_SER: DXR 1.2 shader
 // execution reordering, SM 6.9), PathTracerGi.hlsl (AIR_PT_RESTIR_GI: records ReSTIR GI's
-// candidates), PathTracerNtc.hlsl and PathTracerGiNtc.hlsl (AIR_PT_NTC: the first and the GI kernel
-// that decode neural texture sets on sample), PathTracerNrc.hlsl and PathTracerNrcPortable.hlsl (AIR_PT_NRC: paths end in the
+// candidates), PathTracerNeural.hlsl and PathTracerGiNeural.hlsl (AIR_PT_NEURAL: the first and the GI
+// kernel with neural texture decoding and the clear coats' network), PathTracerNrc.hlsl and PathTracerNrcPortable.hlsl (AIR_PT_NRC: paths end in the
 // neural radiance cache, evaluated with Shader Model 6.10 linear algebra or in float32),
 // PathTracerVolume.hlsl (AIR_PT_VOLUME: tracks the scene's volumes) and PathTracerVolumeShadows.hlsl
 // (AIR_PT_VOLUME_SHADOWS: lights through the volumes the ray march renders); PathTracer.cpp picks one
@@ -217,6 +217,8 @@ void TracePixel(uint2 pixel)
     params.volumeTable = f.volumeTable;
     params.textureSets = f.textureSets;
     params.textureSeed = f.frameIndex;
+    params.coatModel = f.coatModel;
+    gNeuralCoat = f.neuralCoat;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;

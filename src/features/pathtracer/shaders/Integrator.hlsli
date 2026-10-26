@@ -12,7 +12,7 @@
 //   MaterialData  LoadMaterial(uint material)
 //   TextureSetData LoadTextureSet(uint table, uint set)  a material's textures (IntegratorParams::textureSets)
 //   float4        MaterialTextureSample(uint texture, float2 uv)  one of them, bilinear, repeating
-// and, compiled with AIR_PT_NTC (the GPU's, where LibNTC's shaders were found):
+// and, compiled with AIR_PT_NTC (the GPU's AIR_PT_NEURAL kernels, where LibNTC's shaders were found):
 //   void          NeuralTextureSample(TextureSetData t, float2 uv, float2 u, out float4 color, out float4 surface)
 //                                                     a neural set's (TextureSetData::latents) texels, the
 //                                                     texel stochastic filtering picks with u
@@ -114,7 +114,7 @@
 #ifndef AIR_PT_PROBE
 #define AIR_PT_PROBE 0
 #endif
-// Neural texture sets decoded on sample (SceneAccess.hlsli).
+// Neural texture sets decoded on sample (SceneAccess.hlsli, AIR_PT_NEURAL kernels).
 #ifndef AIR_PT_NTC
 #define AIR_PT_NTC 0
 #endif
@@ -127,6 +127,7 @@ struct IntegratorParams
     uint volumeTable; // bindless StructuredBuffer<VolumeData> on the GPU
     uint textureSets; // the materials' textures: bindless StructuredBuffer<TextureSetData> on the GPU
     uint textureSeed; // the frame's: neural texture sets filter stochastically
+    uint coatModel;   // kCoat*: how coated materials evaluate their coat's inner part
     uint lightCount;
     uint maxBounces;
     uint flags;            // kFlagFurnace, kFlagNoNee
@@ -443,6 +444,14 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params, u
     s.material.baseColor = m.baseColor;
     s.material.roughness = m.roughness;
     s.material.metallic = m.metallic;
+    s.material.coat = m.coat != 0u ? params.coatModel : kCoatNone;
+    s.material.coatRoughness = m.coatRoughness;
+    s.material.coatColor = m.coatColor;
+    // The coat's random walks (kCoatRandomWalk): new for every hit and frame, the same wherever the
+    // frame loads the hit again.
+    s.material.coatSeed = Pcg(hit.instance * 0x9e3779b9u ^ Pcg(hit.primitive ^ Pcg(asuint(hit.barycentrics.x) ^
+                                                                                Pcg(asuint(hit.barycentrics.y) +
+                                                                                    params.textureSeed))));
     if (m.textureSet != kInvalidIndex && textures != kSurfaceGeometry)
     {
         // The textures at the hit's texture coordinates (level 0: a path has no footprint to filter by).
@@ -501,6 +510,7 @@ Surface LoadSurface(HitInfo hit, float3 rayDirection, IntegratorParams params, u
     if ((params.flags & kFlagFurnace) != 0u)
     {
         s.material.baseColor = float3(1.0f, 1.0f, 1.0f);
+        s.material.coatColor = float3(1.0f, 1.0f, 1.0f);
         s.emission = float3(0.0f, 0.0f, 0.0f);
     }
     s.lightIndex = any(s.emission) ? LoadInstanceLight(hit.instance) + hit.primitive : kInvalidIndex;

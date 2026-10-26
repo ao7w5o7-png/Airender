@@ -24,6 +24,7 @@ struct ReferenceSettings
     u32 lightTreeBounces = 0; // as pathtracer.lightTreeBounces
     u32 cloudEvents = 256;    // as pathtracer.cloudEvents
     u32 volumeEvents = 256;   // as pathtracer.volumeEvents
+    u32 coatModel = 1;        // Bsdf.hlsli kCoat* (1 neural, 2 random walk, 3 approximate): pathtracer.coatModel + 1
     bool furnace = false;
     // true: radiance * camera exposure, comparable with the pathtracer feature's output.
     // false: radiance in nits.

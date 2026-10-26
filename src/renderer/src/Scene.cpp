@@ -255,6 +255,7 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
     const std::string problem = Validate(mDesc);
     AIR_CHECK(problem.empty(), "scene '{}': {}", mDesc.name, problem);
     SceneBounds(mDesc, mGpu.boundsMin, mGpu.boundsMax);
+    mGpu.desc = &mDesc;
     Upload();
     UploadTextures();
     const u32 slots = mDevice.GetFramesInFlight() + 1;
@@ -582,6 +583,8 @@ void Scene::Update()
     }
     mRingSlot = (mRingSlot + 1) % u32(mMaterialRing.size());
     WriteDynamicData();
+    mGpu.coatedMaterials =
+        std::any_of(mDesc.materials.begin(), mDesc.materials.end(), [](const Material& m) { return m.coat; });
     ++mGpu.version;
     mDirty = false;
 }

@@ -7,6 +7,7 @@
 // become member functions; kernels of different AIR_PT_* configurations live in translation units of
 // their own (the shader files have include guards).
 
+#include "air/features/pathtracer/Bsdf.h"
 #include "air/features/pathtracer/ReferenceRenderer.h"
 #include "air/renderer/Sky.h"
 #include "air/renderer/TextureSampling.h"
@@ -90,6 +91,7 @@ struct SceneTables
     std::vector<LightGroup> lightGroups; // one per emissive instance
     double lightPower = 0.0;             // 0: no emitters (`lights` holds a placeholder)
     std::span<const float> lut;
+    std::vector<float> neuralCoat; // the coated materials' network (NeuralCoat.h); empty: none
     renderer::SkyTable sky;
     renderer::CloudVolume clouds;
     // The volumes that loaded; their VolumeData's density and majorants hold their index here.
@@ -100,8 +102,9 @@ struct SceneTables
     std::unique_ptr<Bvh> bvh;
 };
 
-// The tables of a scene that passes renderer::Validate, its BVH included.
-SceneTables BuildSceneTables(const renderer::SceneDesc& scene);
+// The tables of a scene that passes renderer::Validate, its BVH included, and the neural coat of its
+// coated materials (trained, or found in the cache, with `tasks` when set).
+SceneTables BuildSceneTables(const renderer::SceneDesc& scene, TaskSystem* tasks = nullptr);
 
 CameraData ToCameraData(const renderer::Camera& camera, float aspect);
 
@@ -127,6 +130,10 @@ Params MakeParams(const SceneTables& tables, const ReferenceSettings& settings, 
     params.volumeTable = 0;
     params.textureSets = 0;
     params.textureSeed = 0; // the CPU renders neural sets from their decoded texels
+    // Without a network (no coated materials) a neural coat is the approximation.
+    params.coatModel = tables.neuralCoat.empty() && settings.coatModel == u32(CoatModel::Neural)
+                           ? u32(CoatModel::Approximate)
+                           : settings.coatModel;
     params.cloudEvents = settings.cloudEvents;
     params.volumeEvents = settings.volumeEvents;
     params.lightCount = tables.lightPower > 0.0 ? u32(tables.lights.size()) : 0u;
@@ -145,6 +152,11 @@ struct SceneHooks
     const SceneTables& tables;
 
     float BsdfLutLoad(uint index) const { return tables.lut[index]; }
+    float4 NeuralCoatWeights4(uint index) const
+    {
+        const std::vector<float>& w = tables.neuralCoat;
+        return index + 3 < w.size() ? float4(w[index], w[index + 1], w[index + 2], w[index + 3]) : float4(0.0f);
+    }
     InstanceData LoadInstance(uint instance) const { return tables.instances[instance]; }
     uint LoadInstanceLight(uint instance) const { return tables.instanceLights[instance]; }
     uint LoadIndex(InstanceData instance, uint index) const { return tables.indices[instance.indexBuffer][index]; }

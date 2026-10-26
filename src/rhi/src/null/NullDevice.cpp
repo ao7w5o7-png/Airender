@@ -71,6 +71,7 @@ struct NullBuffer
     bool placed = false;
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
+    BindlessIndex cbv = kInvalidBindless;
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
@@ -316,6 +317,7 @@ public:
                 }
                 ReleaseBindless(buffer->srv);
                 ReleaseBindless(buffer->uav);
+                ReleaseBindless(buffer->cbv);
                 ForgetState(StateKey(handle));
                 mBuffers.Free(handle);
             });
@@ -465,6 +467,16 @@ public:
         NullBuffer* b = mBuffers.Get(handle);
         AIR_CHECK(b, "GetBindlessUAV: invalid buffer");
         return LazyBindless(b->uav);
+    }
+    BindlessIndex GetBindlessCBV(BufferHandle handle) override
+    {
+        NullBuffer* b = mBuffers.Get(handle);
+        AIR_CHECK(b, "GetBindlessCBV: invalid buffer");
+        AIR_CHECK(Any(b->desc.usage & BufferUsage::Constant) && b->desc.size % 256 == 0 && b->desc.size <= 65536,
+                  "buffer '{}' needs Constant usage and a size of a multiple of 256 up to 64 KiB for a constant buffer "
+                  "view",
+                  b->desc.debugName);
+        return LazyBindless(b->cbv);
     }
     BindlessIndex GetBindlessSRV(AccelStructHandle handle) override
     {

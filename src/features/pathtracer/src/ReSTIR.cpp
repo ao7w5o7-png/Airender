@@ -29,30 +29,42 @@ ReSTIR::~ReSTIR()
     {
         Release(*history);
     }
-    for (rhi::PipelineHandle pipeline : {mDiInitial, mDiTemporal, mDiSpatial, mGiTemporal, mGiSpatial})
+    for (const Pipelines& p : mPipelines)
     {
-        if (pipeline.IsValid())
+        for (rhi::PipelineHandle pipeline : {p.diInitial, p.diTemporal, p.diSpatial, p.giTemporal, p.giSpatial})
         {
-            mDevice.DestroyPipeline(pipeline);
+            if (pipeline.IsValid())
+            {
+                mDevice.DestroyPipeline(pipeline);
+            }
         }
     }
 }
 
-void ReSTIR::Initialize(const std::filesystem::path& shaderDir)
+ReSTIR::Pipelines ReSTIR::LoadPipelines(bool coatModels)
 {
     auto load = [&](const char* stem, const char* name)
     {
         rhi::ComputePipelineDesc desc;
-        desc.shader = renderer::LoadShader(mDevice, shaderDir, stem, "Main");
+        desc.shader =
+            renderer::LoadShader(mDevice, mShaderDir, std::string(stem) + (coatModels ? "Neural.cs" : ".cs"), "Main");
         desc.pushConstantBytes = sizeof(gpu::ReSTIRConstants);
-        desc.debugName = name;
+        desc.debugName = coatModels ? std::string(name) + "Neural" : std::string(name);
         return mDevice.CreateComputePipeline(desc);
     };
-    mDiInitial = load("ReSTIRDIInitial.cs", "PathTracer.ReSTIRDI.Initial");
-    mDiTemporal = load("ReSTIRDITemporal.cs", "PathTracer.ReSTIRDI.Temporal");
-    mDiSpatial = load("ReSTIRDISpatial.cs", "PathTracer.ReSTIRDI.Spatial");
-    mGiTemporal = load("ReSTIRGITemporal.cs", "PathTracer.ReSTIRGI.Temporal");
-    mGiSpatial = load("ReSTIRGISpatial.cs", "PathTracer.ReSTIRGI.Spatial");
+    Pipelines p;
+    p.diInitial = load("ReSTIRDIInitial", "PathTracer.ReSTIRDI.Initial");
+    p.diTemporal = load("ReSTIRDITemporal", "PathTracer.ReSTIRDI.Temporal");
+    p.diSpatial = load("ReSTIRDISpatial", "PathTracer.ReSTIRDI.Spatial");
+    p.giTemporal = load("ReSTIRGITemporal", "PathTracer.ReSTIRGI.Temporal");
+    p.giSpatial = load("ReSTIRGISpatial", "PathTracer.ReSTIRGI.Spatial");
+    return p;
+}
+
+void ReSTIR::Initialize(const std::filesystem::path& shaderDir)
+{
+    mShaderDir = shaderDir;
+    mPipelines[0] = LoadPipelines(false);
     if (!IsDiAvailable() || !IsGiAvailable())
     {
         AIR_LOG(Warning, "PathTracer", "ReSTIR{}{} unavailable (shaders did not load)", IsDiAvailable() ? "" : " DI",
@@ -148,9 +160,14 @@ ReSTIR::TraceOutputs ReSTIR::BeginFrame(rdg::RenderGraph& graph, u32 width, u32 
 
 void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, const gpu::ReSTIRConstants& scene,
                        rdg::TextureRef accumulation, rdg::TextureRef diffuseSignal, rdg::TextureRef specularSignal,
-                       bool shadeDirect, bool shadeIndirect)
+                       bool shadeDirect, bool shadeIndirect, bool coatModels)
 {
     AIR_CHECK(mHitsRef.IsValid(), "ReSTIR::AddPasses without BeginFrame()");
+    if (coatModels && !mPipelines[1].diInitial.IsValid())
+    {
+        mPipelines[1] = LoadPipelines(true);
+    }
+    const Pipelines& p = mPipelines[coatModels && mPipelines[1].diInitial.IsValid() ? 1 : 0];
     const u32 width = mWidth;
     const u32 height = mHeight;
     const u32 groupsX = (width + 7) / 8;
@@ -247,9 +264,9 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
         const rdg::BufferRef initial = transient(sizeof(gpu::Reservoir), "PathTracer.ReSTIRDI.InitialReservoirs");
         const rdg::BufferRef temporal = transient(sizeof(gpu::Reservoir), "PathTracer.ReSTIRDI.TemporalReservoirs");
         const u32 temporalFlag = mUseDiHistory ? gpu::kReSTIRTemporal : 0u;
-        addPass("PathTracer.ReSTIRDI.Initial", mDiInitial, unbiased, {hits}, {initial}, false,
+        addPass("PathTracer.ReSTIRDI.Initial", p.diInitial, unbiased, {hits}, {initial}, false,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c) { c.output = ctx.UAV(initial); });
-        addPass("PathTracer.ReSTIRDI.Temporal", mDiTemporal, unbiased | temporalFlag,
+        addPass("PathTracer.ReSTIRDI.Temporal", p.diTemporal, unbiased | temporalFlag,
                 {hits, initial, previousHits, lastHistory}, {temporal}, false,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
@@ -261,7 +278,7 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                     }
                     c.output = ctx.UAV(temporal);
                 });
-        addPass("PathTracer.ReSTIRDI.Spatial", mDiSpatial, unbiased | (shadeDirect ? gpu::kReSTIRShade : 0u),
+        addPass("PathTracer.ReSTIRDI.Spatial", p.diSpatial, unbiased | (shadeDirect ? gpu::kReSTIRShade : 0u),
                 {hits, temporal}, {history}, shadeDirect,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
@@ -275,7 +292,7 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
         const rdg::BufferRef initial = mGiInitialRef;
         const rdg::BufferRef temporal = transient(sizeof(gpu::GiReservoir), "PathTracer.ReSTIRGI.TemporalReservoirs");
         const u32 temporalFlag = mUseGiHistory ? gpu::kReSTIRTemporal : 0u;
-        addPass("PathTracer.ReSTIRGI.Temporal", mGiTemporal, unbiased | temporalFlag,
+        addPass("PathTracer.ReSTIRGI.Temporal", p.giTemporal, unbiased | temporalFlag,
                 {hits, initial, previousHits, lastHistory}, {temporal}, false,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
@@ -287,7 +304,7 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                     }
                     c.output = ctx.UAV(temporal);
                 });
-        addPass("PathTracer.ReSTIRGI.Spatial", mGiSpatial, unbiased | (shadeIndirect ? gpu::kReSTIRShade : 0u),
+        addPass("PathTracer.ReSTIRGI.Spatial", p.giSpatial, unbiased | (shadeIndirect ? gpu::kReSTIRShade : 0u),
                 {hits, temporal}, {history}, shadeIndirect,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {

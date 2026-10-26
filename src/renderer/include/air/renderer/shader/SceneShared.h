@@ -36,8 +36,11 @@ struct MaterialData
     // and bend the shading normal, at the mesh's texture coordinates times uvScale.
     uint textureSet;
     float uvScale;
+    // A clear coat (1) of this interface roughness over a layer that lets coatColor through.
+    uint coat;
+    float coatRoughness;
+    float3 coatColor;
     uint pad0;
-    uint pad1;
 };
 
 // A material's textures (renderer::MaterialTextures): bindless Texture2D<float4> indices on the GPU,
@@ -128,7 +131,7 @@ struct LightTreeNode
 
 #ifdef __cplusplus
 static_assert(sizeof(Vertex) == 32);
-static_assert(sizeof(MaterialData) == 48);
+static_assert(sizeof(MaterialData) == 64);
 static_assert(sizeof(TextureSetData) == 16);
 static_assert(sizeof(InstanceData) == 112);
 static_assert(sizeof(LightTriangle) == 80);

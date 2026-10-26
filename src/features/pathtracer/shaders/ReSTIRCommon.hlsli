@@ -53,6 +53,8 @@ IntegratorParams MakeParams(FrameData f)
     params.volumeTable = f.volumeTable;
     params.textureSets = f.textureSets;
     params.textureSeed = f.frameIndex;
+    params.coatModel = f.coatModel;
+    gNeuralCoat = f.neuralCoat;
     params.lightCount = f.lightCount;
     params.maxBounces = f.maxBounces;
     params.flags = f.flags;
@@ -109,10 +111,11 @@ struct Receiver
     BsdfContext bsdf;
 };
 
-// The first surface's material as Trace stored it (PrimaryHit::redGreen, blueRoughness, metallic).
+// The first surface's material as Trace stored it (PrimaryHit::redGreen, blueRoughness, metallic);
+// its coat is the material's (LoadSurface).
 BsdfMaterial DecodeMaterial(PrimaryHit h)
 {
-    BsdfMaterial m;
+    BsdfMaterial m = (BsdfMaterial)0;
     m.baseColor = float3(f16tof32(h.redGreen), f16tof32(h.redGreen >> 16), f16tof32(h.blueRoughness));
     m.roughness = f16tof32(h.blueRoughness >> 16);
     m.metallic = f16tof32(h.metallic);
@@ -147,7 +150,10 @@ Receiver LoadReceiver(PrimaryHit h, float3 eye, IntegratorParams params)
     {
         s.shadingNormal = -s.shadingNormal;
     }
-    s.material = DecodeMaterial(h);
+    BsdfMaterial stored = DecodeMaterial(h);
+    s.material.baseColor = stored.baseColor;
+    s.material.roughness = stored.roughness;
+    s.material.metallic = stored.metallic;
     float3 wo = normalize(toEye);
     float3 ns = dot(s.shadingNormal, wo) > 0.0f ? s.shadingNormal : s.geometricNormal;
     r.valid = true;

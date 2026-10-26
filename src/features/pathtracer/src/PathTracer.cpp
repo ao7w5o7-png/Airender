@@ -3,6 +3,7 @@
 #include "air/core/Assert.h"
 #include "air/core/Log.h"
 #include "air/features/pathtracer/Bsdf.h"
+#include "air/features/pathtracer/NeuralCoat.h"
 #include "air/renderer/ShaderLoader.h"
 #include "air/renderer/Transfer.h"
 
@@ -13,6 +14,7 @@
 #include "VolumeMarcher.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -31,7 +33,7 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
            a.nextEventEstimation == b.nextEventEstimation && a.lightTreeBounces == b.lightTreeBounces &&
            a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
            a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && a.furnace == b.furnace && a.debugView == b.debugView &&
-           a.debugScale == b.debugScale;
+           a.debugScale == b.debugScale && a.coatModel == b.coatModel;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -79,7 +81,7 @@ PathTracer::~PathTracer()
             mDevice.DestroyTexture(texture);
         }
     }
-    for (rhi::BufferHandle buffer : {mBsdfLut, mFrameRing})
+    for (rhi::BufferHandle buffer : {mBsdfLut, mFrameRing, mNeuralCoat})
     {
         if (buffer.IsValid())
         {
@@ -90,7 +92,7 @@ PathTracer::~PathTracer()
     mTraceNrcPortable.Destroy(mDevice);
     for (rhi::PipelineHandle pipeline :
          {mTracePipeline, mTracePipelineSer, mTracePipelineGi, mTracePipelineVolume, mTracePipelineVolumeShadows,
-          mTracePipelineNtc, mTracePipelineGiNtc, mResolvePipeline})
+          mTracePipelineNeural, mTracePipelineGiNeural, mResolvePipeline})
     {
         if (pipeline.IsValid())
         {
@@ -129,18 +131,17 @@ bool PathTracer::Initialize(const std::filesystem::path& shaderDir)
         AIR_LOG(Info, "PathTracer", "shader execution reordering {}",
                 mTracePipelineSer.IsValid() ? "available" : "unavailable (PathTracerSer.lib missing)");
     }
-    // The plain kernel that decodes neural texture sets on sample (AIR_PT_NTC), created the first time a
-    // scene has such sets.
-    mTraceNtcDesc = trace;
-    mTraceNtcDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerNtc.lib", "");
-    mTraceNtcDesc.debugName = "PathTracer.TraceNtc";
-    // The kernel that records ReSTIR GI's candidates (AIR_PT_RESTIR_GI), and its twin with AIR_PT_NTC.
+    // The plain kernel with the neural parts (AIR_PT_NEURAL), created the first time a scene needs them.
+    mTraceNeuralDesc = trace;
+    mTraceNeuralDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerNeural.lib", "");
+    mTraceNeuralDesc.debugName = "PathTracer.TraceNeural";
+    // The kernel that records ReSTIR GI's candidates (AIR_PT_RESTIR_GI), and its twin with AIR_PT_NEURAL.
     trace.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGi.lib", "");
     trace.debugName = "PathTracer.TraceGi";
     mTracePipelineGi = mDevice.CreateRayTracingPipeline(trace);
-    mTraceGiNtcDesc = trace;
-    mTraceGiNtcDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGiNtc.lib", "");
-    mTraceGiNtcDesc.debugName = "PathTracer.TraceGiNtc";
+    mTraceGiNeuralDesc = trace;
+    mTraceGiNeuralDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerGiNeural.lib", "");
+    mTraceGiNeuralDesc.debugName = "PathTracer.TraceGiNeural";
     // The kernel that tracks the scene's volume (AIR_PT_VOLUME), created the first time a scene has one.
     mTraceVolumeDesc = trace;
     mTraceVolumeDesc.library = renderer::LoadShader(mDevice, shaderDir, "PathTracerVolume.lib", "");
@@ -212,6 +213,46 @@ u32 PathTracer::GetVolumeMarchLights() const
     return mVolumeMarcher ? mVolumeMarcher->GetLightCount() : 0u;
 }
 
+void PathTracer::UpdateNeuralCoat(const renderer::GpuScene& scene)
+{
+    const std::vector<CoatMaterialSample> materials =
+        scene.desc ? CollectCoatMaterials(*scene.desc) : std::vector<CoatMaterialSample>{};
+    u64 key = 0xcbf29ce484222325ull;
+    const auto* bytes = reinterpret_cast<const u8*>(materials.data());
+    for (size_t i = 0; i < materials.size() * sizeof(CoatMaterialSample); ++i)
+    {
+        key = (key ^ bytes[i]) * 0x100000001b3ull;
+    }
+    if (key == mNeuralCoatKey && (materials.empty() || mNeuralCoat.IsValid()))
+    {
+        return;
+    }
+    mNeuralCoatKey = key;
+    if (mNeuralCoat.IsValid())
+    {
+        mDevice.WaitIdle(); // frames in flight may still read the old network
+        mDevice.DestroyBuffer(mNeuralCoat);
+        mNeuralCoat = {};
+    }
+    mNeuralCoatLoss = 0.0f;
+    if (materials.empty())
+    {
+        return;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const NeuralCoatResult coat = TrainNeuralCoat(materials, {}, mTasks);
+    mNeuralCoatLoss = coat.loss;
+    std::vector<float> padded = coat.parameters; // a constant buffer: 256-byte multiples
+    padded.resize((padded.size() + 63) / 64 * 64, 0.0f);
+    static_assert(gpu::kNeuralCoatParameterVectors * 4 == 852, "PathTracerShared.h: kNeuralCoatParameters / 4");
+    mNeuralCoat = renderer::CreateBufferWithData(
+        mDevice, {.usage = rhi::BufferUsage::Constant, .debugName = "PathTracer.NeuralCoat"}, padded.data(),
+        padded.size() * sizeof(float));
+    AIR_LOG(Info, "PathTracer", "neural coat for {} coated material samples: loss {:.4f}, {} ({:.1f} s)",
+            materials.size(), coat.loss, coat.cached ? "cached" : "trained",
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+}
+
 void PathTracer::ResetAccumulation()
 {
     mResetPending = true;
@@ -233,6 +274,22 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     }
     const renderer::Camera previousCamera = mLastCamera.value_or(camera);
     mLastCamera = camera;
+    // The neural coat follows the coated materials: at once when there is none yet, else once the scene
+    // has stopped changing for a while (an editor dragging a slider keeps the last network until then).
+    if (scene.version != mLastSceneVersion)
+    {
+        mNeuralCoatPending = true;
+        mNeuralCoatStableFrames = 0;
+    }
+    else
+    {
+        ++mNeuralCoatStableFrames;
+    }
+    if (mNeuralCoatPending && (!mNeuralCoat.IsValid() || mNeuralCoatStableFrames >= kNeuralCoatSettleFrames))
+    {
+        mNeuralCoatPending = false;
+        UpdateNeuralCoat(scene);
+    }
     mLastSceneVersion = scene.version;
     mLastSettings = mSettings;
     blackboard.SetValue(slots::kHistoryReset, historyInvalid ? 1.0 : 0.0);
@@ -266,9 +323,10 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         mTracePipelineVolume = mDevice.CreateRayTracingPipeline(mTraceVolumeDesc);
         AIR_CHECK(mTracePipelineVolume.IsValid(), "PathTracer: the volume kernel did not compile");
     }
-    // Neural texture sets decoded on sample: by the plain and ReSTIR GI kernels' twins; the others read
-    // the sets' coarse copies at every vertex.
-    const bool neural = scene.neuralTextures && !volume;
+    // Neural texture sets decoded on sample and coated materials' coat models: by the plain and ReSTIR GI
+    // kernels' twins (and ReSTIR's); the others read the sets' coarse copies and the coats'
+    // approximation.
+    const bool neural = (scene.neuralTextures || scene.coatedMaterials) && !volume;
     auto create = [&](rhi::PipelineHandle& pipeline, const rhi::RayTracingPipelineDesc& desc)
     {
         if (neural && !pipeline.IsValid())
@@ -277,8 +335,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             AIR_CHECK(pipeline.IsValid(), "PathTracer: {} did not compile", desc.debugName);
         }
     };
-    create(mTracePipelineNtc, mTraceNtcDesc);
-    create(mTracePipelineGiNtc, mTraceGiNtcDesc);
+    create(mTracePipelineNeural, mTraceNeuralDesc);
+    create(mTracePipelineGiNeural, mTraceGiNeuralDesc);
     const bool diWanted = on(mSettings.restir.di) && mSettings.nextEventEstimation && !mSettings.furnace &&
                           scene.lightCount > 0 && lightView && !volume && mReSTIR->IsDiAvailable();
     // The neural radiance cache: its own kernel variant, which leaves the indirect light to the cache
@@ -311,8 +369,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         mUsedReSTIRGI = restirGi;
         mUsedNrc = nrc;
         mUsedVolumeMarch = march;
-        mUsedNeuralTextures =
-            neural && !nrc && (restirGi ? mTracePipelineGiNtc.IsValid() : mTracePipelineNtc.IsValid());
+        mUsedNeuralKernels =
+            neural && !nrc && (restirGi ? mTracePipelineGiNeural.IsValid() : mTracePipelineNeural.IsValid());
     }
 
     const float aspect = float(mSettings.width) / float(mSettings.height);
@@ -356,6 +414,11 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.volumeCount = u32(scene.volumes.size());
     frame.volumeTable = volume ? mDevice.GetBindlessSRV(scene.volumeTable) : 0u;
     frame.textureSets = mDevice.GetBindlessSRV(scene.textureSetTable);
+    // Bsdf.hlsli kCoat* (the setting + 1); without a network the neural coat is the approximation.
+    frame.coatModel = mSettings.coatModel == kCoatModelNeural && !mNeuralCoat.IsValid()
+                          ? kCoatModelApproximate + 1
+                          : std::min(mSettings.coatModel, kCoatModelApproximate) + 1;
+    frame.neuralCoat = mNeuralCoat.IsValid() ? mDevice.GetBindlessCBV(mNeuralCoat) : 0u;
     if (!mSettings.accumulate)
     {
         const u32 phase = u32(mFrameIndex % std::max(mSettings.jitterPhases, 1u)) + 1;
@@ -478,14 +541,14 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         const rdg::BufferRef primaryHits = restirOutputs.primaryHits;
         const rdg::BufferRef giReservoirs = restirOutputs.giReservoirs;
 
-        const rhi::PipelineHandle pipeline = nrc        ? nrcPipeline
-                                             : restirGi ? (mUsedNeuralTextures ? mTracePipelineGiNtc : mTracePipelineGi)
-                                             : march    ? mTracePipelineVolumeShadows
-                                             : volume && mTracePipelineVolume.IsValid()
-                                                 ? mTracePipelineVolume
-                                                 : (mUsedNeuralTextures               ? mTracePipelineNtc
-                                                    : UsesShaderExecutionReordering() ? mTracePipelineSer
-                                                                                      : mTracePipeline);
+        const rhi::PipelineHandle pipeline =
+            nrc        ? nrcPipeline
+            : restirGi ? (mUsedNeuralKernels ? mTracePipelineGiNeural : mTracePipelineGi)
+            : march    ? mTracePipelineVolumeShadows
+            : volume && mTracePipelineVolume.IsValid() ? mTracePipelineVolume
+                                                       : (mUsedNeuralKernels                ? mTracePipelineNeural
+                                                          : UsesShaderExecutionReordering() ? mTracePipelineSer
+                                                                                            : mTracePipeline);
         RadianceCache* cache = nrc ? mRadianceCache.get() : nullptr;
         // Under real-time volumes the trace writes the frame's samples here, and the march accumulates.
         rdg::TextureRef target = accumulation;
@@ -624,7 +687,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.bsdfLut = constants.bsdfLut;
             restirScene.skyTable = constants.skyTable;
             mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, diffuseSignal, specularSignal,
-                               view != gpu::kDebugIndirect, view != gpu::kDebugDirect);
+                               view != gpu::kDebugIndirect, view != gpu::kDebugDirect, neural && scene.coatedMaterials);
         }
         if (nrc)
         {

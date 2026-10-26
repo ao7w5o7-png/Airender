@@ -118,6 +118,12 @@ struct VolumeMarchSettings
     bool operator==(const VolumeMarchSettings&) const = default;
 };
 
+// Clear coats (docs/architecture.md §8.17): how coated materials evaluate the light their coat lets in
+// and out again.
+inline constexpr u32 kCoatModelNeural = 0;      // an MLP trained for the scene's coated materials
+inline constexpr u32 kCoatModelRandomWalk = 1;  // the reference: a random walk per evaluation (noisy)
+inline constexpr u32 kCoatModelApproximate = 2; // one bounce through a smooth coat, analytic
+
 struct PathTracerSettings
 {
     u32 width = 1920;
@@ -158,6 +164,7 @@ struct PathTracerSettings
     // DXR 1.2 shader execution reordering when the device actually reorders. Off by default: with
     // this kernel's cheap shading the reorder costs more than it saves (docs/architecture.md §8.2).
     bool shaderExecutionReordering = false;
+    u32 coatModel = kCoatModelNeural;
 };
 
 class ReSTIR;
@@ -178,6 +185,12 @@ public:
     bool Initialize(const std::filesystem::path& shaderDir);
 
     void ResetAccumulation();
+    // Where the neural coat trains (TrainNeuralCoat) when a scene's coated materials change; null: on
+    // the frame thread alone.
+    void SetTaskSystem(TaskSystem* tasks) { mTasks = tasks; }
+    // The neural coat of the scene's coated materials: its training loss (0: none), and whether it came
+    // from the cache.
+    float GetNeuralCoatLoss() const { return mNeuralCoatLoss; }
 
     // Adds this frame's passes. `output` must allow UnorderedAccess and be RGBA16F/RGBA32F.
     // Restarts accumulation by itself when the camera, scene or an image-affecting setting changed.
@@ -190,14 +203,15 @@ public:
     bool UsesShaderExecutionReordering() const
     {
         return mSettings.shaderExecutionReordering && mTracePipelineSer.IsValid() && !mUsedReSTIRGI &&
-               !mUsedNeuralTextures;
+               !mUsedNeuralKernels;
     }
     bool IsConverged() const { return mSettings.accumulate && mAccumulatedSamples >= mSettings.targetSamples; }
     // Whether the last traced frame's direct / indirect light came from ReSTIR DI / GI.
     bool UsesReSTIRDI() const { return mUsedReSTIRDI; }
     bool UsesReSTIRGI() const { return mUsedReSTIRGI; }
-    // Whether the last traced frame decoded neural texture sets on sample (a kernel with AIR_PT_NTC).
-    bool UsesNeuralTextures() const { return mUsedNeuralTextures; }
+    // Whether the last traced frame ran the kernels with the neural parts (AIR_PT_NEURAL: neural texture
+    // sets decoded on sample, coated materials' models).
+    bool UsesNeuralKernels() const { return mUsedNeuralKernels; }
     // Whether the last traced frame's paths ended in the neural radiance cache, and whether it ran
     // on the matrix units (Shader Model 6.10 linear algebra).
     bool UsesRadianceCache() const { return mUsedNrc; }
@@ -212,6 +226,9 @@ public:
     PathTracerSettings& MutableSettings() { return mSettings; }
 
 private:
+    // Trains (or finds) the neural coat when the scene's coated materials changed.
+    void UpdateNeuralCoat(const renderer::GpuScene& scene);
+
     rhi::Device& mDevice;
     PathTracerSettings mSettings;
     PathTracerSettings mLastSettings;
@@ -227,17 +244,26 @@ private:
     // The kernel under real-time volumes (AIR_PT_VOLUME_SHADOWS), created the first time they run.
     rhi::RayTracingPipelineDesc mTraceVolumeShadowsDesc;
     rhi::PipelineHandle mTracePipelineVolumeShadows;
-    // The kernels that decode neural texture sets on sample (AIR_PT_NTC), PathTracerNtc.lib and
-    // PathTracerGiNtc.lib, created the first time a scene has such sets.
-    rhi::RayTracingPipelineDesc mTraceNtcDesc;
-    rhi::RayTracingPipelineDesc mTraceGiNtcDesc;
-    rhi::PipelineHandle mTracePipelineNtc;
-    rhi::PipelineHandle mTracePipelineGiNtc;
+    // The kernels with the neural parts (AIR_PT_NEURAL: neural texture sets decoded on sample, the clear
+    // coats' models), PathTracerNeural.lib and PathTracerGiNeural.lib, created the first time a scene
+    // needs them.
+    rhi::RayTracingPipelineDesc mTraceNeuralDesc;
+    rhi::RayTracingPipelineDesc mTraceGiNeuralDesc;
+    rhi::PipelineHandle mTracePipelineNeural;
+    rhi::PipelineHandle mTracePipelineGiNeural;
     // PathTracerNrc.cs (paths end in the cache, linear algebra) and PathTracerNrcPortable.cs (float32),
     // created the first time the cache runs.
     renderer::LazyComputePipeline mTraceNrc;
     renderer::LazyComputePipeline mTraceNrcPortable;
     rhi::PipelineHandle mResolvePipeline;
+    // The neural coat: its parameters (ByteAddressBuffer) for the coated materials it was trained on.
+    TaskSystem* mTasks = nullptr;
+    rhi::BufferHandle mNeuralCoat;
+    u64 mNeuralCoatKey = 0;
+    float mNeuralCoatLoss = 0.0f;
+    static constexpr u32 kNeuralCoatSettleFrames = 30; // unchanged frames before a new network trains
+    bool mNeuralCoatPending = true;
+    u32 mNeuralCoatStableFrames = 0;
     rhi::TextureHandle mAccumulation;
     rhi::Access mAccumulationAccess = rhi::Access::None;
     rhi::BufferHandle mBsdfLut;
@@ -249,7 +275,7 @@ private:
     bool mUsedVolumeMarch = false;
     bool mUsedReSTIRDI = false;
     bool mUsedReSTIRGI = false;
-    bool mUsedNeuralTextures = false;
+    bool mUsedNeuralKernels = false;
     bool mUsedNrc = false;
 
     u32 mAccumulatedSamples = 0;

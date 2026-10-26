@@ -223,6 +223,10 @@ public:
     virtual BindlessIndex GetBindlessUAV(TextureHandle texture, u32 mip = 0) = 0;
     virtual BindlessIndex GetBindlessSRV(BufferHandle buffer) = 0;
     virtual BindlessIndex GetBindlessUAV(BufferHandle buffer) = 0;
+    // A constant buffer view (HLSL ConstantBuffer<T> from ResourceDescriptorHeap) of a whole buffer with
+    // BufferUsage::Constant whose size is a multiple of 256 bytes: what every thread reads alike, read
+    // through the constant cache.
+    virtual BindlessIndex GetBindlessCBV(BufferHandle buffer) = 0;
     virtual BindlessIndex GetBindlessSRV(AccelStructHandle tlas) = 0;
     // Raw slots in the bindless heap for code that writes its own descriptors (ImGui textures).
     // FreeBindlessSlot() is deferred like resource destruction.

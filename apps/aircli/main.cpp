@@ -31,6 +31,8 @@
 //                    (float32 and linear algebra) against the CPU's (JSON; exit 1 when they disagree)
 //   aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]   neural
 //                    texture decoding in the shader (as on sample) against LibNTC's on CUDA (JSON)
+//   aircli coat-check [--scene NAME] [--directions N]   the neural coat of a scene's coated materials
+//                    against the random walk it learnt from: errors and albedos (JSON)
 //
 // `render` fails (exit 1) if any frame produced a validation error.
 
@@ -40,6 +42,7 @@
 #include "air/core/Log.h"
 #include "air/core/Profiler.h"
 #include "air/core/TaskSystem.h"
+#include "air/features/pathtracer/NeuralCoat.h"
 #include "air/features/pathtracer/ReferenceRenderer.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
@@ -101,7 +104,8 @@ int Usage()
                "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
                "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
                "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
-               "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n",
+               "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n"
+               "  aircli coat-check [--scene NAME] [--directions N]\n",
                stderr);
     return kExitUsage;
 }
@@ -812,6 +816,53 @@ int CommandMlpCheck(Args& args)
 }
 
 // ---------------------------------------------------------------------------
+// coat-check
+// ---------------------------------------------------------------------------
+int CommandCoatCheck(Args& args)
+{
+    std::string sceneName = "coated";
+    u32 directions = 256;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--scene")
+        {
+            sceneName = args.Next();
+        }
+        else if (arg == "--directions")
+        {
+            directions = u32(std::stoul(std::string(args.Next())));
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
+    if (args.error || !scene)
+    {
+        return Usage();
+    }
+    TaskSystem tasks;
+    const std::vector<pt::CoatMaterialSample> materials = pt::CollectCoatMaterials(*scene);
+    if (materials.empty())
+    {
+        AIR_LOG(Error, "aircli", "scene '{}' has no coated materials", sceneName);
+        return kExitUsage;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const pt::NeuralCoatResult coat = pt::TrainNeuralCoat(materials, {}, &tasks);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    json::Value report = pt::CheckNeuralCoat(materials, coat.parameters, directions, &tasks);
+    report["scene"] = sceneName;
+    report["trainingLoss"] = coat.loss;
+    report["trainingSeconds"] = seconds;
+    report["cached"] = coat.cached;
+    std::puts(report.Dump().c_str());
+    return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
 // ntc-check
 // ---------------------------------------------------------------------------
 int CommandNtcCheck(Args& args)
@@ -1251,6 +1302,10 @@ int main(int argc, char** argv)
     if (command == "ntc-check")
     {
         return CommandNtcCheck(args);
+    }
+    if (command == "coat-check")
+    {
+        return CommandCoatCheck(args);
     }
     if (command == "vdb")
     {

@@ -48,6 +48,9 @@ gpu::MaterialData Material::ToGpu() const
     out.emission = luminance > 0.0f && emissionNits > 0.0f ? emissionColor * (emissionNits / luminance) : float3(0.0f);
     out.textureSet = textures == kNoTextures ? gpu::kInvalidIndex : textures;
     out.uvScale = uvScale;
+    out.coat = coat ? 1u : 0u;
+    out.coatRoughness = coatRoughness;
+    out.coatColor = coatColor;
     return out;
 }
 
@@ -331,6 +334,7 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"smoke", detail::MakeSmoke},
     {"braziers", detail::MakeBraziers},
     {"textured", detail::MakeTextured},
+    {"coated", detail::MakeCoated},
 };
 
 } // namespace
@@ -415,6 +419,12 @@ std::string Validate(const SceneDesc& desc)
             !(m.emissionNits >= 0.0f))
         {
             return std::format("material '{}': roughness and metallic must be in [0, 1], emission >= 0", m.name);
+        }
+        if (m.coat && (!(m.coatRoughness >= 0.0f && m.coatRoughness <= 1.0f) ||
+                       !(std::min({m.coatColor.x, m.coatColor.y, m.coatColor.z}) >= 0.0f &&
+                         std::max({m.coatColor.x, m.coatColor.y, m.coatColor.z}) <= 1.0f)))
+        {
+            return std::format("material '{}': coat roughness and colour must be in [0, 1]", m.name);
         }
         if (m.textures != kNoTextures && m.textures >= desc.textureSets.size())
         {

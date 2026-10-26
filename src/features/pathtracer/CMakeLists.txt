@@ -2,6 +2,7 @@ air_add_feature(NAME pathtracer
     SOURCES
         src/Bsdf.cpp
         src/PathTracer.cpp
+        src/NeuralCoat.cpp
         src/PathTracerFeature.cpp
         src/RadianceCache.cpp
         src/ReferenceRenderer.cpp
@@ -12,6 +13,7 @@ air_add_feature(NAME pathtracer
         src/VolumeShadowLayout.cpp
     TESTS
         tests/BsdfTests.cpp
+        tests/CoatTests.cpp
         tests/IntegratorTests.cpp
         tests/LightTreeTests.cpp
         tests/PathTracerTests.cpp

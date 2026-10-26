@@ -498,6 +498,7 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
   | `smoke` | smoke rising from a brazier in a walled yard, the low sun behind it | volumes (§8.12): scattering, NEE in a medium, its shadow |
   | `braziers` | three overlapping plumes over braziers at dusk, a lantern among them | several volumes and light groups near them (§8.13) |
   | `textured` | a courtyard corner of tiles, bricks and riveted metal plates in the afternoon sun | material textures and normal maps (§8.15), neural texture compression (§8.16) |
+  | `coated` | the courtyard with clear coats: red car paint, blue lacquer, amber-lacquered tiles, coated plates | clear coats and their network (§8.17) |
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
@@ -1514,10 +1515,10 @@ says why and scenes keep their textures.
     footprints are wide, read the set's coarse copy (a quarter of its resolution, box filtered in
     linear light, `kNeuralTextureCoarseFactor`; what ray cones would choose at most of them), and
     ReSTIR reads the first surface's material from `PrimaryHit` (§8.7), so a pixel decodes once a
-    frame. The decoder lives in kernel variants of their own (`PathTracerNtc.hlsl`,
-    `PathTracerGiNtc.hlsl`, `AIR_PT_NTC`), used while the scene has such sets: compiled into the other
-    kernels its registers cost them 7-10%. The volume and radiance cache kernels read the coarse copy
-    everywhere.
+    frame. The decoder lives in the kernel variants with the neural parts (`PathTracerNeural.hlsl`,
+    `PathTracerGiNeural.hlsl`, `AIR_PT_NEURAL`; also the clear coats' models, §8.17), used while the
+    scene has such sets: compiled into the other kernels its registers cost them 7-10%. The volume and
+    radiance cache kernels read the coarse copy everywhere.
   - Either way the scene's texels become the decoded ones (with the int8 weights, as the shader
     decodes), so the CPU reference renders what the GPU does.
 - **Compression** (`NeuralTextureCodec`): `PickLatentShape` for the rate (4 bits per texel asks for
@@ -1541,6 +1542,72 @@ says why and scenes keep their textures.
   per channel, means within 3e-4. `NeuralTextures_*` (the coarse copy, a scene's latents and its
   kernels on the Null device, and with LibNTC a codec round trip and the cache), and
   `Editor_NeuralTexturesReloadTheScene`; on the GPU the debug layer reports no errors.
+
+### 8.17 Neural shading: clear coats
+
+A material may wear a clear coat (`Material::coat`, `coatRoughness`, `coatColor`): a rough
+dielectric interface (index 1.5, GGX) over a layer that absorbs (`coatColor` is what it lets through
+at normal incidence, one way) over the material itself. The light the interface reflects has a
+closed form; the light that enters, bounces between the base and the underside of the interface and
+leaves again (the inner part) has none. Layered materials like this are where neural materials pay
+off (Zeltner et al., *Real-Time Neural Appearance Models*, 2024): a small network stands in for an
+evaluation that is otherwise a stochastic simulation. `pathtracer.coatModel` chooses how the inner
+part is evaluated (`Bsdf.hlsli`):
+
+| Model | What it is |
+|---|---|
+| 0 neural (default) | the approximation times `exp(z)`, z from an MLP trained for the scene's coated materials: noise free |
+| 1 random walk | the reference: one walk between the interface and the base per evaluation, with next event estimation to wi from both ends weighed by the power heuristic (position-free layered BSDF, Guo et al. 2018, as pbrt-v4's `LayeredBxDF` evaluates it); unbiased and noisy |
+| 2 approximate | one bounce off the base through a smooth interface, `(1 - F(wo)) (1 - F(wi)) f_base(wo', wi') T(wo') T(wi') / eta^2`, times `1 / (1 - albedo * 0.596)` for the diffuse light the interface sends back down |
+
+- **The interface**: pbrt-v4's rough dielectric (reflection and refraction, either side, radiance and
+  importance transport, visible normal sampling restricted to a lobe), the Fresnel term exact.
+- **Sampling** serves all three models: the interface's reflection with probability
+  `F(wo) / (F(wo) + (1 - F(wo)) * luminance(base * coat^2))` (clamped to [0.1, 0.9]), else the base's
+  lobes; the inner part evaluated at what was drawn is weighed by that mixture's pdf, so every model
+  is unbiased with respect to its own BSDF and MIS works as for any material. The walk evaluates from
+  a seed hashed from the hit, the frame and wi: the same direction gets the same estimate wherever a
+  frame evaluates it.
+- **The network** (`NeuralCoat.hlsli`, shared by HLSL and C++): 32 inputs (the directions outside and
+  refracted into the layer, their half vectors, azimuth, how far the base's lobe peaks there, sines
+  and cosines of those angles, the material), two hidden layers of 16 ReLUs, three outputs, 852
+  parameters. It corrects the approximation multiplicatively (`|z| <= 6`), so the analytic part keeps
+  the peaks and the colour and the network learns a smooth factor.
+- **Training** (`NeuralCoat.cpp`, on the CPU): `CollectCoatMaterials` samples the scene's coated
+  materials, a textured one by its texels; every step draws 4096 samples (a material, wo from grazing
+  to normal incidence, wi half from the sampling above and half uniform), each with the mean of four
+  walks as its target, and takes an Adam step on the relative L2 error of the inner part (unbiased in
+  the targets' noise: the gradient is linear in them). 1500 steps take about 2.5 s on 23 threads,
+  deterministic (chunks summed in order); results are cached by the materials and settings
+  (`<temp>/airender-neural-coat`; the version in its key goes up when the coat's code changes). The
+  path tracer trains when the coated materials change: at once without a network, else once the scene
+  has been unchanged for 30 frames (an editor slider keeps the last network meanwhile); the CPU
+  reference trains (or finds) the same network. Its weights reach the shaders as a constant buffer
+  (`Device::GetBindlessCBV`): every thread reads the same weights.
+- **Kernels**: coats are compiled only into the kernels with the neural parts (`AIR_PT_NEURAL`:
+  `PathTracerNeural.hlsl`, `PathTracerGiNeural.hlsl` and `ReSTIR*Neural.hlsl`, used while the scene
+  has coated materials or neural textures); elsewhere a coated material is its base. Compiled into
+  every kernel, even unused, the coat cost `cornell_box` 8.0 -> 24.3 ms a frame (the walk's loop inlined
+  into ReSTIR's resampling loops: 47x in `ReSTIRDI.Initial`), its approximation alone 8%. The volume and
+  radiance cache kernels render coated materials without their coats.
+- **Measured** (`coated`, RTX 5070): the network's inner part against 256 walks per direction, over
+  the scene's material samples: 2.2% relative RMS error (the approximation 12%; much of the 2.2% is the
+  reference's own noise); directional albedos within about 1% of the walk's. Images accumulated over
+  2048 frames at 320 x 180 against the walk: network +0.01% (blocks of 8 x 8 pixels: median +0.01%,
+  5th-95th percentile -0.2% to +0.5%), approximation -0.71%; the CPU reference with the same network
+  agrees with the GPU's (block median +0.02%). White furnace (the bases white, the layers clear): the
+  walk 0.940 (a rough interface at grazing angles loses some light to its single scattering) to 1.008
+  (`Coat_WhiteFurnaceRandomWalk`); with the scene's own shapes the image means are walk -3.5%, network
+  -4.7% (white bases are outside what it trained on), approximation -6.9%, against -3.2% for the
+  uncoated `textured` (its normal maps). Cost at 1920 x 1080 in real time (frame / `Trace`): the
+  approximation 11.4 / 5.0 ms, the network 16.7 / 6.3 ms, the walk 22.6 / 6.1 ms (and noisy).
+  A walk limited to 10 events (pbrt's default) lost 8% of a white coated base: light the interface
+  traps by total internal reflection keeps much of its weight for several round trips, so the limit is
+  64 and Russian roulette ends walks early.
+- **Validation**: `aircli coat-check [--scene NAME]` (the network and the approximation against the
+  walk: errors, albedos), `Coat_*` (white furnace, absorption, reciprocity of the walk, sampling against
+  uniform integration for the walk and the approximation, kernels on the Null device),
+  `NeuralCoat_LearnsTheRandomWalk`.
 
 ---
 

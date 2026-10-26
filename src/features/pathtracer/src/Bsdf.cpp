@@ -15,14 +15,24 @@ using namespace air::hlsl;
 
 // The table BsdfLutLoad() reads. Points at the finished LUT, or at the partial one while it is built.
 thread_local const float* tLut = nullptr;
+// The neural coat's parameters (BindNeuralCoat); null: none, the network outputs no correction.
+thread_local const float* tNeuralCoat = nullptr;
 
 float BsdfLutLoad(uint index);
+float4 NeuralCoatWeights4(uint index);
 
+#define AIR_BSDF_COATS 1
 #include "Bsdf.hlsli"
 
 float BsdfLutLoad(uint index)
 {
     return tLut[index];
+}
+
+float4 NeuralCoatWeights4(uint index)
+{
+    const float* p = tNeuralCoat;
+    return p ? float4(p[index], p[index + 1], p[index + 2], p[index + 3]) : float4(0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 } // namespace shader
@@ -131,12 +141,19 @@ void BindLut()
     shader::tLut = Lut().data();
 }
 
+static_assert(u32(CoatModel::Neural) == shader::kCoatNeural && u32(CoatModel::RandomWalk) == shader::kCoatRandomWalk &&
+              u32(CoatModel::Approximate) == shader::kCoatApproximate);
+
 shader::BsdfMaterial ToShader(const Material& m)
 {
     shader::BsdfMaterial out;
     out.baseColor = float3(m.baseColor[0], m.baseColor[1], m.baseColor[2]);
     out.roughness = m.roughness;
     out.metallic = m.metallic;
+    out.coat = shader::uint(m.coat);
+    out.coatRoughness = m.coatRoughness;
+    out.coatColor = float3(m.coatColor[0], m.coatColor[1], m.coatColor[2]);
+    out.coatSeed = m.coatSeed;
     return out;
 }
 
@@ -157,6 +174,11 @@ std::span<const float> GetBsdfLut()
     return Lut();
 }
 
+void BindNeuralCoat(std::span<const float> parameters)
+{
+    shader::tNeuralCoat = parameters.empty() ? nullptr : parameters.data();
+}
+
 BsdfValue EvaluateBsdf(const Material& material, const Direction& wo, const Direction& wi)
 {
     BindLut();
@@ -174,12 +196,13 @@ BsdfDraw SampleBsdf(const Material& material, const Direction& wo, float uLobe, 
 Rgb EstimateAlbedo(const Material& material, float cosThetaO, u32 sampleCount)
 {
     BindLut();
-    const shader::BsdfMaterial m = ToShader(material);
+    shader::BsdfMaterial m = ToShader(material);
     const float3 wo(std::sqrt(std::max(0.0f, 1.0f - cosThetaO * cosThetaO)), 0.0f, cosThetaO);
     shader::uint seed = 0x9e3779b9u;
     double sum[3] = {};
     for (u32 i = 0; i < sampleCount; ++i)
     {
+        m.coatSeed = shader::Pcg(material.coatSeed + i);
         const float uLobe = shader::Rand(seed);
         const float u0 = shader::Rand(seed);
         const float u1 = shader::Rand(seed);

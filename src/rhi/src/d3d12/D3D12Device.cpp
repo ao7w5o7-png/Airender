@@ -822,6 +822,7 @@ void D3D12Device::DestroyBuffer(BufferHandle handle)
             AIR_CHECK(buffer, "DestroyBuffer on stale handle");
             ReleaseDescriptor(buffer->srv);
             ReleaseDescriptor(buffer->uav);
+            ReleaseDescriptor(buffer->cbv);
             buffer->resource.Reset();
             if (buffer->ownsAllocation)
             {
@@ -1074,6 +1075,26 @@ BindlessIndex D3D12Device::GetBindlessSRV(BufferHandle handle)
         mDevice->CreateShaderResourceView(b->resource.Get(), &srv, CpuHandle(b->srv));
     }
     return b->srv;
+}
+
+BindlessIndex D3D12Device::GetBindlessCBV(BufferHandle handle)
+{
+    D3D12Buffer* b = mBuffers.Get(handle);
+    AIR_CHECK(b, "GetBindlessCBV: invalid buffer");
+    AIR_CHECK(
+        Any(b->desc.usage & BufferUsage::Constant) && b->desc.size % 256 == 0 && b->desc.size <= 65536,
+        "buffer '{}' needs Constant usage and a size of a multiple of 256 up to 64 KiB for a constant buffer view",
+        b->desc.debugName);
+    std::lock_guard lock(mViewMutex);
+    if (b->cbv == kInvalidBindless)
+    {
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbv = {};
+        cbv.BufferLocation = b->address;
+        cbv.SizeInBytes = UINT(b->desc.size);
+        b->cbv = AllocateDescriptor();
+        mDevice->CreateConstantBufferView(&cbv, CpuHandle(b->cbv));
+    }
+    return b->cbv;
 }
 
 BindlessIndex D3D12Device::GetBindlessUAV(BufferHandle handle)

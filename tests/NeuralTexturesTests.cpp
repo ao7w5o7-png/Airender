@@ -206,16 +206,16 @@ TEST(NeuralTextures_PathTracerUsesItsKernels)
     h.camera = h.scene->Desc().camera;
     renderer::FrameResult frame = h.Frame();
     EXPECT(frame.validationErrors.empty());
-    EXPECT(airtest::ContainsLine(frame.commands, "SetPipeline pipeline 'PathTracer.TraceNtc'"));
-    EXPECT(h.runner->DescribeFeatures().Dump(0).find("\"neuralTextures\":true") != std::string::npos);
+    EXPECT(airtest::ContainsLine(frame.commands, "SetPipeline pipeline 'PathTracer.TraceNeural'"));
+    EXPECT(h.runner->DescribeFeatures().Dump(0).find("\"neuralKernels\":true") != std::string::npos);
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
     frame = h.Frame();
     EXPECT(frame.validationErrors.empty());
-    EXPECT(airtest::ContainsLine(frame.commands, "SetPipeline pipeline 'PathTracer.TraceGiNtc'"));
+    EXPECT(airtest::ContainsLine(frame.commands, "SetPipeline pipeline 'PathTracer.TraceGiNeural'"));
     h.device->WaitIdle();
     h.scene = std::make_unique<renderer::Scene>(*h.device, airtest::BuiltinScene("textured"));
     frame = h.Frame();
     EXPECT(frame.validationErrors.empty());
-    EXPECT(!airtest::ContainsLine(frame.commands, "Ntc'"));
-    EXPECT(h.runner->DescribeFeatures().Dump(0).find("\"neuralTextures\":false") != std::string::npos);
+    EXPECT(!airtest::ContainsLine(frame.commands, "Neural'"));
+    EXPECT(h.runner->DescribeFeatures().Dump(0).find("\"neuralKernels\":false") != std::string::npos);
 }

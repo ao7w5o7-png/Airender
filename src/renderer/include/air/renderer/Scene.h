@@ -65,6 +65,11 @@ struct Material
     // uvScale times over the mesh's texture coordinates.
     u32 textures = kNoTextures;
     float uvScale = 1.0f;
+    // A clear coat over the material (docs/architecture.md §8.17): a rough dielectric interface of
+    // coatRoughness over a layer that lets coatColor through at normal incidence, one way.
+    bool coat = false;
+    float coatRoughness = 0.05f;
+    float3 coatColor = {1.0f, 1.0f, 1.0f};
 
     gpu::MaterialData ToGpu() const;
     bool operator==(const Material&) const = default;
@@ -144,6 +149,8 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //                  them: several volumes and light groups near and inside them
 //   textured       a courtyard corner of textured materials (tiles, bricks, metal plates) in the
 //                  afternoon sun: normal maps, glazed and metallic texels (MaterialTextures)
+//   coated         the courtyard with clear coats: car paint, lacquered tiles, coated metal plates
+//                  (Material::coat)
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 // Procedural material textures, size x size texels, repeating (MaterialTextures.cpp): red bricks in
@@ -183,7 +190,11 @@ struct GpuScene
     // StructuredBuffer<gpu::TextureSetData> (bindless indices of RGBA8 SRGB / UNORM Texture2Ds, or of a
     // neural set's latents and data), one per SceneDesc::textureSets entry, at least one element.
     rhi::BufferHandle textureSetTable;
-    bool neuralTextures = false; // some set is decoded on sample (TextureSetData::latents)
+    bool neuralTextures = false;  // some set is decoded on sample (TextureSetData::latents)
+    bool coatedMaterials = false; // some material wears a clear coat (Material::coat)
+    // The description the scene was made from, kept current by its edits: for features that need the
+    // materials on the CPU (the path tracer trains the neural coat for the coated ones).
+    const SceneDesc* desc = nullptr;
     rhi::BufferHandle lights;    // StructuredBuffer<gpu::LightTriangle>, at least one element
     rhi::BufferHandle lightTree; // StructuredBuffer<gpu::LightTreeNode> over `lights`, at least one node
     // StructuredBuffer<uint> per instance: its first entry in `lights`, gpu::kInvalidIndex if it does

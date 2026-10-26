@@ -140,6 +140,10 @@ public:
         mParameters.Add(
             "ser", &mSettings.shaderExecutionReordering,
             "Shader execution reordering (DXR 1.2) where the GPU reorders; slower with today's cheap shading");
+        mParameters.Add("coatModel", &mSettings.coatModel,
+                        "Clear coats: 0 neural (an MLP trained for the scene's coated materials), 1 random walk "
+                        "(the reference, noisy), 2 analytic approximation",
+                        0, kCoatModelApproximate);
         mParameters.Add("debugScale", &mSettings.debugScale,
                         "Full scale of the depth (metres) and intersection heatmap views", 1e-3f, 1e6f);
     }
@@ -154,6 +158,7 @@ public:
         const float ratio = float(context.width) / float(std::max(context.renderWidth, 1u));
         mSettings.jitterPhases = std::max(32u, u32(std::ceil(8.0f * ratio * ratio)));
         mTracer = std::make_unique<PathTracer>(context.device, mSettings);
+        mTracer->SetTaskSystem(&context.tasks);
         return mTracer->Initialize(context.shaderDir);
     }
 
@@ -189,7 +194,8 @@ public:
         status["ser"] = mTracer && mTracer->UsesShaderExecutionReordering();
         status["restirDi"] = mTracer && mTracer->UsesReSTIRDI();
         status["restirGi"] = mTracer && mTracer->UsesReSTIRGI();
-        status["neuralTextures"] = mTracer && mTracer->UsesNeuralTextures(); // decoded on sample
+        status["neuralKernels"] = mTracer && mTracer->UsesNeuralKernels(); // AIR_PT_NEURAL
+        status["neuralCoatLoss"] = mTracer ? mTracer->GetNeuralCoatLoss() : 0.0f;
         status["nrc"] = mTracer && mTracer->UsesRadianceCache();
         status["nrcLinearAlgebra"] = mTracer && mTracer->RadianceCacheUsesLinearAlgebra();
         status["nrcSteps"] = mTracer ? mTracer->GetRadianceCacheSteps() : 0u;

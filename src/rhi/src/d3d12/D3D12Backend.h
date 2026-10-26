@@ -105,6 +105,7 @@ struct D3D12Buffer
     D3D12_GPU_VIRTUAL_ADDRESS address = 0;
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
+    BindlessIndex cbv = kInvalidBindless;
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
 };
 
@@ -323,6 +324,7 @@ public:
     BindlessIndex GetBindlessSRV(TextureHandle texture) override;
     BindlessIndex GetBindlessUAV(TextureHandle texture, u32 mip) override;
     BindlessIndex GetBindlessSRV(BufferHandle buffer) override;
+    BindlessIndex GetBindlessCBV(BufferHandle buffer) override;
     BindlessIndex GetBindlessUAV(BufferHandle buffer) override;
     BindlessIndex GetBindlessSRV(AccelStructHandle tlas) override;
     BindlessIndex AllocateBindlessSlot() override;

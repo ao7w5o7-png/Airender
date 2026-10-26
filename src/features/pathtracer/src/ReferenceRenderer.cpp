@@ -29,6 +29,7 @@ struct Kernel : SceneHooks
 // NOLINTBEGIN(readability-identifier-naming)
 #define AIR_PT_VOLUME 1 // the reference renders everything
 #define AIR_PT_PROBE 1  // and the probes of the real-time volumes (kFlagProbe)
+#define AIR_BSDF_COATS 1
 #include "Integrator.hlsli"
 #include "VolumeProbes.hlsli"
     // NOLINTEND(readability-identifier-naming)
@@ -101,7 +102,7 @@ Image RenderReference(const renderer::SceneDesc& scene, const renderer::Camera& 
     const std::string problem = renderer::Validate(scene);
     AIR_CHECK(problem.empty(), "reference renderer: {}", problem);
 
-    const SceneTables tables = BuildSceneTables(scene);
+    const SceneTables tables = BuildSceneTables(scene, settings.tasks);
     const ReferenceLighting lighting = LightingFor(tables, camera, settings);
     const Kernel::IntegratorParams params = MakeParams<Kernel::IntegratorParams>(tables, settings, lighting.sky, 0u);
     const float exposure = lighting.exposure;

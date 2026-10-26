@@ -49,7 +49,7 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   `smoke` for volumes (`--volume FILE.vdb|plume[,EXTINCTION,ALBEDO,G] --volume-at X,Y,Z,SIZE` puts
   an OpenVDB grid in any scene, repeated for several; `aircli vdb FILE` lists a file's grids; §8.12),
   `braziers` for several volumes and lights close to them (§8.13), `textured` for material textures
-  and normal maps (§8.15).
+  and normal maps (§8.15), `coated` for clear coats and their network (§8.17).
   `--camera EX,EY,EZ,TX,TY,TZ[,FOV]` and `--ev EV100` move a scene's camera.
   Validate GPU against `aircli reference` on the same scene.
 - Real-time volumes (`pathtracer.volumeMarch`, on when `accumulate=0`; docs/architecture.md §8.13):
@@ -65,9 +65,13 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   (output size); see docs/architecture.md §8.5.
 - Neural texture compression (LibNTC, docs/architecture.md §8.16): `--neural-textures load|sample[,BPP]`
   on `render` / `reference` (the `textured` scene); decoding on sample runs in the path tracer's
-  `AIR_PT_NTC` kernels. After touching the decode path run `aircli ntc-check --shaders build/shaders`
+  `AIR_PT_NEURAL` kernels. After touching the decode path run `aircli ntc-check --shaders build/shaders`
   (the shader's decode against LibNTC's CUDA decode, every texel), and compare an accumulated
   `sample` image with a `load` one (they agree within about 0.1%).
+- Neural shading, clear coats (docs/architecture.md §8.17, scene `coated`): `--set pathtracer.coatModel=0|1|2`
+  (network, random walk reference, approximation). After changing the coat or its network run
+  `aircli coat-check` and compare an accumulated `coatModel=0` image with a `coatModel=1` one; raise the
+  version in `TrainNeuralCoat`'s cache key so stale networks are not reused.
 - Real-time denoising (docs/architecture.md §8.14): the editor's default chain is
   `pathtracer,nrd,taa,tonemap` (NRD on the surfaces' light split by lobe, TAA for edges; nrd needs
   D3D12), the alternative `pathtracer,dlss`. Anything that adds light at the first surface must also

@@ -757,4 +757,45 @@ SceneDesc MakeTextured()
     return scene;
 }
 
+// The courtyard with clear coats (Material::coat): the metal plates under a clear coat, the tiled
+// ball lacquered amber, and two new balls in front: red car paint (a rough metallic base under a
+// smooth coat) and a dark blue diffuse base under a slightly rough one.
+SceneDesc MakeCoated()
+{
+    SceneDesc scene = MakeTextured();
+    scene.name = "coated";
+    for (Material& m : scene.materials)
+    {
+        if (m.name == "MetalPlates")
+        {
+            m.coat = true;
+            m.coatRoughness = 0.04f;
+        }
+        else if (m.name == "TileBall")
+        {
+            m.coat = true;
+            m.coatRoughness = 0.1f;
+            m.coatColor = {0.92f, 0.78f, 0.5f};
+        }
+    }
+    const u32 carPaint = AddMaterial(scene, {.name = "CarPaint",
+                                             .baseColor = {0.75f, 0.06f, 0.05f},
+                                             .roughness = 0.4f,
+                                             .metallic = 1.0f,
+                                             .coat = true,
+                                             .coatRoughness = 0.03f});
+    const u32 lacquer = AddMaterial(scene, {.name = "Lacquer",
+                                            .baseColor = {0.04f, 0.12f, 0.45f},
+                                            .roughness = 0.9f,
+                                            .metallic = 0.0f,
+                                            .coat = true,
+                                            .coatRoughness = 0.12f,
+                                            .coatColor = {0.97f, 0.97f, 0.97f}});
+    SetTransform(AddInstance(scene, "CarPaintBall", AddMesh(scene, MakeSphere("CarPaintBall", 0.35f, 64)), carPaint),
+                 {0.3f, 0.35f, 0.6f});
+    SetTransform(AddInstance(scene, "LacquerBall", AddMesh(scene, MakeSphere("LacquerBall", 0.3f, 64)), lacquer),
+                 {-0.6f, 0.3f, 1.2f});
+    return scene;
+}
+
 } // namespace air::renderer::detail

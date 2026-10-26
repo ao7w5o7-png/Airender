@@ -59,17 +59,34 @@ float4 MaterialTextureSample(uint texture, float2 uv)
     return t.SampleLevel(gLinearWrap, uv, 0.0f);
 }
 
+// The kernels with the neural parts (AIR_PT_NEURAL: PathTracerNeural.hlsl, PathTracerGiNeural.hlsl,
+// ReSTIR*Neural.hlsl) evaluate the clear coats (Bsdf.hlsli AIR_BSDF_COATS: their network, random walk
+// or approximation) and decode neural texture sets on sample; the others see coated materials as
+// their bases and read the sets' coarse copies.
+#ifndef AIR_PT_NEURAL
+#define AIR_PT_NEURAL 0
+#endif
+#define AIR_BSDF_COATS AIR_PT_NEURAL
+
+// The neural coat's parameters (FrameData::neuralCoat, a constant buffer: every thread reads the
+// same weights), set by the kernel.
+static uint gNeuralCoat;
+
+struct NeuralCoatWeightTable
+{
+    float4 w[kNeuralCoatParameterVectors];
+};
+
+float4 NeuralCoatWeights4(uint index)
+{
+    ConstantBuffer<NeuralCoatWeightTable> table = ResourceDescriptorHeap[gNeuralCoat];
+    return table.w[index / 4u];
+}
+
 // Neural texture sets decoded on sample (TextureSetData::latents, NeuralTextures.h) with LibNTC's int8
-// inference: in the kernels compiled with AIR_PT_NTC (PathTracerNtc.hlsl, PathTracerGiNtc.hlsl), where
-// configuring found its shaders (AIR_WITH_NTC). Elsewhere neural sets read their coarse copy.
-#ifndef AIR_PT_NTC
-#define AIR_PT_NTC 0
-#endif
-#if AIR_PT_NTC && !__has_include("libntc/shaders/Inference.hlsli")
-#undef AIR_PT_NTC
-#define AIR_PT_NTC 0
-#endif
-#if AIR_PT_NTC
+// inference, where configuring found its shaders (AIR_WITH_NTC).
+#if AIR_PT_NEURAL && __has_include("libntc/shaders/Inference.hlsli")
+#define AIR_PT_NTC 1
 #include "libntc/shaders/Inference.hlsli"
 
 // A neural set's colour (linear) and surface at uv: the texel that stochastic texture filtering picks

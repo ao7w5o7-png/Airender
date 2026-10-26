@@ -1175,6 +1175,17 @@ void EditorApp::BuildScenePanel()
         changed |= ImGui::ColorEdit3("Emission color", &m.emissionColor.x);
         changed |= ImGui::DragFloat("Emission (nits)", &m.emissionNits, 5.0f, 0.0f, 1e7f, "%.1f",
                                     ImGuiSliderFlags_Logarithmic);
+        changed |= ImGui::Checkbox("Clear coat", &m.coat);
+        ImGui::SetItemTooltip("A clear coat over the material: a rough dielectric over a layer that absorbs.\n"
+                              "pathtracer.coatModel chooses how the light it lets in and out is evaluated:\n"
+                              "a small network trained for the scene's coats (retrained a moment after they\n"
+                              "change), the random walk it learns from, or an approximation.");
+        if (m.coat)
+        {
+            changed |= ImGui::SliderFloat("Coat roughness", &m.coatRoughness, 0.0f, 1.0f);
+            changed |= ImGui::ColorEdit3("Coat color", &m.coatColor.x, ImGuiColorEditFlags_Float);
+            m.coatColor = hlsl::saturate(m.coatColor);
+        }
         if (changed)
         {
             mScene->SetMaterial(i, m);
