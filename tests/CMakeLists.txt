@@ -12,6 +12,7 @@ add_executable(air_tests
     ProfileReportTests.cpp
     ShaderHotReloadTests.cpp
     SceneTests.cpp
+    SceneFilesTests.cpp
     MaterialTexturesTests.cpp
     NeuralTexturesTests.cpp
     SkyTests.cpp

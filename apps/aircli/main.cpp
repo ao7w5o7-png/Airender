@@ -15,6 +15,7 @@
 //                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
 //                   [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels among the surfaces)
 //                   [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]   (LibNTC)
+//                   [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (a glTF, FBX or OBJ model into the scene)
 //   aircli features                         list available features and their parameters (JSON)
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
@@ -51,6 +52,7 @@
 #include "air/renderer/ProfileReport.h"
 #include "air/renderer/RenderFeature.h"
 #include "air/renderer/Scene.h"
+#include "air/renderer/SceneFiles.h"
 #include "air/renderer/Transfer.h"
 #include "air/renderer/Vdb.h"
 #include "air/rhi/RHIDevice.h"
@@ -91,6 +93,7 @@ int Usage()
                "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
                "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
                "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
                "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
                "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
                "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
@@ -98,6 +101,7 @@ int Usage()
                "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
                "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
                "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
                "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
                "                [--volume-shadow-size N] [--volume-lights N]]\n"
                "  aircli features | scenes\n"
@@ -170,6 +174,28 @@ int CommandFeatures()
 // ---------------------------------------------------------------------------
 // scenes
 // ---------------------------------------------------------------------------
+// A scene's size and lights.
+json::Value DescribeScene(const std::string& name, const renderer::SceneDesc& desc)
+{
+    u64 triangles = 0;
+    u32 emissive = 0;
+    for (const renderer::Instance& instance : desc.instances)
+    {
+        triangles += desc.meshes[instance.mesh].indices.size() / 3;
+        emissive += desc.materials[instance.material].emissionNits > 0.0f ? 1u : 0u;
+    }
+    json::Value item = json::Value::MakeObject();
+    item["name"] = name;
+    item["instances"] = u64(desc.instances.size());
+    item["meshes"] = u64(desc.meshes.size());
+    item["materials"] = u64(desc.materials.size());
+    item["textureSets"] = u64(desc.textureSets.size());
+    item["triangles"] = triangles;
+    item["emissiveInstances"] = emissive;
+    item["ev100"] = desc.camera.ev100;
+    return item;
+}
+
 int CommandScenes()
 {
     json::Value out = json::Value::MakeArray();
@@ -177,22 +203,22 @@ int CommandScenes()
     {
         const std::optional<renderer::SceneDesc> found = renderer::MakeBuiltinScene(name);
         AIR_CHECK(found.has_value(), "scene '{}' is listed but cannot be made", name);
-        const renderer::SceneDesc& desc = *found;
-        u64 triangles = 0;
-        u32 emissive = 0;
-        for (const renderer::Instance& instance : desc.instances)
-        {
-            triangles += desc.meshes[instance.mesh].indices.size() / 3;
-            emissive += desc.materials[instance.material].emissionNits > 0.0f ? 1u : 0u;
-        }
-        json::Value item = json::Value::MakeObject();
+        out.Push(DescribeScene(name, *found));
+    }
+    // The file scenes (SceneFiles.h): loaded when their assets are there (seconds each), else what is
+    // missing.
+    for (const std::string& name : renderer::FileSceneNames())
+    {
+        std::string problem;
+        const std::optional<renderer::SceneDesc> found = renderer::MakeFileScene(name, &problem);
+        json::Value item = found ? DescribeScene(name, *found) : json::Value::MakeObject();
         item["name"] = name;
-        item["instances"] = u64(desc.instances.size());
-        item["meshes"] = u64(desc.meshes.size());
-        item["materials"] = u64(desc.materials.size());
-        item["triangles"] = triangles;
-        item["emissiveInstances"] = emissive;
-        item["ev100"] = desc.camera.ev100;
+        item["file"] = true;
+        item["available"] = found.has_value();
+        if (!found)
+        {
+            item["problem"] = problem;
+        }
         out.Push(std::move(item));
     }
     std::puts(out.Dump().c_str());
@@ -214,7 +240,10 @@ int CommandScenes()
 //   --neural-textures off|load|sample[,BPP[,STEPS]] puts its texture sets through neural texture
 //   compression (NeuralTextures.h) at about BPP bits per texel (4) with STEPS training steps (20000),
 //   decoded on load or by the shader on sample; compressed sets are kept in --ntc-cache DIR (a
-//   directory in the temporary files; "" keeps none).
+//   directory in the temporary files; "" keeps none);
+//   --model FILE[,X,Y,Z[,HEIGHT[,YAW]]] adds a model file (glTF, FBX, OBJ; SceneFiles.h) standing on the
+//   point (the origin), HEIGHT metres tall (its own size: 0), turned YAW degrees about +y; repeated for
+//   several.
 struct SceneOptions
 {
     std::optional<std::pair<float, float>> sun;
@@ -230,6 +259,7 @@ struct SceneOptions
         std::vector<std::string> at;
     };
     std::vector<VolumeOption> volumes;
+    std::vector<std::vector<std::string>> models;
     renderer::NeuralTextureOptions neural;
 
     // True when `arg` was one of these options.
@@ -297,6 +327,11 @@ struct SceneOptions
             ev100 = std::stof(std::string(args.Next()));
             return true;
         }
+        if (arg == "--model")
+        {
+            models.push_back(Split(args.Next(), ','));
+            return true;
+        }
         if (arg == "--volume")
         {
             if (volumes.empty() || !volumes.back().spec.empty())
@@ -323,6 +358,28 @@ struct SceneOptions
             return true;
         }
         return false;
+    }
+
+    // False (logged) when a model cannot be read.
+    bool AddModels(renderer::SceneDesc& scene) const
+    {
+        for (const std::vector<std::string>& spec : models)
+        {
+            std::string problem;
+            const std::optional<renderer::ImportedModel> model =
+                renderer::ImportModel(scene, spec.empty() ? std::string() : spec[0], {}, &problem);
+            if (!model)
+            {
+                AIR_LOG(Error, "aircli", "--model: {}", problem);
+                return false;
+            }
+            auto value = [&](size_t i, float fallback) { return spec.size() > i ? std::stof(spec[i]) : fallback; };
+            const float height = value(4, 0.0f);
+            const float size = model->boundsMax.y - model->boundsMin.y;
+            renderer::PlaceModel(scene, *model, height > 0.0f && size > 0.0f ? height / size : 1.0f, value(5, 0.0f),
+                                 {value(1, 0.0f), value(2, 0.0f), value(3, 0.0f)});
+        }
+        return true;
     }
 
     void Apply(renderer::SceneDesc& scene) const
@@ -551,10 +608,20 @@ int CommandReference(Args& args)
             return Usage();
         }
     }
-    std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
+    std::string sceneError;
+    std::optional<renderer::SceneDesc> scene = renderer::MakeScene(sceneName, &sceneError);
+    if (!scene && !sceneError.empty())
+    {
+        AIR_LOG(Error, "aircli", "{}", sceneError);
+        return kExitUsage;
+    }
     if (args.error || outputPath.empty() || !scene)
     {
         return Usage();
+    }
+    if (!sceneOptions.AddModels(*scene))
+    {
+        return kExitUsage;
     }
     sceneOptions.Apply(*scene);
     if (!sceneOptions.ApplyNeuralTextures(*scene, nullptr))
@@ -838,7 +905,13 @@ int CommandCoatCheck(Args& args)
             args.error = true;
         }
     }
-    std::optional<renderer::SceneDesc> scene = renderer::MakeBuiltinScene(sceneName);
+    std::string sceneError;
+    std::optional<renderer::SceneDesc> scene = renderer::MakeScene(sceneName, &sceneError);
+    if (!scene && !sceneError.empty())
+    {
+        AIR_LOG(Error, "aircli", "{}", sceneError);
+        return kExitUsage;
+    }
     if (args.error || !scene)
     {
         return Usage();
@@ -1067,10 +1140,15 @@ int CommandRender(Args& args)
         renderer::FeatureRegistry registry;
         renderer::RegisterBuiltinFeatures(registry);
         renderer::FrameRunner runner(*device, tasks, desc);
-        std::optional<renderer::SceneDesc> sceneDesc = renderer::MakeBuiltinScene(sceneName);
+        std::string sceneError;
+        std::optional<renderer::SceneDesc> sceneDesc = renderer::MakeScene(sceneName, &sceneError);
         if (!sceneDesc)
         {
-            AIR_LOG(Error, "aircli", "unknown scene '{}'", sceneName);
+            AIR_LOG(Error, "aircli", "{}", sceneError);
+            return kExitUsage;
+        }
+        if (!sceneOptions.AddModels(*sceneDesc))
+        {
             return kExitUsage;
         }
         sceneOptions.Apply(*sceneDesc);

@@ -481,6 +481,9 @@ void Scene::Upload()
         std::memcpy(tlas.transform, in.transform, sizeof(tlas.transform));
         tlas.instanceId = u32(i);
         tlas.blas = mMeshes[in.mesh].blas;
+        // Cutouts stop the rays that meet them for the alpha test (Cutout.hlsli); the rest never do.
+        const Material& material = mDesc.materials[in.material];
+        tlas.opaque = !(material.alphaCutoff > 0.0f && material.textures != kNoTextures);
         tlasInstances.push_back(tlas);
     }
     mInstances = uploadBuffer(instances.data(), instances.size() * sizeof(gpu::InstanceData), sizeof(gpu::InstanceData),
@@ -515,9 +518,11 @@ void Scene::Upload()
 void Scene::SetMaterial(u32 index, const Material& material)
 {
     AIR_CHECK(index < mDesc.materials.size(), "SetMaterial: index {} out of range", index);
-    if (!(mDesc.materials[index] == material))
+    Material changed = material;
+    changed.alphaCutoff = mDesc.materials[index].alphaCutoff; // the acceleration structure holds it
+    if (!(mDesc.materials[index] == changed))
     {
-        mDesc.materials[index] = material;
+        mDesc.materials[index] = changed;
         mDirty = true;
     }
 }

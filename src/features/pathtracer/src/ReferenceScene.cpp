@@ -19,7 +19,8 @@ Bvh::Bvh(std::vector<Triangle> triangles) : mTriangles(std::move(triangles))
     Build(0, 0, u32(mTriangles.size()));
 }
 
-bool Bvh::Intersect(float3 origin, float3 direction, float tMax, bool anyHit, HitInfo& hit, float tMin, u32 skip) const
+bool Bvh::Intersect(float3 origin, float3 direction, float tMax, bool anyHit, HitInfo& hit, float tMin, u32 skip,
+                    const CutoutTest* cutout) const
 {
     const float3 inv(1.0f / direction.x, 1.0f / direction.y, 1.0f / direction.z);
     hit.hit = false;
@@ -38,8 +39,8 @@ bool Bvh::Intersect(float3 origin, float3 direction, float tMax, bool anyHit, Hi
         {
             for (u32 i = node.first; i < node.first + node.count; ++i)
             {
-                if (mTriangles[i].instance != skip && IntersectTriangle(mTriangles[i], origin, direction, tMin, hit) &&
-                    anyHit)
+                if (mTriangles[i].instance != skip &&
+                    IntersectTriangle(mTriangles[i], origin, direction, tMin, hit, cutout) && anyHit)
                 {
                     return true;
                 }
@@ -104,7 +105,8 @@ bool Bvh::HitsBox(const Bounds& b, float3 origin, float3 inv, float tMax)
 }
 
 // Moller-Trumbore. Barycentrics are those of vertices 1 and 2, like DXR.
-bool Bvh::IntersectTriangle(const Triangle& tri, float3 origin, float3 direction, float tMin, HitInfo& hit)
+bool Bvh::IntersectTriangle(const Triangle& tri, float3 origin, float3 direction, float tMin, HitInfo& hit,
+                            const CutoutTest* cutout)
 {
     const float3 p = cross(direction, tri.e2);
     const float det = dot(tri.e1, p);
@@ -130,6 +132,10 @@ bool Bvh::IntersectTriangle(const Triangle& tri, float3 origin, float3 direction
     {
         return false;
     }
+    if (tri.cutout && cutout && (*cutout)(tri.instance, tri.primitive, float2(u, v)))
+    {
+        return false;
+    }
     hit.hit = true;
     hit.t = t;
     hit.instance = tri.instance;
@@ -148,12 +154,14 @@ SceneTables BuildSceneTables(const renderer::SceneDesc& scene, TaskSystem* tasks
         const renderer::Instance& in = scene.instances[i];
         tables.instances.push_back(renderer::MakeInstanceData(in, in.mesh, in.mesh));
         const renderer::Mesh& mesh = scene.meshes[in.mesh];
+        const renderer::Material& material = scene.materials[in.material];
+        const bool cutout = material.alphaCutoff > 0.0f && material.textures != renderer::kNoTextures;
         for (u32 t = 0; t + 2 < mesh.indices.size(); t += 3)
         {
             const float3 p0 = renderer::TransformPoint(in.transform, mesh.vertices[mesh.indices[t]].position);
             const float3 p1 = renderer::TransformPoint(in.transform, mesh.vertices[mesh.indices[t + 1]].position);
             const float3 p2 = renderer::TransformPoint(in.transform, mesh.vertices[mesh.indices[t + 2]].position);
-            triangles.push_back({p0, p1 - p0, p2 - p0, u32(i), t / 3});
+            triangles.push_back({p0, p1 - p0, p2 - p0, u32(i), t / 3, cutout});
         }
     }
     for (const renderer::Mesh& mesh : scene.meshes)

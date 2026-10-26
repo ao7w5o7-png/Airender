@@ -21,9 +21,16 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     ray.Direction = direction;
     ray.TMin = 0.0f;
     ray.TMax = 1e30f;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
-    query.Proceed();
+    while (query.Proceed())
+    {
+        if (CandidateIsSolid(query.CandidateType(), query.CandidateInstanceID(), query.CandidatePrimitiveIndex(),
+                             query.CandidateTriangleBarycentrics()))
+        {
+            query.CommitNonOpaqueTriangleHit();
+        }
+    }
     HitInfo hit;
     hit.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     hit.t = hit.hit ? query.CommittedRayT() : -1.0f;
@@ -52,6 +59,7 @@ IntegratorParams MakeParams(FrameData f)
     params.volumeCount = f.volumeCount;
     params.volumeTable = f.volumeTable;
     params.textureSets = f.textureSets;
+    gTextureSets = f.textureSets;
     params.textureSeed = f.frameIndex;
     params.coatModel = f.coatModel;
     gNeuralCoat = f.neuralCoat;

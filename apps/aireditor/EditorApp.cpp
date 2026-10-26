@@ -5,6 +5,7 @@
 #include "air/core/Log.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/ProfileReport.h"
+#include "air/renderer/SceneFiles.h"
 #include "air/renderer/Transfer.h"
 
 #include <imgui.h>
@@ -103,10 +104,11 @@ EditorApp::~EditorApp()
 
 bool EditorApp::LoadScene(const std::string& name)
 {
-    std::optional<renderer::SceneDesc> desc = renderer::MakeBuiltinScene(name);
+    std::string problem;
+    std::optional<renderer::SceneDesc> desc = renderer::MakeScene(name, &problem);
     if (!desc)
     {
-        AIR_LOG(Error, "Editor", "unknown scene '{}'", name);
+        AIR_LOG(Error, "Editor", "{}", problem);
         return false;
     }
     mNeuralReport.clear();
@@ -733,7 +735,7 @@ void EditorApp::BuildMenuBar()
     }
     if (ImGui::BeginMenu("Scene"))
     {
-        for (const std::string& name : renderer::BuiltinSceneNames())
+        for (const std::string& name : renderer::SceneNames())
         {
             if (ImGui::MenuItem(name.c_str(), nullptr, name == mSceneName))
             {
@@ -900,7 +902,7 @@ void EditorApp::BuildScenePanel()
     }
     if (ImGui::BeginCombo("Scene", mSceneName.c_str()))
     {
-        for (const std::string& name : renderer::BuiltinSceneNames())
+        for (const std::string& name : renderer::SceneNames())
         {
             if (ImGui::Selectable(name.c_str(), name == mSceneName))
             {

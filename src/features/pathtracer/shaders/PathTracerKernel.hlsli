@@ -56,16 +56,22 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     ray.TMax = 1e30f;
     HitInfo hit;
 #if AIR_PT_SER
-    Payload payload;
-    payload.t = -1.0f;
-    payload.instance = 0;
-    payload.primitive = 0;
-    payload.barycentrics = float2(0.0f, 0.0f);
-    // Trace into a hit object, regroup the threads by the instance they hit (misses together), then
-    // read the hit straight from the object: no closest-hit invocation. Bounce rays scatter in all
-    // directions, so neighbouring threads shade unrelated materials; after reordering a warp mostly
-    // shades one, which keeps its loads and branches coherent.
-    dx::HitObject hitObject = dx::HitObject::TraceRay(scene, RAY_FLAG_FORCE_OPAQUE, 0xFF, 0, 1, 0, ray, payload);
+    // Make a hit object, regroup the threads by the instance they hit (misses together), then read the
+    // hit straight from the object: no closest-hit invocation. Bounce rays scatter in all directions,
+    // so neighbouring threads shade unrelated materials; after reordering a warp mostly shades one,
+    // which keeps its loads and branches coherent. The ray is traced inline for the alpha test of
+    // cutouts (Cutout.hlsli), the hit object made from the query's result.
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
+    while (query.Proceed())
+    {
+        if (CandidateIsSolid(query.CandidateType(), query.CandidateInstanceID(), query.CandidatePrimitiveIndex(),
+                             query.CandidateTriangleBarycentrics()))
+        {
+            query.CommitNonOpaqueTriangleHit();
+        }
+    }
+    dx::HitObject hitObject = dx::HitObject::FromRayQuery(query);
     if (bounce > 0u) // primary rays are coherent already
     {
         const uint coherence = hitObject.IsHit() ? hitObject.GetInstanceID() + 1u : 0u;
@@ -79,9 +85,16 @@ HitInfo TraceClosest(float3 origin, float3 direction, uint bounce)
     hitObject.GetAttributes(attributes);
     hit.barycentrics = attributes.barycentrics;
 #else
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
-    query.Proceed();
+    while (query.Proceed())
+    {
+        if (CandidateIsSolid(query.CandidateType(), query.CandidateInstanceID(), query.CandidatePrimitiveIndex(),
+                             query.CandidateTriangleBarycentrics()))
+        {
+            query.CommitNonOpaqueTriangleHit();
+        }
+    }
     hit.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     hit.t = hit.hit ? query.CommittedRayT() : -1.0f;
     hit.instance = hit.hit ? query.CommittedInstanceID() : 0u;
@@ -216,6 +229,7 @@ void TracePixel(uint2 pixel)
     params.volumeCount = f.volumeCount;
     params.volumeTable = f.volumeTable;
     params.textureSets = f.textureSets;
+    gTextureSets = f.textureSets;
     params.textureSeed = f.frameIndex;
     params.coatModel = f.coatModel;
     gNeuralCoat = f.neuralCoat;

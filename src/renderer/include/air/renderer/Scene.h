@@ -70,6 +70,10 @@ struct Material
     bool coat = false;
     float coatRoughness = 0.05f;
     float3 coatColor = {1.0f, 1.0f, 1.0f};
+    // A cutout (leaves, chains, decals): where the colour texture's alpha is below this the surface is
+    // a hole that rays pass through; 0: opaque. Its instances are non-opaque in the acceleration
+    // structure, so it is fixed once the scene is uploaded (SetMaterial keeps it).
+    float alphaCutoff = 0.0f;
 
     gpu::MaterialData ToGpu() const;
     bool operator==(const Material&) const = default;

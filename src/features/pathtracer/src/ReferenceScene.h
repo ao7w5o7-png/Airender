@@ -18,6 +18,7 @@
 
 #include "PathTracerShared.h"
 
+#include <functional>
 #include <memory>
 #include <span>
 #include <vector>
@@ -36,7 +37,11 @@ struct Triangle
     float3 p0, e1, e2;
     u32 instance;
     u32 primitive;
+    bool cutout; // its material is a cutout: hits go through the alpha test (Cutout.hlsli)
 };
+
+// The alpha test of a cutout's triangle: true where the ray passes (AlphaCutsOut).
+using CutoutTest = std::function<bool(u32 instance, u32 primitive, float2 barycentrics)>;
 
 struct Bounds
 {
@@ -61,15 +66,16 @@ class Bvh
 public:
     explicit Bvh(std::vector<Triangle> triangles);
 
-    // The closest hit with t in (tMin, tMax), past the triangles of instance `skip`. anyHit: stop at
-    // the first hit.
+    // The closest hit with t in (tMin, tMax), past the triangles of instance `skip` and, with `cutout`,
+    // past the holes of cutouts. anyHit: stop at the first hit.
     bool Intersect(float3 origin, float3 direction, float tMax, bool anyHit, HitInfo& hit, float tMin = 0.0f,
-                   u32 skip = kInvalidIndex) const;
+                   u32 skip = kInvalidIndex, const CutoutTest* cutout = nullptr) const;
 
 private:
     void Build(u32 nodeIndex, u32 begin, u32 end);
     static bool HitsBox(const Bounds& b, float3 origin, float3 inv, float tMax);
-    static bool IntersectTriangle(const Triangle& tri, float3 origin, float3 direction, float tMin, HitInfo& hit);
+    static bool IntersectTriangle(const Triangle& tri, float3 origin, float3 direction, float tMin, HitInfo& hit,
+                                  const CutoutTest* cutout);
 
     std::vector<Triangle> mTriangles;
     std::vector<BvhNode> mNodes;
@@ -204,16 +210,21 @@ struct SceneHooks
                                                    v.sizeZ + 2, uvw.x, uvw.y, uvw.z);
     }
     float VolumeMajorantLoad(VolumeData v, uint cell) const { return tables.volumes[v.majorants].majorants[cell]; }
-    HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/) const
+    // NOLINTBEGIN(readability-identifier-naming)
+#include "Cutout.hlsli"
+    // NOLINTEND(readability-identifier-naming)
+    HitInfo TraceClosest(float3 origin, float3 direction, uint /*bounce*/)
     {
         HitInfo hit{};
-        tables.bvh->Intersect(origin, direction, 1e30f, false, hit);
+        const CutoutTest cutout = [this](u32 i, u32 p, float2 b) { return AlphaCutsOut(0, i, p, b); };
+        tables.bvh->Intersect(origin, direction, 1e30f, false, hit, 0.0f, kInvalidIndex, &cutout);
         return hit;
     }
-    bool TraceVisible(float3 origin, float3 direction, float tMax) const
+    bool TraceVisible(float3 origin, float3 direction, float tMax)
     {
         HitInfo hit{};
-        return !tables.bvh->Intersect(origin, direction, tMax, true, hit);
+        const CutoutTest cutout = [this](u32 i, u32 p, float2 b) { return AlphaCutsOut(0, i, p, b); };
+        return !tables.bvh->Intersect(origin, direction, tMax, true, hit, 0.0f, kInvalidIndex, &cutout);
     }
 };
 

@@ -623,8 +623,21 @@ bool ApplyNeuralTextures(SceneDesc& scene, const NeuralTextureOptions& options,
         return false;
     }
     std::vector<MaterialTextures> sets = scene.textureSets;
-    for (MaterialTextures& set : sets)
+    std::vector<bool> cutout(sets.size(), false); // their colour's alpha is needed, which the codec drops
+    for (const Material& m : scene.materials)
     {
+        if (m.alphaCutoff > 0.0f && m.textures != kNoTextures && m.textures < sets.size())
+        {
+            cutout[m.textures] = true;
+        }
+    }
+    for (size_t i = 0; i < sets.size(); ++i)
+    {
+        if (cutout[i])
+        {
+            continue;
+        }
+        MaterialTextures& set = sets[i];
         std::string problem;
         const std::optional<CompressedTextures> compressed =
             codec->Compress(set, options.bitsPerPixel, options.steps, options.cache, &problem);

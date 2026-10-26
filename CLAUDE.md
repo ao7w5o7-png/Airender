@@ -49,7 +49,10 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   `smoke` for volumes (`--volume FILE.vdb|plume[,EXTINCTION,ALBEDO,G] --volume-at X,Y,Z,SIZE` puts
   an OpenVDB grid in any scene, repeated for several; `aircli vdb FILE` lists a file's grids; §8.12),
   `braziers` for several volumes and lights close to them (§8.13), `textured` for material textures
-  and normal maps (§8.15), `coated` for clear coats and their network (§8.17).
+  and normal maps (§8.15), `coated` for clear coats and their network (§8.17). File scenes made from
+  real assets (§8.18): `picapica`, `sponza` (textures at scale, cutout foliage), `helmets`; fetch them
+  first with `python3 tools/air.py fetch-scenes` (into `.deps/scenes`, never committed).
+  `--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]` adds any glTF, FBX or OBJ to any scene.
   `--camera EX,EY,EZ,TX,TY,TZ[,FOV]` and `--ev EV100` move a scene's camera.
   Validate GPU against `aircli reference` on the same scene.
 - Real-time volumes (`pathtracer.volumeMarch`, on when `accumulate=0`; docs/architecture.md §8.13):

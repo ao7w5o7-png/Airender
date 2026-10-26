@@ -109,8 +109,9 @@ struct NeuralTextureReport
 
 // Puts every texture set of `scene` through neural texture compression: its texels become the
 // decoded ones (what both modes render, so the CPU reference sees them too), and with OnSample the
-// set also carries what the GPU decodes them from (MaterialTextures::neural). False, with the scene
-// unchanged, when the codec is unavailable or a set fails.
+// set also carries what the GPU decodes them from (MaterialTextures::neural). The sets of cutouts
+// (Material::alphaCutoff) stay as they are: their colour's alpha is a channel the codec drops. False,
+// with the scene unchanged, when the codec is unavailable or a set fails.
 bool ApplyNeuralTextures(SceneDesc& scene, const NeuralTextureOptions& options,
                          std::vector<NeuralTextureReport>* report = nullptr, std::string* error = nullptr);
 

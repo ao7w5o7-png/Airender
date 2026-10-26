@@ -14,6 +14,8 @@ add_library(air_renderer
     src/ProfileReport.cpp
     src/Transfer.cpp
     src/Scene.cpp
+    src/SceneFiles.cpp
+    src/FileScenes.cpp
     src/SceneLibrary.cpp
     src/Sky.cpp
     src/TestScenes.cpp
@@ -30,6 +32,11 @@ target_link_libraries(air_renderer PUBLIC air_rdg)
 if(TARGET air_ntc)
     target_link_libraries(air_renderer PRIVATE air_ntc) # headers only: libntc.dll is loaded at run time
 endif()
+if(TARGET air_model_files)
+    target_link_libraries(air_renderer PRIVATE air_model_files)
+endif()
+# Where `tools/air.py fetch-scenes` puts the assets of the file scenes (AIR_SCENE_ASSETS overrides it).
+target_compile_definitions(air_renderer PRIVATE AIR_SCENE_ASSETS_DIR="${PROJECT_SOURCE_DIR}/.deps/scenes")
 air_target_defaults(air_renderer)
 # The profile report page (ProfileReport.h), compiled in so reports need no files next to the binary.
 air_embed_text(TARGET air_renderer SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/report/ProfileReport.html

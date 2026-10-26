@@ -193,6 +193,54 @@ TEST(Integrator_NormalMapsKeepTheLightInAWhiteFurnace)
     EXPECT(Near(mean, 0.18, 0.012, "textured furnace mean"));
 }
 
+// A cutout (Material::alphaCutoff) in front of a wall that emits 1 nit: its left half is a hole the
+// camera rays and the shadow rays pass (Cutout.hlsli), its black right half stops them.
+TEST(Integrator_CutoutsLetLightThrough)
+{
+    TaskSystem tasks(4);
+    renderer::SceneDesc scene;
+    scene.name = "cutout";
+    scene.materials.push_back({.name = "Light", .baseColor = {0.0f, 0.0f, 0.0f}, .emissionNits = 1.0f});
+    scene.materials.push_back({.name = "Cutout", .baseColor = {0.0f, 0.0f, 0.0f}, .textures = 0, .alphaCutoff = 0.5f});
+    renderer::MaterialTextures holes;
+    holes.name = "Holes";
+    holes.width = 8;
+    holes.height = 8;
+    for (u32 y = 0; y < 8; ++y)
+    {
+        for (u32 x = 0; x < 8; ++x)
+        {
+            holes.color.push_back(0xFFFFFFu | (x < 4 ? 0u : 255u) << 24); // left half transparent
+            holes.surface.push_back(128u | 128u << 8 | 255u << 16);
+        }
+    }
+    scene.textureSets.push_back(holes);
+    const float3 n = {0.0f, 0.0f, 1.0f};
+    scene.meshes.push_back(renderer::MakeQuad("Wall", {-4, -4, -3}, {4, -4, -3}, {4, 4, -3}, {-4, 4, -3}, n));
+    scene.meshes.push_back(renderer::MakeQuad("Panel", {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1}, n));
+    scene.instances.push_back({.name = "Wall", .mesh = 0, .material = 0});
+    scene.instances.push_back({.name = "Panel", .mesh = 1, .material = 1});
+    EXPECT(renderer::Validate(scene).empty());
+    scene.camera.position = {0.0f, 0.0f, 0.0f};
+    scene.camera.verticalFov = 0.9f; // the panel fills the view
+    pt::ReferenceSettings settings = Settings(tasks, 16, 2);
+    const Image image = pt::RenderReference(scene, scene.camera, settings);
+    auto half = [&](u32 x0, u32 x1)
+    {
+        double sum = 0.0;
+        for (u32 y = 6; y < 18; ++y)
+        {
+            for (u32 x = x0; x < x1; ++x)
+            {
+                sum += image.At(x, y)[1];
+            }
+        }
+        return sum / (12.0 * (x1 - x0));
+    };
+    EXPECT(Near(half(2, 9), 1.0, 0.02, "through the holes"));
+    EXPECT(half(15, 22) < 0.01);
+}
+
 // Veach's MIS scene: lights from 3 cm to 90 cm reflected by smooth to rough plates. NEE with MIS
 // and pure BSDF sampling are both unbiased, so they must agree on the plates, where each alone
 // fails somewhere; this checks the MIS weights on glossy metal and spherical lights. Only the

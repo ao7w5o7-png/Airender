@@ -234,6 +234,9 @@ struct TlasInstance
     u32 instanceId = 0;                                                 // InstanceID() in shaders, 24 bits
     u32 mask = 0xFF;
     u32 hitGroupOffset = 0;
+    // true: every triangle is opaque (no any-hit, no candidates in ray queries); false: every
+    // triangle is a candidate the shader decides on (alpha cutouts).
+    bool opaque = true;
     AccelStructHandle blas;
 };
 

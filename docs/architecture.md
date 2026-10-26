@@ -502,6 +502,14 @@ Files: `src/features/pathtracer/` (shaders in `shaders/`, tests in `tests/`). Re
 
   Daylight scenes use the physical sky (§8.9), whose sun has the real angular radius and
   luminance, so they use daylight exposure (EV100 14..15; 11.5 for the low sun of `sunset`).
+- File scenes (§8.18; `MakeScene` and `SceneNames` cover both kinds), made from model files that
+  `python3 tools/air.py fetch-scenes` downloads into `.deps/scenes`:
+
+  | Scene | Content | What it tests |
+  |---|---|---|
+  | `picapica` | SEED's PICA PICA assets: a toy factory of plastic machines, pallets, books and seven robots around the mini diorama, on a table in the afternoon sun (886k triangles, 592 instances) | real assets, many small parts and materials, decals (cutouts), emissive LEDs, a clear coat |
+  | `sponza` | the Sponza atrium under the sky through its open roof (262k triangles, 25 texture sets) | textures and normal maps at scale, cutout foliage, indirect light in arcades |
+  | `helmets` | the flight, damaged and sci-fi helmets of the glTF sample assets on plinths (134k triangles) | physically based texture sets (metal, roughness, normal maps) |
 
 ### 8.2 Integrator
 
@@ -1540,6 +1548,15 @@ the mesh's texture coordinates times `Material::uvScale`.
   `StructuredBuffer<TextureSetData>`, `IntegratorParams::textureSets` from `FrameData::textureSets`)
   and `MaterialTextureSample` (bindless `Texture2D`, the static linear wrap sampler); on the CPU,
   `SampleTexture2DWrapRGBA8` emulates the hardware: 8 fractional bits, sRGB decoded before filtering.
+- **Cutouts** (`Material::alphaCutoff`, `Cutout.hlsli`): where the colour texture's alpha is below
+  the cutoff the surface is a hole (leaves, chains, decals). The instances of cutout materials are
+  non-opaque in the TLAS (`TlasInstance::opaque`, D3D12 `FORCE_NON_OPAQUE`), every other instance is
+  forced opaque, so the ray queries (`TraceClosest`, `TraceVisible`, ReSTIR's, the probes'; the SER
+  variant makes its hit object from such a query) see candidates only on cutouts and commit those that
+  `AlphaCutsOut` keeps. The CPU reference's BVH runs the same function on a cutout's triangles. Scenes
+  without cutouts measured the same trace time as before. The cutoff is fixed once the scene is
+  uploaded (`SetMaterial` keeps it); neural texture compression leaves the cutouts' sets alone (the
+  codec drops the colour's alpha); the volumes' moment shadow maps take every triangle as opaque.
 - **Procedural sets** (`MaterialTextures.cpp`): a height field per material whose slopes give the
   normal map, with colour, roughness and metallic from the same pattern, from integer hashes and
   value noise that repeat with the texture. `MakeBrickTextures` (red bricks in mortar),
@@ -1549,6 +1566,7 @@ the mesh's texture coordinates times `Material::uvScale`.
   (a flat grey texture renders as that grey), `Integrator_NormalMapsKeepTheLightInAWhiteFurnace`:
   `textured` in a white furnace (16 bounces) is within 1.2% of the environment (3.2% dark before the
   mirror of §8.2) and gains nothing. GPU against the CPU reference on `textured`: +0.05%.
+  `Integrator_CutoutsLetLightThrough` (a half-transparent panel before an emitting wall).
 
 ### 8.16 Neural texture compression
 
@@ -1659,8 +1677,9 @@ part is evaluated (`Bsdf.hlsli`):
   agrees with the GPU's (block median +0.02%). White furnace (the bases white, the layers clear): the
   walk 0.940 (a rough interface at grazing angles loses some light to its single scattering) to 1.008
   (`Coat_WhiteFurnaceRandomWalk`); with the scene's own shapes (64 bounces) the image means are walk
-  -0.13%, network -1.5% (white bases are outside what it trained on), approximation -4.1%. Cost at 1920 x 1080 in real time (frame / `Trace`): the
-  approximation 11.4 / 5.0 ms, the network 16.7 / 6.3 ms, the walk 22.6 / 6.1 ms (and noisy).
+  -0.13%, network -1.5% (white bases are outside what it trained on), approximation -4.1%. Cost at
+  1920 x 1080 in real time (frame / `Trace`): the approximation 11.4 / 5.0 ms, the network 16.7 / 6.3
+  ms, the walk 22.6 / 6.1 ms (and noisy).
   A walk limited to 10 events (pbrt's default) lost 8% of a white coated base: light the interface
   traps by total internal reflection keeps much of its weight for several round trips, so the limit is
   64 and Russian roulette ends walks early.
@@ -1668,6 +1687,60 @@ part is evaluated (`Bsdf.hlsli`):
   walk: errors, albedos), `Coat_*` (white furnace, absorption, reciprocity of the walk, sampling against
   uniform integration for the walk and the approximation, kernels on the Null device),
   `NeuralCoat_LearnsTheRandomWalk`.
+
+### 8.18 Scenes from model files
+
+`renderer/SceneFiles.h` reads model files into a `SceneDesc` and composes the file scenes of §8.1 from
+them. Their assets are never committed: `python3 tools/air.py fetch-scenes [NAMES]` downloads them
+from pinned commits into `.deps/scenes/<scene>/` (`AIR_SCENE_ASSETS` elsewhere; the renderer looks
+there too), each with its license:
+
+| Scene | Source | License |
+|---|---|---|
+| `picapica` | SEED (Electronic Arts), `SEED-EA/pica-pica-assets` at b433c2e (an archive, sha256 checked) | CC BY-NC 4.0 |
+| `sponza` | Crytek; `KhronosGroup/glTF-Sample-Assets` at 8f49239, `Models/Sponza` | the license that repository names for it |
+| `helmets` | the same repository: `FlightHelmet` (CC0), `DamagedHelmet` (CC BY 4.0, ctxwing), `SciFiHelmet` (CC0) | as listed |
+
+A file scene without its assets fails to load with the command that fetches them. `aircli scenes`
+lists the file scenes too (loaded when their assets are there), `aircli render|reference --model
+FILE[,X,Y,Z[,HEIGHT[,YAW]]]` adds any model file to any scene, and the editor's scene list holds them.
+
+- **Libraries** (`cmake/AirThirdParty.cmake`, `AIR_WITH_MODEL_FILES`, downloaded into `.deps` like the
+  SDKs): ufbx 0.23.1 (FBX, OBJ), cgltf 1.15 (glTF), stb_image (PNG, JPEG, TGA), compiled into one
+  static library without our warnings. Without them `ModelFilesAvailable()` is false and imports
+  report it.
+- **Import** (`ImportModel`): a mesh per mesh and material part (glTF primitive), an instance per node
+  with its world transform, in metres and y up (ufbx converts FBX's axes and unit; `metresPerUnit`
+  overrides a file whose unit is wrong). FBX and OBJ count v upwards: v becomes 1 - v. Normals the file
+  lacks come from the faces. `materialFor` replaces a material by its name, `skipMaterial` and
+  `skipNode` leave geometry out.
+- **Materials**: glTF's metallic-roughness factors and textures (base colour sRGB with its alpha;
+  roughness from green, metallic from blue), normal map, alpha mode (`MASK` and `BLEND` become cutouts
+  at their cutoff, 0.5 for blend), a constant emission (`emissiveFactor`, strength; emissive textures
+  are left out), a clear coat (`KHR_materials_clearcoat` above 0.5). `PackMaterialTextures` resamples a
+  material's textures to one size (the largest, at most `maxTextureSize`, 1024 by default, 2048 for
+  `helmets`): box filtered down, bilinear up; decoded in parallel, each file once.
+- **Normal maps**: glTF's +y points up the image, towards decreasing v, while the renderer bends along
+  increasing v (§8.15), so green flips (`normalGreenUp`); the same holds for FBX and OBJ after their v
+  flip. Checked with the glTF sample `NormalTangentMirrorTest` (`--model`): the normal-mapped spheres,
+  with mirrored texture coordinates too, are lit like the real geometry beside them.
+- **picapica**: the PICA PICA files hold geometry and material names only (the demo's materials are
+  not in the release), and the names say what they were: `PicaMaterial` makes coloured plastics in
+  matte, satin and glossy finishes, metals, rubber and dark glass of them, a clear coat for
+  `Coated_Black_Glossy`, emissive LEDs and lights for the robots. The mug, the books, the crayons'
+  labels and the decals take the textures in the release's folders (the decals as cutouts); the
+  machines' `Plastic_Decals` have none and are left out, as are the blue display stands each model was
+  shown on (the diorama's is its floor). Scales differ by file and the mug's unit is wrong, so they are
+  given per file. One robot is imported and six more instance its meshes.
+- **Measured** (RTX 5070): loading takes 3.9 s (`picapica`), 1.8 s (`sponza`), 1.9 s (`helmets`), most
+  of it decoding textures; a real-time frame at 1920 x 1080 with `pathtracer,nrd,taa,tonemap`: `sponza`
+  21 ms (`Trace` 8.2 ms), `picapica` 18 ms (5.3 ms). The D3D12 debug layer reports no errors for the
+  three in real time.
+- **Limits**: emissive textures, transmission and texture transforms are not read; textures are
+  sampled at level 0 (§8.15).
+- **Validation**: `SceneFiles_*` (texture packing and the normal's flip, a glTF and an OBJ written by the
+  test: transforms, units, v, materials replaced and skipped; the names and the missing-assets
+  message), `Integrator_CutoutsLetLightThrough`.
 
 ---
 

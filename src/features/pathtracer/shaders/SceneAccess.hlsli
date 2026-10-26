@@ -178,6 +178,21 @@ LightTreeNode LoadLightNode(uint node)
     return tree[node];
 }
 
+// The materials' textures (FrameData::textureSets) for the alpha test of cutouts, set by the kernel.
+static uint gTextureSets;
+
+#include "Cutout.hlsli"
+
+// Whether a ray query's candidate is solid: the instances of cutout materials are non-opaque
+// (Cutout.hlsli), so their triangles come as candidates the query commits unless the alpha test cuts
+// them out; every other instance is forced opaque and never yields one. Every query over the scene
+// runs `while (query.Proceed()) { if (CandidateIsSolid(...)) query.CommitNonOpaqueTriangleHit(); }`.
+bool CandidateIsSolid(uint candidateType, uint instance, uint primitive, float2 barycentrics)
+{
+    return candidateType == CANDIDATE_NON_OPAQUE_TRIANGLE &&
+           !AlphaCutsOut(gTextureSets, instance, primitive, barycentrics);
+}
+
 bool TraceVisible(float3 origin, float3 direction, float tMax)
 {
     RaytracingAccelerationStructure scene = ResourceDescriptorHeap[g.tlas];
@@ -186,9 +201,16 @@ bool TraceVisible(float3 origin, float3 direction, float tMax)
     ray.Direction = direction;
     ray.TMin = 0.0f;
     ray.TMax = tMax;
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
     query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
-    query.Proceed();
+    while (query.Proceed())
+    {
+        if (CandidateIsSolid(query.CandidateType(), query.CandidateInstanceID(), query.CandidatePrimitiveIndex(),
+                             query.CandidateTriangleBarycentrics()))
+        {
+            query.CommitNonOpaqueTriangleHit();
+        }
+    }
     return query.CommittedStatus() == COMMITTED_NOTHING;
 }
 

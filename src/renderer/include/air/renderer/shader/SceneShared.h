@@ -40,7 +40,8 @@ struct MaterialData
     uint coat;
     float coatRoughness;
     float3 coatColor;
-    uint pad0;
+    // > 0: a cutout, a hole where the colour texture's alpha is below it (Cutout.hlsli).
+    float alphaCutoff;
 };
 
 // A material's textures (renderer::MaterialTextures): bindless Texture2D<float4> indices on the GPU,

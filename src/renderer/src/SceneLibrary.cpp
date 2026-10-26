@@ -51,6 +51,7 @@ gpu::MaterialData Material::ToGpu() const
     out.coat = coat ? 1u : 0u;
     out.coatRoughness = coatRoughness;
     out.coatColor = coatColor;
+    out.alphaCutoff = textures == kNoTextures ? 0.0f : alphaCutoff;
     return out;
 }
 
@@ -429,6 +430,10 @@ std::string Validate(const SceneDesc& desc)
         if (m.textures != kNoTextures && m.textures >= desc.textureSets.size())
         {
             return std::format("material '{}' references missing textures {}", m.name, m.textures);
+        }
+        if (!(m.alphaCutoff >= 0.0f && m.alphaCutoff <= 1.0f) || (m.alphaCutoff > 0.0f && m.textures == kNoTextures))
+        {
+            return std::format("material '{}': an alpha cutoff (in [0, 1]) needs textures", m.name);
         }
     }
     for (const MaterialTextures& t : desc.textureSets)
