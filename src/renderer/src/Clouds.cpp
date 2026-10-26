@@ -1,13 +1,15 @@
 // The procedural cumulus behind BuildCloudVolume (docs/architecture.md §8.10).
 //
-// A 2D weather field (gradient noise for regional variation plus cellular noise that gathers the
-// clouds into cells) decides where clouds are: its quantile at 1 - coverage is the threshold, so the
-// requested fraction of the tile lies under cloud bases. How far the weather exceeds the threshold
-// sets how tall the cloud grows and how dense it is. Vertically each cloud has a flat base at the
-// condensation level and a rounded top; billowy cellular noise carves its outline. A second, small
-// periodic grid of finer cellular noise erodes the fringe at render time (CloudLookup.hlsli), which
-// gives the outlines detail far below the base voxels' size, and the eroded density is sharpened
-// into crisp outlines over even interiors. Everything is deterministic in the seed.
+// A 2D weather field decides where clouds are: gradient noise from 12.8 down to 1.6 km gathers them
+// into fields with clear gaps between, and cellular noise at 3.2, 1.6 and 0.8 km, its coordinates
+// warped by more gradient noise, makes clouds of many sizes and uneven outlines. Its quantile at
+// 1 - coverage is the threshold, so the requested fraction of the tile lies under cloud bases; how far
+// the weather exceeds it sets how tall the cloud grows and how dense it is. Vertically each cloud has
+// a flat base at the condensation level and narrows into a rounded top, where billowy cellular noise
+// (cells of 640 m down to 160 m) carves it, less so near the base. A second periodic grid of finer
+// cellular noise (1.024 km, 25 to the tile) erodes the fringe gently at render time (CloudLookup.hlsli), and the eroded
+// density is sharpened into crisp outlines over even interiors. The tile (25.6 km) repeats too far
+// away to show from the ground. Everything is deterministic in the seed.
 
 #include "air/renderer/Clouds.h"
 
@@ -25,15 +27,17 @@ namespace
 
 using detail::ParallelFor;
 
-constexpr u32 kGridXZ = 256;          // base voxels across the tile
-constexpr float kVoxel = 50.0f;       // their width at scale 1, metres: a 12.8 km tile
+constexpr u32 kGridXZ = 512;          // base voxels across the tile
+constexpr float kVoxel = 50.0f;       // their width at scale 1, metres: a 25.6 km tile
 constexpr float kVoxelHeight = 25.0f; // their height at scale 1, about
 constexpr u32 kCellXZ = 8;            // base voxels per majorant cell
 constexpr u32 kCellY = 4;
-constexpr u32 kDetailGrid = 64;         // detail voxels along each axis
-constexpr float kDetailPeriod = 400.0f; // metres at scale 1: detail voxels of 6.25 m
-constexpr float kDetailStrength = 0.75f;
-constexpr float kSharpness = 10.0f;
+constexpr u32 kDetailGrid = 128;         // detail voxels along each axis
+constexpr float kDetailPeriod = 1024.0f; // metres at scale 1 (the tile is 25 of them): detail voxels of 8 m
+// How deep the detail erodes the fringe, and the sharpening after it: stronger made every cloud a
+// cauliflower of same-sized bumps.
+constexpr float kDetailStrength = 0.4f;
+constexpr float kSharpness = 5.0f;
 
 // "lowbias32" integer hash (Wellons).
 u32 Hash(u32 x)
@@ -154,23 +158,35 @@ float Worley(float x, float z, int period, u32 seed)
 // Where the clouds are, over the tile's (u, w) in [0, 1)^2: higher is cloudier.
 float Weather(float u, float w, u32 seed)
 {
+    // Regional: fields of clouds and clear gaps, 12.8 to 1.6 km.
     float regional = 0.0f;
     float amplitude = 0.5f;
-    for (int octave = 0, period = 4; octave < 4; ++octave, period *= 2)
+    for (int octave = 0, period = 2; octave < 4; ++octave, period *= 2)
     {
         regional += amplitude * Perlin(u * float(period), w * float(period), period, seed + u32(octave));
         amplitude *= 0.5f;
     }
-    const float cells = 1.0f - Worley(u * 8.0f, w * 8.0f, 8, seed + 17u);
-    return regional + 0.6f * cells;
+    // Cells of 3.2, 1.6 and 0.8 km over warped coordinates (about 700 m): clouds of many sizes, their
+    // outlines uneven rather than round.
+    const float warpU =
+        0.027f * (Perlin(u * 4.0f, w * 4.0f, 4, seed + 31u) + 0.5f * Perlin(u * 16.0f, w * 16.0f, 16, seed + 32u));
+    const float warpW =
+        0.027f * (Perlin(u * 4.0f, w * 4.0f, 4, seed + 33u) + 0.5f * Perlin(u * 16.0f, w * 16.0f, 16, seed + 34u));
+    const float x = u + warpU;
+    const float z = w + warpW;
+    const float cells = 0.5f * (1.0f - Worley(x * 8.0f, z * 8.0f, 8, seed + 17u)) +
+                        0.3f * (1.0f - Worley(x * 16.0f, z * 16.0f, 16, seed + 18u)) +
+                        0.2f * (1.0f - Worley(x * 32.0f, z * 32.0f, 32, seed + 19u));
+    return 0.8f * regional + cells;
 }
 
-// Billows over the tile at (u, height in metres, w): cellular noise, high near its points.
+// Billows over the tile at (u, height in metres, w): cellular noise in cells of 640, 320 and 160 m,
+// high near its points.
 float Billows(float u, float y, float w, float tileSize, u32 seed)
 {
     float sum = 0.0f;
-    const float weights[3] = {0.5f, 0.3f, 0.2f};
-    for (int octave = 0, period = 24; octave < 3; ++octave, period *= 2)
+    const float weights[3] = {0.55f, 0.3f, 0.15f};
+    for (int octave = 0, period = 40; octave < 3; ++octave, period *= 2)
     {
         const float cell = tileSize / float(period);
         sum += weights[octave] *
@@ -286,15 +302,16 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
                             continue;
                         }
                         const float strength = Saturate(excess / std::max(highest - threshold, 1e-6f));
-                        const float cloudTop = std::pow(strength, 0.6f); // of the layer
+                        const float cloudTop = std::pow(strength, 0.7f); // of the layer
                         const float r = h / cloudTop;
                         if (r >= 1.0f)
                         {
                             continue;
                         }
-                        // Flat base at the condensation level, a dome above it.
-                        const float envelope =
-                            Smoothstep(0.0f, 0.025f, h) * (1.0f - Smoothstep(0.3f, 1.0f, r)) * std::sqrt(strength);
+                        // Flat base at the condensation level; above it the cloud narrows into a dome
+                        // (its outline recedes to where the weather is stronger).
+                        const float envelope = Smoothstep(0.0f, 0.03f, h) * (1.0f - Smoothstep(0.45f, 1.0f, r)) *
+                                               Smoothstep(0.0f, 0.15f, strength - 0.3f * r * r) * std::sqrt(strength);
                         if (envelope <= 0.0f)
                         {
                             continue;
@@ -302,7 +319,8 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
                         const float u = (float(x) + 0.5f) / float(n);
                         const float w = (float(z) + 0.5f) / float(n);
                         const float billows = Billows(u, height, w, data.tileSize, clouds.seed);
-                        const float carve = (1.0f - billows) * 0.75f;
+                        // Billows carve the flanks and the top; the base stays flat.
+                        const float carve = (1.0f - billows) * (0.2f + 0.35f * Smoothstep(0.0f, 0.5f, r));
                         // Water grows with height above the base. (The lookup sharpens the
                         // outline after the detail has eroded it.)
                         float density = Saturate((envelope - carve) / (1.0f - carve));
@@ -327,7 +345,7 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
                         const float pz = (float(z) + 0.5f) / g;
                         float detail = 0.0f;
                         const float weights[3] = {0.625f, 0.25f, 0.125f};
-                        for (int octave = 0, period = 4; octave < 3; ++octave, period *= 2)
+                        for (int octave = 0, period = 6; octave < 3; ++octave, period *= 2)
                         {
                             const float p = float(period);
                             detail += weights[octave] *

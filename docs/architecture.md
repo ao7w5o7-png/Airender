@@ -956,16 +956,21 @@ single-scattering albedo, a shape scale and a seed. `cumulus` uses it; `aircli r
 whose sun lights the clouds), and the editor's Scene panel edits it.
 
 - **Density** (`src/renderer/src/Clouds.cpp`), procedural, baked on the CPU into two 8-bit 3D
-  textures when the clouds change (0.2 s in debug builds, all cores):
-  - the base, 256 x 256 texels over a 12.8 km tile that repeats horizontally and 25 m layers in
-    height. A 2D weather field (gradient noise for regional variation, cellular noise that gathers
-    clouds into cells) is thresholded at its 1 - coverage quantile, so the requested fraction of the
-    tile lies under cloud outlines; how far it exceeds the threshold sets a cloud's height and
-    density. Bases are flat at the condensation level, tops are domes, billowy cellular noise
-    carves the outline and liquid water grows with height above the base.
-  - the detail, 64^3 texels of cellular noise repeating every 400 m, which erodes the base's fringe
-    at render time; the eroded density is then sharpened (times 10, clamped to 1): crisp outlines,
-    even interiors.
+  textures when the clouds change (2.1 s for `cumulus` in debug builds, all cores):
+  - the base, 512 x 512 texels over a 25.6 km tile that repeats horizontally (too far away to show
+    from the ground) and 25 m layers in height. A 2D weather field is thresholded at its
+    1 - coverage quantile, so the requested fraction of the tile lies under cloud outlines; how far
+    it exceeds the threshold sets a cloud's height and density. Gradient noise from 12.8 to 1.6 km
+    gathers the clouds into fields with clear gaps between; cellular noise at 3.2, 1.6 and 0.8 km,
+    over coordinates warped by about 700 m, makes clouds of many sizes with uneven outlines. Bases are
+    flat at the condensation level; above, a cloud narrows into a dome, billowy cellular noise in
+    cells of 640 to 160 m carves its flanks and top (barely its base) and liquid water grows with
+    height above the base.
+  - the detail, 128^3 texels of cellular noise repeating every 1.024 km (25 to the tile), which
+    erodes the base's fringe a little at render time (strength 0.4); the eroded density is then
+    sharpened (times 5, clamped to 1): crisp outlines, even interiors. The earlier generator (a
+    12.8 km tile, one size of cell, the detail at 0.75 and times 10) made a sky of same-sized
+    cauliflowers.
   - majorants, one per 8 x 4 x 8 base texels plus the texels around them that trilinear filtering
     reaches. They bound the density everywhere because the erosion only lowers it and the
     sharpening is monotonic.
@@ -1018,6 +1023,8 @@ Validation:
 - `Scene_CloudsStayAboveTheGeometry`, `Scene_CloudResourcesFollowEdits`.
 - GPU against the CPU reference on `cumulus` (160x90, `--sun 38,-20`, 8192 against 2048 spp): the
   means differ by 0.014%; sky, horizon and ground separately by at most 0.2%.
+  With the 25.6 km generator (240x135, 1024 frames against 64 spp on the CPU): -0.08%, 15 x 15 blocks
+  within -1.3% .. +0.8% (the CPU's noise).
 - Cost (RTX 5070, 960x540, 4 spp per frame, front-lit `cumulus`): 78 ms per frame. Multiple
   scattering in thick media is the most expensive transport here, and noisy: a cloud pixel's
   samples have a relative standard deviation of about 0.8, so clouds need hundreds of samples (or
@@ -1797,17 +1804,17 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
 - **Light at a step**: the sun's single scattering with the clouds' phase function (§8.10, delta-M
   scaled) and an optical depth towards the sun from 6 samples whose steps double from 30 m; the
   light that scattered more than once, isotropic, falling off as the two-stream solution of a
-  conservative slab, `4 density / (1 + 0.3 tau)` times the sun's irradiance over 4 pi (octaves of
+  conservative slab, `4.4 density / (1 + 0.3 tau)` times the sun's irradiance over 4 pi (octaves of
   single scattering, Wrenninge et al. 2013, came out 50% dark inside cumulus, whose optical depths
   towards the sun are tens); the sky's light from 8 directions above and below, `0.4 (up (0.3 + 0.7 h)
   + down (1 - 0.7 h))` at a height h in the layer. Each step integrates its light with its own
   extinction (Hillaire 2016). The air in front dims the clouds' light and adds its own where they hide
   the sky, as a path's walk sees it.
 - **Matched** to the path traced clouds (`cloudMarch=0`, accumulated) on `cumulus` at 640 x 360, the
-  march accumulated with `cloudMarch=2`: the cloud pixels' mean -0.08% (8 x 8 blocks: 5th percentile
-  -12%, 95th +21%; the march's sunlit sides a little dark, their shaded sides a little bright), +5.3%
-  with the sun at 25 degrees, azimuth 160. The half-size layer alone would account for 1% of those
-  blocks.
+  march accumulated with `cloudMarch=2`: the image's mean -2.5% (8 x 8 blocks: 5th percentile -9.7%,
+  95th +9.5%; the march's sunlit sides a little dark, their shaded sides a little bright), -0.4%
+  with the sun at 25 degrees, azimuth 160 (-7.1%, +17.5%). The half-size layer alone would account
+  for 1% of those blocks.
 - A yawing camera (0.5 degrees a frame) shows no trails.
 - Not done: the clouds in the real-time volumes' shadow maps (with `volumeMarch` the paths walk
   through the clouds); the sky map's parallax for points far from the camera; the furnace walks

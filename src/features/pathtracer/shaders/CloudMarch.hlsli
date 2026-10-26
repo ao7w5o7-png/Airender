@@ -65,7 +65,7 @@ FrameData LoadFrame()
 // clouds (optical depths of tens) it falls off as the two-stream solution of a conservative slab,
 // 1 / (1 + 3/4 (1 - g) tau), not exponentially (octaves of single scattering, Wrenninge et al. 2013, came
 // out 50% dark inside cumulus). Isotropic; its scale and slope matched to the path traced clouds.
-static const float kCloudMsScale = 4.0f;
+static const float kCloudMsScale = 4.4f;
 static const float kCloudMsSlope = 0.3f;
 // Where the clouds thin out (their eroded fringe) little light has scattered more than once: the
 // diffused light scales with the density to this power.
