@@ -52,7 +52,7 @@ Aerial AerialPerspective(SkyData sky, float3 direction, float distance)
     float w = (sqrt(saturate(distance / sky.aerialDistance)) * (slices - 1.0f) + 0.5f) / slices;
     float4 inscatter = AerialInscatterSample(sky, float3(uv.x, uv.y, w));
     float4 transmittance = AerialTransmittanceSample(sky, float3(uv.x, uv.y, w));
-    air.inscatter = float3(inscatter.x, inscatter.y, inscatter.z);
+    air.inscatter = float3(inscatter.x, inscatter.y, inscatter.z) * kAerialInscatterScale;
     air.transmittance = float3(transmittance.x, transmittance.y, transmittance.z);
     return air;
 }

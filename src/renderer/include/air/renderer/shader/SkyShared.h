@@ -8,7 +8,8 @@
 //
 // Aerial perspective: two RGBA16F 3D textures over the same (u, v), at a lower resolution, and the
 // distance: slice k holds aerialDistance * (k / (aerialSlices - 1))^2. One holds the radiance the air
-// scatters towards the viewer over that distance (nits), the other its transmittance.
+// scatters towards the viewer over that distance (nits, divided by kAerialInscatterScale), the other its
+// transmittance.
 #ifndef AIR_RENDERER_SKY_SHARED_H
 #define AIR_RENDERER_SKY_SHARED_H
 
@@ -39,6 +40,10 @@ static_assert(sizeof(SkyData) == 64);
 #endif
 
 AIR_CONST float kSkyPi = 3.14159265358979f;
+// The inscatter table holds nits over this: towards a low sun the air scatters past half precision's
+// 65504 nits over tens of kilometres (an infinite texel, then NaN wherever the clouds' light went
+// through it); scaled, the table reaches 1.7e7 nits and its faintest texels keep their precision.
+AIR_CONST float kAerialInscatterScale = 256.0f;
 
 // Table coordinates (0..1) of a direction.
 AIR_INLINE float2 SkyTableUv(float3 direction, float3 sunDirection)

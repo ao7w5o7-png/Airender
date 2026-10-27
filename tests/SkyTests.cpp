@@ -9,6 +9,7 @@
 #include "air/renderer/TextureSampling.h"
 #include "air/renderer/shader/SkyShared.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -260,5 +261,24 @@ TEST(Sky_AerialPerspectiveMatchesTheSkyAndTheAir)
         const float light = Luminance(reader.AerialPerspective(table.data, horizontal, distance).inscatter);
         EXPECT(light > previous);
         previous = light;
+    }
+}
+
+// Towards a low sun the air scatters more light over tens of kilometres than half precision holds; the
+// inscatter table is scaled (gpu::kAerialInscatterScale) so that every texel stays finite (an infinite
+// one turned into NaN wherever the clouds' light passed through it).
+TEST(Sky_AerialTablesStayFiniteForLowSuns)
+{
+    for (float elevation : {2.0f, 5.0f, 12.0f, 30.0f})
+    {
+        renderer::Sky sky;
+        sky.physical = true;
+        sky.sunElevation = elevation;
+        sky.sunAzimuth = 200.0f;
+        const renderer::SkyTable table = renderer::BuildSkyTable(sky, float3(0.0f));
+        const auto finite = [](const std::vector<u16>& texels)
+        { return std::none_of(texels.begin(), texels.end(), [](u16 h) { return (h & 0x7C00u) == 0x7C00u; }); };
+        EXPECT(finite(table.aerialInscatter));
+        EXPECT(finite(table.aerialTransmittance));
     }
 }
