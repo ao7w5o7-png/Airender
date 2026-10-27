@@ -64,6 +64,7 @@ private:
     u64 mShadowVersion = ~0ull; // the scene version it shows
     // Where the wind had moved the detail over the base density when it was rendered (metres).
     std::array<float, 3> mShadowDrift{};
+    float mShadowFlowPhase = 0.0f; // and where the flow was
     bool mRenderShadow = false;
     u32 mShadowRenders = 0;
     rhi::TextureHandle mSkyMap; // RGBA32F, kCloudSkyMapSize^2

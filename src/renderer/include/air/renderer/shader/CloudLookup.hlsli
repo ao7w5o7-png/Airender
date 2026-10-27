@@ -83,6 +83,54 @@ uint CloudWrap(int i, uint n)
     return uint(m < 0 ? m + int(n) : m);
 }
 
+// The detail's flow at a point (of the drifting base, metres): a swirl that churns the clouds' fringe in
+// place while the bodies drift. Divergence free across the wind (the curl of two products of sines,
+// cells of about 300 to 600 m) and rising (0.2 to 0.6 of it), about unit length; in-place motion
+// without stretching comes from two phases of it half a period apart, cross-faded (a flow map). Its
+// sines run whole numbers of times over the tile (64, 83, 141 and 122), so the clouds still repeat.
+float3 CloudFlowField(CloudData c, float3 q)
+{
+    float cycle = 2.0f * kCloudPi / c.tileSize;
+    float a = 64.0f * cycle;
+    float b = 83.0f * cycle;
+    float a2 = 122.0f * cycle;
+    float b2 = 141.0f * cycle;
+    float s1x = sin(q.x * a + 1.3f);
+    float c1x = cos(q.x * a + 1.3f);
+    float s1z = sin(q.z * b + 0.7f);
+    float c1z = cos(q.z * b + 0.7f);
+    float s2x = sin(q.x * b2 + 2.1f);
+    float c2x = cos(q.x * b2 + 2.1f);
+    float s2z = sin(q.z * a2 + 0.4f);
+    float c2z = cos(q.z * a2 + 0.4f);
+    // psi = s1x s1z + 0.5 s2x s2z; the swirl is (d psi / dz, -d psi / dx), scaled to about 1.
+    float vx = s1x * c1z * b + 0.5f * s2x * c2z * a2;
+    float vz = -(c1x * s1z * a + 0.5f * c2x * s2z * b2);
+    float rise = 0.4f + 0.2f * s1x * s2z;
+    float scale = 1.0f / (b + 0.5f * a2); // the swirl's largest speed
+    return float3(vx * scale, rise, vz * scale);
+}
+
+// The detail at a point of the detail's own drift, flowing: two phases of the flow half a period
+// apart, each restarting where the other has all the weight.
+float CloudDetailFlow(CloudData c, float3 q, float3 d)
+{
+    float3 uvw = float3(d.x / c.detailPeriod, d.z / c.detailPeriod, d.y / c.detailPeriod);
+    if (c.flowAmount <= 0.0f)
+    {
+        return CloudDetailSample(c, float3(frac(uvw.x), frac(uvw.y), frac(uvw.z)));
+    }
+    float3 f = CloudFlowField(c, q) * (c.flowAmount / c.detailPeriod);
+    float3 flow = float3(f.x, f.z, f.y); // to the detail's (x, z, altitude)
+    float phase0 = frac(c.flowPhase);
+    float phase1 = frac(c.flowPhase + 0.5f);
+    float3 p0 = uvw - flow * phase0;
+    float3 p1 = uvw - flow * phase1;
+    float d0 = CloudDetailSample(c, float3(frac(p0.x), frac(p0.y), frac(p0.z)));
+    float d1 = CloudDetailSample(c, float3(frac(p1.x), frac(p1.y), frac(p1.z)));
+    return lerp(d0, d1, abs(1.0f - 2.0f * phase0));
+}
+
 // Density (0..1) at a point: the base texture, its fringe eroded by the detail texture, sharpened,
 // each where the wind has carried it (CloudData's offsets). The erosion never raises the density and
 // the sharpening is monotonic, so the majorants of the sharpened base texture bound it.
@@ -101,9 +149,8 @@ float CloudDensity(CloudData c, float3 p)
     {
         return saturate(base * c.sharpness);
     }
-    float detail = CloudDetailSample(c, float3(frac((p.x - c.detailOffsetX) / c.detailPeriod),
-                                               frac((p.z - c.detailOffsetZ) / c.detailPeriod),
-                                               frac((altitude - c.detailOffsetY) / c.detailPeriod)));
+    float detail = CloudDetailFlow(c, float3(p.x - c.baseOffsetX, altitude, p.z - c.baseOffsetZ),
+                                   float3(p.x - c.detailOffsetX, altitude - c.detailOffsetY, p.z - c.detailOffsetZ));
     float erosion = detail * c.detailStrength * (1.0f - base);
     return saturate((base - erosion) / (1.0f - erosion) * c.sharpness);
 }
@@ -140,23 +187,64 @@ float CirrusNoise(float2 p)
     return lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y);
 }
 
-// The sheet's vertical optical depth over (x, z): fibres 4 km long and 500 m across, stretched along
-// the wind and bent by swirls of about 9 km (the hooks of mares' tails), in patches of 6 to 15 km.
+// A ridge of gradient noise: 1 on its zero line, falling off to either side (thin filaments, where
+// the noise itself makes bands).
+float CirrusRidge(float2 p)
+{
+    float r = 1.0f - abs(CirrusNoise(p)) * 2.2f;
+    r = saturate(r);
+    return r * r * r;
+}
+
+float2 CirrusRotate(float2 v, float angle)
+{
+    float c = cos(angle);
+    float s = sin(angle);
+    return float2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// The sheet's vertical optical depth over (x, z). Cirrus is wisps of ice falling from where it forms
+// and drawn out by the wind's shear: filaments a few hundred metres across and kilometres long, curling
+// into hooks, tapering, in patches of a few to tens of kilometres with clear sky between, a faint veil
+// among them. Here: ridges of gradient noise (thin lines, not the bands of plain noise) stretched 6:1
+// along the wind, each of three octaves turned a little against the others, over coordinates warped
+// by swirls of 18 and 6 km (the curls); a taper along them; a soft mask of patches over the fraction
+// of the sky asked for (its noise's quantile, CirrusThreshold).
 float CirrusOpticalDepth(CloudData c, float x, float z)
 {
     float2 q = float2(x - c.cirrusOffsetX, z - c.cirrusOffsetZ);
     float speed = sqrt(c.windX * c.windX + c.windZ * c.windZ);
     float2 w = speed > 1e-3f ? float2(c.windX, c.windZ) / speed : float2(1.0f, 0.0f);
-    q += float2(CirrusNoise(q * (1.0f / 9000.0f) + float2(3.1f, 0.7f)),
-                CirrusNoise(q * (1.0f / 9000.0f) + float2(17.7f, 5.3f))) * 2500.0f;
-    float2 s = float2(dot(q, w) * (1.0f / 4000.0f), dot(q, float2(-w.y, w.x)) * (1.0f / 500.0f));
-    float fibres = CirrusNoise(s) + 0.5f * CirrusNoise(s * 2.03f + float2(5.2f, 1.3f)) +
-                   0.25f * CirrusNoise(s * 4.1f + float2(9.7f, 2.9f));
+    // Patches, before the warp: where cirrus is at all.
     float patches = CirrusNoise(q * (1.0f / 15000.0f) + float2(31.3f, 11.1f)) +
                     0.5f * CirrusNoise(q * (1.0f / 6000.0f) + float2(7.3f, 23.9f));
-    float v = 0.5f + 0.7f * patches + 0.6f * fibres;
-    float k = saturate((v - c.cirrusThreshold) / 0.35f);
-    return c.cirrusDepth * k * k * (3.0f - 2.0f * k);
+    float k = saturate((0.5f + 0.7f * patches - c.cirrusThreshold) / 0.45f);
+    float mask = k * k * (3.0f - 2.0f * k);
+    if (mask <= 0.0f)
+    {
+        return 0.0f;
+    }
+    // The curls: a broad warp and a finer one.
+    q += float2(CirrusNoise(q * (1.0f / 18000.0f) + float2(3.1f, 0.7f)),
+                CirrusNoise(q * (1.0f / 18000.0f) + float2(17.7f, 5.3f))) * 6000.0f;
+    q += float2(CirrusNoise(q * (1.0f / 6000.0f) + float2(9.1f, 4.4f)),
+                CirrusNoise(q * (1.0f / 6000.0f) + float2(2.6f, 8.8f))) * 1200.0f;
+    float2 along = float2(dot(q, w), dot(q, float2(-w.y, w.x)));
+    float strands = 0.0f;
+    float amplitude = 1.0f;
+    float scale = 1.0f / 2400.0f;
+    for (uint octave = 0u; octave < 3u; ++octave)
+    {
+        float2 r = CirrusRotate(along, 0.25f * (float(octave) - 1.0f)) * scale;
+        float ridge = CirrusRidge(float2(r.x / 6.0f, r.y) + float2(5.1f, 1.7f) * float(octave + 1u));
+        // Tapering along the strand: its strength drifts in and out along its length.
+        float taper = saturate(0.6f + CirrusNoise(float2(r.x / 3.0f, r.y * 0.25f) + float2(13.3f, 6.1f)) * 1.4f);
+        strands += amplitude * ridge * taper;
+        amplitude *= 0.55f;
+        scale *= 2.1f;
+    }
+    float veil = 0.18f * mask;
+    return c.cirrusDepth * mask * saturate(veil + strands * 0.8f);
 }
 
 // Where o + t d crosses the sheet after tFrom and before tMax, and its optical depth along the ray

@@ -40,12 +40,16 @@ struct Clouds
     // degrees from +x towards +z.
     float windSpeed = 12.0f;
     float windHeading = 0.0f;
+    // The fringe's flow: its detail swirls up to this far (metres) and rises, churning in place over
+    // flowPeriod seconds while the bodies drift; 0: the detail only drifts.
+    float flow = 250.0f;
+    float flowPeriod = 16.0f;
     // High cirrus: a thin sheet of ice crystals at cirrusAltitude (above `top`) over this fraction of the
     // sky (0: none), its vertical optical depth up to cirrusDepth (cirrus: 0.03 to 3). The wind aloft
     // carries it twice as fast as the layer.
     float cirrus = 0.3f;
     float cirrusAltitude = 9000.0f;
-    float cirrusDepth = 0.5f;
+    float cirrusDepth = 1.0f;
 
     bool operator==(const Clouds&) const = default;
 };

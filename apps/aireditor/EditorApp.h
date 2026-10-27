@@ -159,6 +159,7 @@ private:
     void BuildHtmlProfiler();
     void FinishProfileReport();
     std::string SetParameter(const std::string& qualified, const std::string& value);
+    float mCloudTimeLapse = 1.0f; // the clouds' clock against the wall clock
 
     rhi::Device& mDevice;
     TaskSystem& mTasks;

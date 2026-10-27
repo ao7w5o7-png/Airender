@@ -365,6 +365,12 @@ void EditorApp::RenderFrame(const std::function<void(renderer::FrameContext&)>& 
     mLastFrameTime = now;
 
     mScene->Update();
+    // The clouds' clock follows the frames' wall time (times the time-lapse), not a fixed 60 a second.
+    if (mScene->Desc().clouds.enabled && wallMs > 0.0)
+    {
+        mRunner->SetParameter("pathtracer.cloudWindStep",
+                              std::format("{}", std::min(wallMs * 0.001, 0.1) * double(mCloudTimeLapse)));
+    }
     // A report requested while a capture still waits for its GPU timings uses that capture.
     u32 captureTargets = 0;
     if (mReportRequest != 0 && mPendingCapture)
@@ -1043,6 +1049,12 @@ void EditorApp::BuildScenePanel()
         slider("Shape scale", &clouds.scale, 0.25f, 4.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
         slider("Wind", &clouds.windSpeed, 0.0f, 60.0f, "%.0f m/s");
         slider("Wind heading", &clouds.windHeading, -180.0f, 180.0f, "%.0f deg");
+        slider("Flow", &clouds.flow, 0.0f, 800.0f, "%.0f m");
+        ImGui::SetItemTooltip("How far the clouds' fringe swirls and rises as it churns in place (0: it only\n"
+                              "drifts with the wind).");
+        slider("Flow period", &clouds.flowPeriod, 2.0f, 120.0f, "%.0f s", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("Time-lapse", &mCloudTimeLapse, 1.0f, 100.0f, "%.0fx", ImGuiSliderFlags_Logarithmic);
+        ImGui::SetItemTooltip("How fast the clouds' clock runs against the wall clock: the wind and the flow.");
         ImGui::SetItemTooltip("The clouds drift with the wind in real time (pathtracer.cloudWindStep seconds a "
                               "frame), their detail faster and rising, and lean with its shear.");
         slider("Cirrus", &clouds.cirrus, 0.0f, 1.0f, "%.2f");

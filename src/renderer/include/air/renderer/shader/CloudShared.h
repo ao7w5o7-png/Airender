@@ -68,10 +68,16 @@ struct CloudData
     float cirrusThreshold;
     float cirrusOffsetX;
     float cirrusOffsetZ;
+    // The detail's flow (CloudLookup.hlsli CloudDetailFlow): how far it swirls (metres), over what
+    // period (seconds), and where in it the clock is (time / period, set per frame by the renderer).
+    float flowAmount;
+    float flowPeriod;
+    float flowPhase;
+    float flowPad;
 };
 
 #ifdef __cplusplus
-static_assert(sizeof(CloudData) == 144);
+static_assert(sizeof(CloudData) == 160);
 } // namespace air::gpu
 #endif
 

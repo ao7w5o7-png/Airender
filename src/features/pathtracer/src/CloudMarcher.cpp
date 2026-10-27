@@ -117,11 +117,16 @@ void CloudMarcher::BeginFrame(const renderer::GpuScene& scene, u32 width, u32 he
         const float d = wrap(drift[i] - mShadowDrift[i], c.detailPeriod);
         moved += d * d;
     }
-    mRenderShadow = scene.version != mShadowVersion || moved > 16.0f * 16.0f;
+    // The flow churns the detail in place: again every 32nd of its period.
+    float churned = std::abs(c.flowPhase - mShadowFlowPhase);
+    churned = std::min(churned, 1.0f - churned);
+    mRenderShadow =
+        scene.version != mShadowVersion || moved > 16.0f * 16.0f || (c.flowAmount > 0.0f && churned > 1.0f / 32.0f);
     mShadowVersion = scene.version;
     if (mRenderShadow)
     {
         mShadowDrift = drift;
+        mShadowFlowPhase = c.flowPhase;
     }
     mWindStep = {wrap(c.baseOffsetX - mBaseOffset[0], c.tileSize), wrap(c.baseOffsetZ - mBaseOffset[1], c.tileSize)};
     mBaseOffset = {c.baseOffsetX, c.baseOffsetZ};

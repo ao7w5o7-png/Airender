@@ -239,7 +239,8 @@ CloudPhaseParams FitCloudPhase(float diameter)
 }
 
 // The threshold of the cirrus' noise (CirrusOpticalDepth in CloudLookup.hlsli) that the given fraction
-// of the sky exceeds: the noise is close to normal, mean 0.507 and deviation 0.228 (measured over 100 km).
+// of the sky exceeds: the patches' noise is close to normal, mean 0.509 and deviation 0.172 (measured over
+// 100 km).
 float CirrusThreshold(float coverage)
 {
     // The normal quantile by Acklam's rational approximation (relative error below 1.2e-9).
@@ -271,7 +272,7 @@ float CirrusThreshold(float coverage)
         z = (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
             (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0);
     }
-    return float(0.507 + 0.228 * z);
+    return float(0.509 + 0.172 * z);
 }
 
 CloudVolume BuildCloudVolume(const Clouds& clouds)
@@ -301,6 +302,8 @@ CloudVolume BuildCloudVolume(const Clouds& clouds)
     const float windW = std::sin(heading);
     data.windX = clouds.windSpeed * windU;
     data.windZ = clouds.windSpeed * windW;
+    data.flowAmount = std::max(clouds.flow, 0.0f);
+    data.flowPeriod = std::max(clouds.flowPeriod, 0.1f);
     data.cirrusAltitude = clouds.cirrusAltitude;
     data.cirrusDepth = clouds.cirrus > 0.0f ? clouds.cirrusDepth : 0.0f;
     data.cirrusThreshold = CirrusThreshold(clouds.cirrus);

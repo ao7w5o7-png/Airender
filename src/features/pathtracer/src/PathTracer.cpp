@@ -441,6 +441,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         frame.clouds.detailOffsetX = wrap(1.5 * double(frame.clouds.windX) * time, frame.clouds.detailPeriod);
         frame.clouds.detailOffsetY = wrap(0.25 * double(speed) * time, frame.clouds.detailPeriod);
         frame.clouds.detailOffsetZ = wrap(1.5 * double(frame.clouds.windZ) * time, frame.clouds.detailPeriod);
+        frame.clouds.flowPhase =
+            float(time / double(frame.clouds.flowPeriod) - std::floor(time / double(frame.clouds.flowPeriod)));
         // The cirrus is not periodic: its offsets wrap every 1000 km (once in 11 hours at 24 m/s).
         frame.clouds.cirrusOffsetX = wrap(2.0 * double(frame.clouds.windX) * time, 1.0e6f);
         frame.clouds.cirrusOffsetZ = wrap(2.0 * double(frame.clouds.windZ) * time, 1.0e6f);

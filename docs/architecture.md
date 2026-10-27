@@ -990,10 +990,14 @@ the editor's Scene panel edits it.
   scatters there with probability 1 - exp(-tau / mu) (its vertical optical depth over the cosine at
   which the ray crosses it, at least 0.05), with the clouds' phase function and albedo (ice crystals
   scatter forward like droplets; their halos are not modelled); the transmittance through it is
-  exp(-tau / mu), exact. Its optical depth (up to 0.5 by default) is procedural, so nothing is baked
-  and the CPU reference evaluates the same code: gradient noise in fibres 4 km long and 500 m across
-  stretched along the wind, bent by swirls of 9 km (the hooks of mares' tails), gathered into patches
-  of 6 to 15 km, over the fraction of the sky asked for (0.3).
+  exp(-tau / mu), exact. Its optical depth (up to 1 by default) is procedural, so nothing is baked
+  and the CPU reference evaluates the same code. Cirrus is wisps of ice drawn out by the wind's shear:
+  filaments a few hundred metres across and kilometres long that curl into hooks and taper, in patches
+  with clear sky between and a faint veil among them. So: ridges of gradient noise (`1 - |n|`, thin
+  lines; plain noise made evenly spaced bands, a sky combed into stripes) stretched 6:1 along the
+  wind, three octaves each turned a little against the others, over coordinates warped by swirls of
+  18 and 6 km, tapering along their length, under a soft mask of patches of 6 to 15 km over the
+  fraction of the sky asked for (0.3).
 - **The planet's curvature**: the layer's heights are altitudes above a sphere of 6371 km under the
   scene's origin, `a(p) = p.y + (p.x^2 + p.z^2) / 2R` (exact to a metre within the 100 km a ray goes):
   100 km away the layer is 785 m lower, so it sinks towards the horizon instead of a flat sheet whose
@@ -1865,6 +1869,16 @@ reads with `kFlagCloudMaps` (`CloudMaps.hlsli`):
   depth moves the reprojection less than a quarter of a pixel from that of a point at infinity the
   history is kept as it is (a camera that turns, or stands still), and fully clamped from a pixel.
   A camera flying 30 m a frame while turning shows no trails.
+- **Flow** (`Clouds::flow`, 250 m, `flowPeriod`, 16 s; `CloudDetailFlow`): while the bodies drift, their
+  fringe churns in place. The detail's coordinates move along a swirl (the curl of two products of
+  sines, cells of 300 to 600 m, rising at 0.2 to 0.6 of it) by up to `flow` metres; two phases half a
+  period apart are cross-faded, each restarting where the other has all the weight (a flow map: motion
+  without the stretching of advecting the texture for ever). The detail only erodes, so the majorants
+  still bound the density and the paths' walks see the same clouds. The shadow map is rendered again
+  every 32nd of the period. Against the march accumulated at the same clock the real-time layer's
+  error is 0.00090 at 1/60 s a frame (0.00085 without the flow). The editor drives the clouds' clock
+  with its frames' wall time (`cloudWindStep` each frame) times a time-lapse factor. The clouds'
+  passes at 1920 x 1080: 1.17 ms (sky map 0.42, march 0.52, reconstruction 0.23).
 - **Wind** (`CloudData::windX` / `Z`, from `Clouds::windSpeed` and `windHeading`, 12 m/s by
   default): real-time frames advance the clouds' clock, `pathtracer.cloudTime` (seconds), by
   `pathtracer.cloudWindStep` (1/60 s; 0 stills them); accumulation holds it, so the paths' walks and
