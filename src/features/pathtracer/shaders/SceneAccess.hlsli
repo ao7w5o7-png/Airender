@@ -61,12 +61,14 @@ float4 MaterialTextureSample(uint texture, float2 uv)
 
 // The kernels with the neural parts (AIR_PT_NEURAL: PathTracerNeural.hlsl, PathTracerGiNeural.hlsl,
 // ReSTIR*Neural.hlsl) evaluate the clear coats (Bsdf.hlsli AIR_BSDF_COATS: their network, random walk
-// or approximation) and decode neural texture sets on sample; the others see coated materials as
-// their bases and read the sets' coarse copies.
+// or approximation), carry light beneath subsurface materials (Subsurface.hlsli) and decode neural
+// texture sets on sample; the others see coated materials as their bases, subsurface materials as
+// plain dielectrics, and read the sets' coarse copies.
 #ifndef AIR_PT_NEURAL
 #define AIR_PT_NEURAL 0
 #endif
 #define AIR_BSDF_COATS AIR_PT_NEURAL
+#define AIR_PT_SUBSURFACE AIR_PT_NEURAL
 
 // The neural coat's parameters (FrameData::neuralCoat, a constant buffer: every thread reads the
 // same weights), set by the kernel.

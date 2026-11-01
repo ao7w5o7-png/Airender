@@ -21,16 +21,24 @@
 //   5. runs AsyncCompute passes on the compute queue, concurrently with graphics work they do not
 //      depend on, and inserts the cross-queue waits and hand-over barriers they need.
 //
+// CPU data reaches the frame through upload memory (an UploadAllocator, kept across frames by
+// FrameRunner): AllocateUpload() for data shaders read in place, UploadBuffer() / UploadTexture() /
+// UploadToBuffer() for data copied into device-local resources by Copy passes the graph orders like
+// any other pass.
+//
 // Threading: building the graph (Create*/Import*/AddPass/Execute) is single threaded and checked.
 // Execute lambdas may run concurrently with each other on worker threads, so they must only use
 // their PassContext and data captured by value (or immutable data).
 
 #include "air/core/Json.h"
 #include "air/core/TaskSystem.h"
+#include "air/rdg/UploadAllocator.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <array>
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -138,11 +146,15 @@ public:
         u32 transientHeapsCreated = 0;
         u32 transientResourcesCreated = 0;
         u32 transientResourcesReused = 0; // placed resources an earlier frame created
+        u64 uploadBytes = 0;              // upload memory the frame allocated (AllocateUpload and the Upload* calls)
+        u32 uploadCount = 0;              // Upload* calls
     };
 
-    // `pool` keeps transient memory and placed resources from frame to frame (it must outlive the
-    // graph); without one, each frame gets a new heap and new resources.
-    RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config, TransientResourcePool* pool = nullptr);
+    // `pool` keeps transient memory and placed resources from frame to frame, `uploads` upload memory
+    // (both must outlive the graph); without them, each frame gets a new heap and new resources, and
+    // its own upload memory, released after Execute().
+    RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config, TransientResourcePool* pool = nullptr,
+                UploadAllocator* uploads = nullptr);
     RenderGraph(rhi::Device& device, TaskSystem* tasks = nullptr) : RenderGraph(device, tasks, Config{}) {}
     ~RenderGraph();
 
@@ -152,6 +164,22 @@ public:
     // Transient resources: created on first use, memory aliased, released after Execute().
     TextureRef CreateTexture(const rhi::TextureDesc& desc);
     BufferRef CreateBuffer(const rhi::BufferDesc& desc);
+
+    // Upload memory for this frame's data, valid until the GPU has finished the frame: shaders read it
+    // in place (Allocation::srv, a ByteAddressBuffer, at byte Allocation::offset), as what every pass
+    // of the frame reads without declaring it (it never changes while the GPU runs the frame).
+    // Thread-safe: a pass may allocate while it records.
+    UploadAllocator::Allocation AllocateUpload(u64 size, u64 alignment = 256);
+    // A transient buffer holding `size` bytes of `data` (desc.size may be larger; usage gains CopyDst),
+    // copied from upload memory by a Copy pass "Upload <name>" that is culled when nothing reads it.
+    BufferRef UploadBuffer(rhi::BufferDesc desc, const void* data, u64 size);
+    // Writes `size` bytes of `data` at byte `offset` of `buffer`, a buffer of this graph with CopyDst
+    // usage (transient or imported), in a Copy pass "Upload <name>": the passes declared before it
+    // read the old contents, those after it the new ones.
+    void UploadToBuffer(BufferRef buffer, u64 offset, const void* data, u64 size);
+    // A transient texture with one mip (usage gains CopyDst) holding `texels`: tightly packed rows of
+    // desc.width texels, desc.height rows per slice (3D) or layer (2D array), slice after slice.
+    TextureRef UploadTexture(rhi::TextureDesc desc, const void* texels);
 
     // External resources: `current` is their state now, they are left in `final` after the graph.
     TextureRef ImportTexture(rhi::TextureHandle texture, Access current, Access final);
@@ -309,7 +337,12 @@ private:
     std::vector<u32> mFinalBarrierResources;
     rhi::HeapHandle mTransientHeap;
     TransientResourcePool* mPool = nullptr;
-    u32 mPoolSlot = ~0u; // the pool heap this frame's transients live in
+    u32 mPoolSlot = ~0u;                          // the pool heap this frame's transients live in
+    std::unique_ptr<UploadAllocator> mOwnUploads; // without an UploadAllocator from the caller
+    UploadAllocator* mUploads = nullptr;
+    std::atomic<u64> mUploadBytes = 0;
+    u32 mUploadCount = 0;
+    bool mUploadsEnded = false; // Execute() handed the frame's upload memory back (UploadAllocator::EndFrame)
     bool mCompiled = false;
     bool mExecuted = false;
     Stats mStats;

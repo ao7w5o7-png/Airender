@@ -42,6 +42,19 @@ struct MaterialData
     float3 coatColor;
     // > 0: a cutout, a hole where the colour texture's alpha is below it (Cutout.hlsli).
     float alphaCutoff;
+    // Metallic flakes under the coat (car paint): their share, the roughness their normals spread by,
+    // their colour (a metal's F0).
+    float flakes;
+    float flakeRoughness;
+    float3 flakeColor;
+    // Subsurface scattering (Subsurface.hlsli): how far light spreads under the surface, per channel,
+    // metres (0: none; baseColor is then the colour the material reflects in all), and the anisotropy
+    // of its scattering inside. Dielectric only.
+    float3 subsurfaceRadius;
+    float subsurfaceAnisotropy;
+    float pad0;
+    float pad1;
+    float pad2;
 };
 
 // A material's textures (renderer::MaterialTextures): bindless Texture2D<float4> indices on the GPU,
@@ -132,7 +145,7 @@ struct LightTreeNode
 
 #ifdef __cplusplus
 static_assert(sizeof(Vertex) == 32);
-static_assert(sizeof(MaterialData) == 64);
+static_assert(sizeof(MaterialData) == 112);
 static_assert(sizeof(TextureSetData) == 16);
 static_assert(sizeof(InstanceData) == 112);
 static_assert(sizeof(LightTriangle) == 80);

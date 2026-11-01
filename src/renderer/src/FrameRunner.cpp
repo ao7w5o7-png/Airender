@@ -49,6 +49,18 @@ json::Value FrameResult::ToJson() const
     pool["resources"] = transientPool.resources;
     pool["heapsReleased"] = transientPool.heapsReleased;
     pool["resourcesReleased"] = transientPool.resourcesReleased;
+    pool["evictedBytes"] = transientPool.evictedBytes;
+    pool["heapsEvicted"] = transientPool.heapsEvicted;
+    pool["heapsMadeResident"] = transientPool.heapsMadeResident;
+    json::Value& upload = out["uploadMemory"];
+    upload["bytes"] = uploads.bytes;
+    upload["allocations"] = uploads.allocations;
+    upload["copies"] = graphStats.uploadCount;
+    upload["pages"] = uploads.pages;
+    upload["pageBytes"] = uploads.pageBytes;
+    upload["pagesUsed"] = uploads.pagesUsed;
+    upload["pagesCreated"] = uploads.pagesCreated;
+    upload["pagesReleased"] = uploads.pagesReleased;
     json::Value errors = json::Value::MakeArray();
     for (const std::string& e : validationErrors)
     {
@@ -85,6 +97,7 @@ FrameRunner::FrameRunner(rhi::Device& device, TaskSystem& tasks, FrameRunnerDesc
     {
         mTransientPool = std::make_unique<rdg::TransientResourcePool>(mDevice);
     }
+    mUploads = std::make_unique<rdg::UploadAllocator>(mDevice);
     mOutput = mDevice.CreateTexture(
         {.format = mDesc.outputFormat,
          .width = mDesc.width,
@@ -197,7 +210,7 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
 
     mDevice.BeginFrame();
     {
-        rdg::RenderGraph graph(mDevice, &mTasks, mDesc.graphConfig, mTransientPool.get());
+        rdg::RenderGraph graph(mDevice, &mTasks, mDesc.graphConfig, mTransientPool.get(), mUploads.get());
         const rhi::Access finalAccess = rhi::Access::SRVCompute;
         rdg::TextureRef output = graph.ImportTexture(mOutput, mOutputAccess, finalAccess);
         mOutputAccess = finalAccess;
@@ -253,6 +266,7 @@ FrameResult FrameRunner::RenderFrame(const GpuScene& scene, const Camera& camera
         graph.Execute();
 
         result.graphStats = graph.GetStats();
+        result.uploads = mUploads->GetStats();
         if (mTransientPool)
         {
             result.transientPool = mTransientPool->GetStats();

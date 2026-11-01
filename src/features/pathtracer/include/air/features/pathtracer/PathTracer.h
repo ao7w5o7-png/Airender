@@ -120,15 +120,19 @@ struct VolumeMarchSettings
 
 // The real-time clouds (docs/architecture.md §8.19, src/CloudMarcher.h): instead of every path's walk
 // through them, a ray march of the clouds over the camera's rays at a sixteenth of the render's pixels
-// per frame (reprojected for the rest), a map of the sky through them for the other rays that leave the
-// scene and a shadow map of them for the sun.
+// per frame (reprojected for the rest, at the render's size), a map of the sky through them for the other rays that
+// leave the scene and a shadow map of them for the sun.
 struct CloudMarchSettings
 {
     u32 mode = 1;         // kReSTIROff, kReSTIRRealTime (with accumulate=false), kReSTIRAlways
     u32 steps = 96;       // samples a camera ray may take in the clouds
-    u32 lightSamples = 6; // samples towards the sun from each (steps doubling from 30 m)
+    u32 lightSamples = 8; // samples towards the sun from each (steps growing by 1.6 from 20 m, jittered)
     u32 skySteps = 48;    // the same for the sky map
     u32 skyLightSamples = 4;
+    // The clouds' clock: seconds of wind so far (they drift with it, Clouds::windSpeed). Real-time frames
+    // advance it by windStep (0 stills them); accumulation holds it.
+    float time = 0.0f;
+    float windStep = 1.0f / 60.0f;
 
     bool operator==(const CloudMarchSettings&) const = default;
 };
@@ -156,7 +160,21 @@ struct PathTracerSettings
     // split by lobe (slots::kDiffuseSignal ...), and, under real-time volumes, guides that describe the
     // volumes where they hide the surfaces with the frame without them (slots::kColorBeforeTransparency).
     bool signals = false;
+    // The first surface's direct light from emissive triangles in the signals too (its NEE and ReSTIR
+    // DI's shading, split by lobe), so that the denoiser filters it with the indirect light; the sun's
+    // stays out (its sharp shadows washed out). Off: it passes the denoiser, TAA alone smooths it
+    // (docs/architecture.md §8.14).
+    bool denoiseDirect = true;
+    // Real time: a sample's indirect light is scaled down to this exposed luminance at most (fireflies where a
+    // denoiser has no history yet: uncovered by a moving camera); 0: no limit. Accumulating it is never limited.
+    float fireflyClamp = 0.0f;
     bool transparencyGuides = false;
+    // Set by the feature from what other features consume (not parameters): another feature adds the
+    // first surface's indirect light (slots::kExternalGi), so paths end at the first surface's BSDF sample
+    // with what it reached of the emitters and the sun (kFlagExternalGi); and the guides include the
+    // first hit's emission (slots::kEmission).
+    bool externalGi = false;
+    bool emissionGuide = false;
     bool nextEventEstimation = true;
     // NEE at the first lightTreeBounces path vertices chooses lights with the light tree (power,
     // distance and orientation from the vertex), deeper ones by power alone (O(1)). 0: by power only.
@@ -183,6 +201,10 @@ struct PathTracerSettings
     // this kernel's cheap shading the reorder costs more than it saves (docs/architecture.md §8.2).
     bool shaderExecutionReordering = false;
     u32 coatModel = kCoatModelNeural;
+    // Subsurface scattering (docs/architecture.md §8.20): how the light beneath a subsurface material
+    // finds where it leaves (Subsurface.hlsli kSubsurface*: 0 the neural profile, 1 the random walk,
+    // 2 Burley's profile). The walk is exact for any shape and cost about as much as the profiles.
+    u32 subsurfaceModel = 1;
 };
 
 class ReSTIR;

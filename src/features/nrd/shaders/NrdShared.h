@@ -52,7 +52,8 @@ struct NrdCompositeConstants
     uint height;
     uint denoiser;
     float denoisingRange;
-    uint view; // 0: the frame; 1: the denoised signals alone (the indirect light: the GI)
+    uint view; // 0: the frame; 1: the denoised signals alone (the indirect light: the GI); 2 / 3 the diffuse /
+               // specular one before its albedo (renderer::slots::kSignalView)
 };
 
 #ifdef __cplusplus

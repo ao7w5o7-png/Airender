@@ -160,7 +160,7 @@ ReSTIR::TraceOutputs ReSTIR::BeginFrame(rdg::RenderGraph& graph, u32 width, u32 
 
 void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, const gpu::ReSTIRConstants& scene,
                        rdg::TextureRef accumulation, rdg::TextureRef diffuseSignal, rdg::TextureRef specularSignal,
-                       bool shadeDirect, bool shadeIndirect, bool coatModels)
+                       bool shadeDirect, bool shadeIndirect, bool coatModels, bool directToSignals)
 {
     AIR_CHECK(mHitsRef.IsValid(), "ReSTIR::AddPasses without BeginFrame()");
     if (coatModels && !mPipelines[1].diInitial.IsValid())
@@ -188,8 +188,8 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
 
     // A compute pass over the image that reads `reads`, writes `writes` (and the accumulation when
     // `shades`, and the denoiser signals too when `toSignals`), with `bind` filling the pass's own
-    // buffer indices. Only the indirect light goes to the signals: the direct light stays out of them
-    // as the trace's next event estimation does (docs/architecture.md §8.14).
+    // buffer indices. The indirect light goes to the signals; the direct light only when the trace's
+    // next event estimation does too (directToSignals, docs/architecture.md §8.14).
     auto addPass = [&](const char* name, rhi::PipelineHandle pipeline, u32 flags,
                        const std::vector<rdg::BufferRef>& reads, const std::vector<rdg::BufferRef>& writes, bool shades,
                        bool toSignals, auto bind)
@@ -281,7 +281,7 @@ void ReSTIR::AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, 
                     c.output = ctx.UAV(temporal);
                 });
         addPass("PathTracer.ReSTIRDI.Spatial", p.diSpatial, unbiased | (shadeDirect ? gpu::kReSTIRShade : 0u),
-                {hits, temporal}, {history}, shadeDirect, false,
+                {hits, temporal}, {history}, shadeDirect, directToSignals,
                 [=](rdg::PassContext& ctx, gpu::ReSTIRConstants& c)
                 {
                     c.input = ctx.SRV(temporal);

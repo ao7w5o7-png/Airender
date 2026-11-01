@@ -226,16 +226,71 @@ TEST(Clouds_VolumeCoversTheRequestedSkyAndMajorantsBoundIt)
     }
     EXPECT(checked > 10000);
 
-    // The density repeats with the tile horizontally (up to the filter's 8-bit weights: rounding
-    // the shifted coordinate may move a weight by 1/256).
+    // The density repeats with the tile horizontally at the same altitude (the layer curves with the
+    // planet; up to the filter's 8-bit weights: rounding the shifted coordinate may move a weight by
+    // 1/256).
     for (int i = 0; i < 200; ++i)
     {
         const float3 u = CloudReader::Rand3(seed);
         const float3 p(u.x * c.tileSize, c.bottom + u.y * (c.top - c.bottom), u.z * c.tileSize);
+        float3 q = p + float3(c.tileSize, 0.0f, -2.0f * c.tileSize);
+        q.y += reader.CloudAltitude(p) - reader.CloudAltitude(q);
         const float a = reader.CloudDensity(c, p);
-        const float b = reader.CloudDensity(c, p + float3(c.tileSize, 0.0f, -2.0f * c.tileSize));
+        const float b = reader.CloudDensity(c, q);
         EXPECT(std::abs(a - b) < 1.2e-2f);
     }
+    // 100 km away the layer is 785 m lower.
+    EXPECT(std::abs(reader.CloudAltitude(float3(100000.0f, 0.0f, 0.0f)) - 784.8f) < 1.0f);
+}
+
+// The wind carries the density with it, and the majorant cells (anchored to the base) along.
+TEST(Clouds_WindCarriesTheDensityAndItsMajorants)
+{
+    renderer::CloudVolume& volume = DefaultVolume();
+    CloudReader reader{volume};
+    const CloudData still = volume.data;
+    CloudData windy = still;
+    windy.baseOffsetX = 1234.5f;
+    windy.baseOffsetZ = -777.25f;
+    windy.detailOffsetX = windy.baseOffsetX;
+    windy.detailOffsetZ = windy.baseOffsetZ;
+    uint seed = 5u;
+    for (int i = 0; i < 200; ++i)
+    {
+        const float3 u = CloudReader::Rand3(seed);
+        const float3 p(u.x * still.tileSize, still.bottom + u.y * (still.top - still.bottom), u.z * still.tileSize);
+        float3 q = p + float3(windy.baseOffsetX, 0.0f, windy.baseOffsetZ);
+        q.y += reader.CloudAltitude(p) - reader.CloudAltitude(q);
+        EXPECT(std::abs(reader.CloudDensity(still, p) - reader.CloudDensity(windy, q)) < 1.2e-2f);
+    }
+    // The detail drifting on over the base still only erodes it: the majorants bound it.
+    windy.detailOffsetX += 333.0f;
+    windy.detailOffsetY = 41.0f;
+    int checked = 0;
+    for (int ray = 0; ray < 500; ++ray)
+    {
+        const float3 o =
+            CloudReader::Rand3(seed) * float3(40000.0f, 4000.0f, 40000.0f) - float3(20000.0f, 0.0f, 20000.0f);
+        const float3 d = normalize(CloudReader::Rand3(seed) * 2.0f - 1.0f);
+        CloudReader::CloudMarch m;
+        if (!reader.BeginCloudMarch(windy, o, d, 1e30f, m))
+        {
+            continue;
+        }
+        float t0 = 0.0f;
+        float t1 = 0.0f;
+        float majorant = 0.0f;
+        for (int segment = 0; segment < 64 && reader.NextCloudSegment(windy, m, t0, t1, majorant); ++segment)
+        {
+            for (int k = 0; k < 4; ++k)
+            {
+                const float t = t0 + (t1 - t0) * CloudReader::Rand(seed);
+                EXPECT(windy.extinction * reader.CloudDensity(windy, o + d * t) <= majorant);
+                ++checked;
+            }
+        }
+    }
+    EXPECT(checked > 2000);
 }
 
 // Ratio tracking's mean and delta tracking's chance to pass are both exp(-optical depth), which a
@@ -255,11 +310,10 @@ TEST(Clouds_TrackingMatchesARayMarch)
         const float azimuth = CloudReader::Rand(seed) * 6.2831853f;
         const float3 d(std::cos(elevation) * std::cos(azimuth), std::sin(elevation),
                        std::cos(elevation) * std::sin(azimuth));
-        const double tIn = c.bottom / d.y;
-        const double tOut = c.top / d.y;
+        // Through the whole layer, which curves with the planet (its altitude, not y).
         constexpr double kStep = 0.5;
         double depth = 0.0;
-        for (double t = tIn + 0.5 * kStep; t < tOut; t += kStep)
+        for (double t = 0.5 * kStep; reader.CloudAltitude(o + d * float(t)) <= c.top + 1.0f; t += kStep)
         {
             depth += c.extinction * reader.CloudDensity(c, o + d * float(t)) * kStep;
         }
@@ -268,7 +322,8 @@ TEST(Clouds_TrackingMatchesARayMarch)
             continue; // nearly clear or opaque: a weak test
         }
         ++tested;
-        const double expected = std::exp(-depth);
+        // The cirrus above dims what passes, exactly.
+        const double expected = std::exp(-depth) * reader.CirrusTransmittance(c, o, d, 1e30f);
         constexpr int kSamples = 20000;
         double ratio = 0.0;
         int passed = 0;
@@ -283,6 +338,71 @@ TEST(Clouds_TrackingMatchesARayMarch)
         EXPECT(Near(double(passed) / kSamples, expected, 5.0 * sigma + 2e-3, "delta tracking"));
     }
     EXPECT(tested == 6);
+}
+
+// The cirrus covers about the fraction of the sky asked for, and a ray through a gap in the layer
+// collides with it as often as its optical depth says.
+TEST(Clouds_CirrusCoversItsShareAndScattersByItsDepth)
+{
+    renderer::CloudVolume& volume = DefaultVolume();
+    CloudReader reader{volume};
+    CloudData c = volume.data;
+    EXPECT(c.cirrusDepth > 0.0f && c.cirrusAltitude > c.top);
+    for (float coverage : {0.15f, 0.3f, 0.6f})
+    {
+        c.cirrusThreshold = renderer::CirrusThreshold(coverage);
+        int covered = 0;
+        constexpr int kSide = 200;
+        for (int z = 0; z < kSide; ++z)
+        {
+            for (int x = 0; x < kSide; ++x)
+            {
+                covered += reader.CirrusOpticalDepth(c, float(x) * 500.0f, float(z) * 500.0f) > 0.0f ? 1 : 0;
+            }
+        }
+        const float fraction = float(covered) / float(kSide * kSide);
+        std::printf("  cirrus coverage %.2f: %.3f of a 100 km square\n", coverage, fraction);
+        EXPECT(fraction > coverage * 0.8f && fraction < coverage * 1.2f);
+    }
+    c = volume.data;
+    uint seed = 17u;
+    int tested = 0;
+    for (int attempt = 0; attempt < 2000 && tested < 4; ++attempt)
+    {
+        const float3 o(CloudReader::Rand(seed) * c.tileSize, 0.0f, CloudReader::Rand(seed) * c.tileSize);
+        const float3 d = normalize(float3(CloudReader::Rand(seed) - 0.5f, 1.0f, CloudReader::Rand(seed) - 0.5f));
+        float t = 0.0f;
+        float depth = 0.0f;
+        if (!reader.CirrusCrossing(c, o, d, 1.0f, 1e30f, t, depth) || depth < 0.05f)
+        {
+            continue;
+        }
+        // Through a gap of the layer (no density along the ray).
+        bool clear = true;
+        for (float s = 0.0f; s < t && clear; s += 10.0f)
+        {
+            clear = reader.CloudDensity(c, o + d * s) == 0.0f;
+        }
+        if (!clear)
+        {
+            continue;
+        }
+        ++tested;
+        constexpr int kSamples = 20000;
+        int hits = 0;
+        for (int i = 0; i < kSamples; ++i)
+        {
+            float tHit = 0.0f;
+            if (reader.CloudCollision(c, o, d, 1e30f, seed, tHit))
+            {
+                ++hits;
+                EXPECT(std::abs(tHit - t) < 1e-3f * t);
+            }
+        }
+        const double p = 1.0 - std::exp(-double(depth));
+        EXPECT(Near(double(hits) / kSamples, p, 5.0 * std::sqrt(p * (1.0 - p) / kSamples) + 1e-3, "cirrus collisions"));
+    }
+    EXPECT(tested == 4);
 }
 
 TEST(Clouds_DisabledCloudsAreTransparent)

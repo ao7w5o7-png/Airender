@@ -22,32 +22,32 @@ public:
         mParameters.Add("spp", &mSettings.samplesPerPixelPerFrame, "Samples per pixel traced each frame", 1, 4096);
         mParameters.Add("maxBounces", &mSettings.maxBounces,
                         "Maximum path length (0 = emitters only); Russian roulette ends most paths before it", 0, 64);
-        mParameters.Add("targetSamples", &mSettings.targetSamples,
-                        "Samples per pixel at which the image is final and tracing stops", 1, 1u << 20);
         mParameters.Add("accumulate", &mSettings.accumulate,
                         "Average samples across frames (off: per-frame noisy input for a denoiser)");
-        mParameters.Add("guides", &mSettings.guides,
-                        "Write denoiser guide textures (albedo, normals, depth, motion) when a feature reads them");
+        mParameters.Add("targetSamples", &mSettings.targetSamples,
+                        "Samples per pixel at which the image is final and tracing stops", 1, 1u << 20);
+        mParameters.Group("Sampling");
         mParameters.Add("nee", &mSettings.nextEventEstimation,
                         "Next event estimation with MIS (off: BSDF sampling only, for comparison)");
         mParameters.Add("lightTreeBounces", &mSettings.lightTreeBounces,
                         "Path vertices whose NEE chooses lights with the light tree (power, distance, orientation); "
                         "deeper ones choose by power. 0: by power only",
                         0, 64);
-        mParameters.Add("cloudEvents", &mSettings.cloudEvents,
-                        "Scattering events a path may take in the clouds before its light is given up", 0, 1u << 16);
-        mParameters.Add("cloudMarch", &mSettings.cloudMarch.mode,
-                        "Real-time clouds: ray marched into maps the paths read instead of walking through them "
-                        "(0 off, 1 when not accumulating, 2 always)",
-                        0, 2);
-        mParameters.Add("cloudSteps", &mSettings.cloudMarch.steps,
-                        "Real-time clouds: samples a camera ray may take in them", 8, 512);
-        mParameters.Add("cloudLightSamples", &mSettings.cloudMarch.lightSamples,
-                        "Real-time clouds: samples towards the sun from each (steps doubling from 30 m)", 1, 10);
-        mParameters.Add("volumeEvents", &mSettings.volumeEvents,
-                        "Scattering events a path may take in the scene's volume (besides its bounces) before its "
-                        "light is given up",
-                        0, 1u << 16);
+        mParameters.Add(
+            "ser", &mSettings.shaderExecutionReordering,
+            "Shader execution reordering (DXR 1.2) where the GPU reorders; slower with today's cheap shading");
+        mParameters.Group("Denoiser inputs");
+        mParameters.Add("denoiseDirect", &mSettings.denoiseDirect,
+                        "Real time: the first surface's direct light goes to the denoiser with the indirect light "
+                        "(off: it passes the denoiser, TAA alone smooths its shadows)");
+        mParameters.Add("fireflyClamp", &mSettings.fireflyClamp,
+                        "Real time: a sample's indirect light is scaled down to this exposed luminance at most "
+                        "(fireflies a denoiser without history cannot spread, e.g. where a moving camera uncovers "
+                        "the scene); 0: no limit. Accumulating it is never limited",
+                        0.0f, 1e4f);
+        mParameters.Add("guides", &mSettings.guides,
+                        "Write denoiser guide textures (albedo, normals, depth, motion) when a feature reads them");
+        mParameters.Group("ReSTIR");
         mParameters.Add("restirDi", &mSettings.restir.di,
                         "ReSTIR DI: resample the direct light at the first surface across pixels and frames "
                         "(0 off, 1 when not accumulating, 2 always)",
@@ -71,6 +71,7 @@ public:
                         "ReSTIR temporal history cap, in frames' worth of candidates", 1, 254);
         mParameters.Add("restirUnbiased", &mSettings.restir.unbiased,
                         "ReSTIR MIS weights trace the visibility they need (off: fewer rays, darker penumbrae)");
+        mParameters.Group("Neural radiance cache");
         mParameters.Add("nrc", &mSettings.nrc.mode,
                         "Neural radiance cache: paths end where their footprint has spread and take the reflected "
                         "light from a network trained every frame; replaces ReSTIR GI (0 off, 1 when not "
@@ -91,6 +92,36 @@ public:
         mParameters.Add("nrcLinearAlgebra", &mSettings.nrc.linearAlgebra,
                         "Radiance cache on the GPU's matrix units (Shader Model 6.10 linear algebra) where available; "
                         "off: float32 kernels");
+        mParameters.Group("Materials");
+        mParameters.Add("subsurfaceModel", &mSettings.subsurfaceModel,
+                        "Subsurface scattering: where the light beneath leaves (0 the neural profile, 1 the "
+                        "random walk, the reference, 2 Burley's profile)",
+                        0, 2);
+        mParameters.Add("coatModel", &mSettings.coatModel,
+                        "Clear coats: 0 neural (an MLP trained for the scene's coated materials), 1 random walk "
+                        "(the reference, noisy), 2 analytic approximation",
+                        0, kCoatModelApproximate);
+        mParameters.Group("Clouds");
+        mParameters.Add("cloudEvents", &mSettings.cloudEvents,
+                        "Scattering events a path may take in the clouds before its light is given up", 0, 1u << 16);
+        mParameters.Add("cloudMarch", &mSettings.cloudMarch.mode,
+                        "Real-time clouds: ray marched into maps the paths read instead of walking through them "
+                        "(0 off, 1 when not accumulating, 2 always)",
+                        0, 2);
+        mParameters.Add("cloudSteps", &mSettings.cloudMarch.steps,
+                        "Real-time clouds: samples a camera ray may take in them", 8, 512);
+        mParameters.Add("cloudLightSamples", &mSettings.cloudMarch.lightSamples,
+                        "Real-time clouds: samples towards the sun from each (steps growing by 1.6 from 20 m)", 1, 12);
+        mParameters.Add("cloudTime", &mSettings.cloudMarch.time,
+                        "Clouds: seconds of wind so far (real-time frames advance it; accumulation holds it)", 0.0f,
+                        1e7f);
+        mParameters.Add("cloudWindStep", &mSettings.cloudMarch.windStep,
+                        "Clouds: seconds the wind blows each real-time frame (0: the clouds stand still)", 0.0f, 10.0f);
+        mParameters.Group("Volumes");
+        mParameters.Add("volumeEvents", &mSettings.volumeEvents,
+                        "Scattering events a path may take in the scene's volume (besides its bounces) before its "
+                        "light is given up",
+                        0, 1u << 16);
         VolumeMarchSettings& march = mSettings.volumeMarch;
         mParameters.Add("volumeMarch", &march.mode,
                         "Real-time volumes: ray march the volumes over the surfaces, lit through moment shadow maps, "
@@ -139,6 +170,7 @@ public:
                         "Real-time volumes: filter their light over frames when no denoiser of the whole frame does");
         mParameters.Add("volumeTemporalBlend", &march.temporalBlend,
                         "Real-time volumes: the weight of a frame in that filter", 0.01f, 1.0f);
+        mParameters.Group("Debug");
         mParameters.Add("furnace", &mSettings.furnace,
                         "White furnace: white materials, lights off; energy conservation shows as a flat grey image");
         mParameters.Add("debugView", &mSettings.debugView,
@@ -146,15 +178,11 @@ public:
                         "7 bounce heatmap, 8 direct light, 9 indirect light (GI; noisy: nrd.view=1 shows it denoised), "
                         "10 radiance cache at the first hit, 11 volume march steps, 12 its lighting rate, "
                         "13 volumes per ray, 14 neural coat (blue: the network shades the clear coat; green / "
-                        "red: it brightens / darkens the approximation)",
+                        "red: it brightens / darkens the approximation), 15 the light an external GI adds (the "
+                        "first surface's reflection of the sky and of other surfaces' light; probe_gi's reference), "
+                        "16 / 17 that light's diffuse irradiance / pi and specular light, as if the surfaces were "
+                        "white (probe_gi.view=2 / 3's references)",
                         0, gpu::kDebugViewCount - 1);
-        mParameters.Add(
-            "ser", &mSettings.shaderExecutionReordering,
-            "Shader execution reordering (DXR 1.2) where the GPU reorders; slower with today's cheap shading");
-        mParameters.Add("coatModel", &mSettings.coatModel,
-                        "Clear coats: 0 neural (an MLP trained for the scene's coated materials), 1 random walk "
-                        "(the reference, noisy), 2 analytic approximation",
-                        0, kCoatModelApproximate);
         mParameters.Add("debugScale", &mSettings.debugScale,
                         "Full scale of the depth (metres) and intersection heatmap views", 1e-3f, 1e6f);
     }
@@ -189,10 +217,14 @@ public:
         live.guides =
             mSettings.guides && (context.Consumes(slots::kDiffuseAlbedo) || context.Consumes(slots::kSpecularAlbedo) ||
                                  context.Consumes(slots::kNormalRoughness) || context.Consumes(slots::kViewDepth) ||
-                                 context.Consumes(slots::kMotionVectors));
+                                 context.Consumes(slots::kMotionVectors) || context.Consumes(slots::kEmission));
         live.signals = live.guides && context.Consumes(slots::kDiffuseSignal);
         live.transparencyGuides = live.guides && context.Consumes(slots::kColorBeforeTransparency);
+        live.emissionGuide = live.guides && context.Consumes(slots::kEmission);
+        live.externalGi = context.Consumes(slots::kExternalGi);
         mTracer->AddPasses(context.graph, context.scene, context.camera, context.blackboard, context.sceneColor);
+        // Real-time frames advance the clouds' clock.
+        mSettings.cloudMarch.time = live.cloudMarch.time;
     }
 
     renderer::FeatureStage GetStage() const override { return renderer::FeatureStage::Scene; }

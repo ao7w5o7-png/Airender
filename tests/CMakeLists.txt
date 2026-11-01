@@ -6,6 +6,7 @@ add_executable(air_tests
     TaskSystemTests.cpp
     GpuMemoryTests.cpp
     RenderGraphTests.cpp
+    UploadTests.cpp
     RendererTests.cpp
     GoldenTests.cpp
     DiagnosticsTests.cpp

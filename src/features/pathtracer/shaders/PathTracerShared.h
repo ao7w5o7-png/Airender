@@ -38,7 +38,17 @@ AIR_CONST uint kDebugVolumeSegments = 13; // heatmap: volumes the camera ray cro
 // approximation towards the mirror direction (green brighter, red darker; full at 2x / 0.5x); other
 // coat models purple, the rest grey.
 AIR_CONST uint kDebugNeuralCoat = 14;
-AIR_CONST uint kDebugViewCount = 15;
+// The light a GI feature that consumes slots::kExternalGi adds (kFlagExternalGi): the first surface's
+// reflection of the sky and of the light other surfaces reflect (not of their emission), as traced paths
+// find it. kDebugIndirect counts the sky the first surface reflects as direct light.
+AIR_CONST uint kDebugExternalGi = 15;
+// kDebugExternalGi by the first surface's lobes, without the air in front, as if they were white: the light
+// of its diffuse lobe divided by its diffuse albedo (the irradiance / pi; 0 without a diffuse lobe, e.g.
+// metals), and of its specular lobes divided by their albedo (the guides' split sum). probe_gi.view=2 / 3's
+// references.
+AIR_CONST uint kDebugGiIrradiance = 16;
+AIR_CONST uint kDebugGiSpecular = 17;
+AIR_CONST uint kDebugViewCount = 18;
 
 AIR_CONST uint kFlagFurnace = 1u;      // every material white, emitters off: an energy-conserving image is uniform
 AIR_CONST uint kFlagReset = 2u;        // discard the accumulated samples
@@ -69,11 +79,18 @@ AIR_CONST uint kFlagSignals = 8192u;
 // rays from FrameData::cloudLayer, other rays that leave the scene from CloudData::skyMap, the sun's
 // light through them from CloudData::shadowMap. No walks through them.
 AIR_CONST uint kFlagCloudMaps = 16384u;
+// With kFlagSignals: the first surface's direct light from emissive triangles goes to the signals too
+// (split by lobe), so that the denoiser filters it with the rest (PathTracerSettings::denoiseDirect).
+AIR_CONST uint kFlagDirectSignals = 32768u;
+// Another feature adds the first surface's indirect light (slots::kExternalGi): paths end at the hit of
+// the first surface's BSDF sample, keeping only what it reaches of the emitters and the sun's disc
+// (weighed against NEE as always), not the sky.
+AIR_CONST uint kFlagExternalGi = 65536u;
 AIR_CONST float kMissReflectionDistance = 1000.0f; // a reflected ray that leaves the scene, metres
 
 // The neural coat's parameters as float4s (NeuralCoat.hlsli kNeuralCoatParameters / 4), the size of its
 // constant buffer before padding to 256 bytes (FrameData::neuralCoat).
-AIR_CONST uint kNeuralCoatParameterVectors = 213u;
+AIR_CONST uint kNeuralCoatParameterVectors = 245u;
 
 // Result of TraceClosest() in the integrator (not stored in buffers).
 struct HitInfo
@@ -127,8 +144,10 @@ struct FrameData
     // (Texture2D<float>), CloudMarcher's reconstruction.
     uint cloudLayer;
     uint cloudDepth;
-    uint pad0;
-    uint pad1;
+    uint subsurfaceModel; // kSubsurface*: how light beneath subsurface materials finds where it leaves
+    // Real time: a sample's indirect light (paths of two bounces or more, ReSTIR GI's) is scaled down to this
+    // exposed luminance at most (fireflies a denoiser without history cannot spread); 0: no limit.
+    float fireflyClamp;
 };
 
 // Root constants of PathTracer.Trace: bindless indices only.
@@ -156,6 +175,9 @@ struct TraceConstants
     // through its diffuse base and its specular lobes, a = the reflected ray's length.
     uint diffuseSignal;
     uint specularSignal;
+    // RWTexture2D<float4>, with kFlagGuides when someone reads it (else kInvalidIndex): the first
+    // sample's emission at its first hit, exposed and through the air (slots::kEmission).
+    uint emission;
 };
 
 struct ResolveConstants
@@ -172,7 +194,7 @@ struct ResolveConstants
 
 #ifdef __cplusplus
 static_assert(sizeof(CameraData) == 64);
-static_assert(sizeof(FrameData) == 608);
+static_assert(sizeof(FrameData) == 672);
 static_assert(sizeof(TraceConstants) <= 128, "push constants are limited to 128 bytes");
 static_assert(sizeof(ResolveConstants) <= 128, "push constants are limited to 128 bytes");
 } // namespace air::pt::gpu

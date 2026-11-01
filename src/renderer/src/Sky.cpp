@@ -631,45 +631,48 @@ SkyTable BuildSkyTable(const Sky& sky, float3 uniform)
     table.aerialHeight = kAerialHeight;
     table.aerialInscatter.assign(size_t(kAerialWidth) * kAerialHeight * kAerialSlices * 4, 0);
     table.aerialTransmittance.assign(table.aerialInscatter.size(), 0);
-    ParallelFor(int(kAerialHeight),
-                [&](int y)
+    ParallelFor(
+        int(kAerialHeight),
+        [&](int y)
+        {
+            const double v = (y + 0.5) / kAerialHeight;
+            const double w = 2.0 * v - 1.0;
+            const double elevation = (w < 0.0 ? -1.0 : 1.0) * 0.5 * kPi * w * w;
+            std::array<std::array<double, kBins>, kAerialSlices> inscatter;
+            std::array<std::array<double, kBins>, kAerialSlices> transmittance;
+            for (u32 x = 0; x < kAerialWidth; ++x)
+            {
+                const double u = (x + 0.5) / kAerialWidth;
+                const double phi = kPi * u * u;
+                AerialSpectra(tables, std::cos(elevation) * std::sin(phi), std::sin(elevation),
+                              std::cos(elevation) * std::cos(phi), 0.0, sunY, sunZ, inscatter, transmittance);
+                for (u32 k = 0; k < kAerialSlices; ++k)
                 {
-                    const double v = (y + 0.5) / kAerialHeight;
-                    const double w = 2.0 * v - 1.0;
-                    const double elevation = (w < 0.0 ? -1.0 : 1.0) * 0.5 * kPi * w * w;
-                    std::array<std::array<double, kBins>, kAerialSlices> inscatter;
-                    std::array<std::array<double, kBins>, kAerialSlices> transmittance;
-                    for (u32 x = 0; x < kAerialWidth; ++x)
+                    Spectrum light{};
+                    Spectrum through{};
+                    for (int b = 0; b < kBins; ++b)
                     {
-                        const double u = (x + 0.5) / kAerialWidth;
-                        const double phi = kPi * u * u;
-                        AerialSpectra(tables, std::cos(elevation) * std::sin(phi), std::sin(elevation),
-                                      std::cos(elevation) * std::cos(phi), 0.0, sunY, sunZ, inscatter, transmittance);
-                        for (u32 k = 0; k < kAerialSlices; ++k)
-                        {
-                            Spectrum light{};
-                            Spectrum through{};
-                            for (int b = 0; b < kBins; ++b)
-                            {
-                                light[b] = float(inscatter[k][b] * atmosphere.solar[b]);
-                                through[b] = float(transmittance[k][b] * atmosphere.solar[b]);
-                            }
-                            const float3 rgb = ToRgb(atmosphere, light);
-                            const float3 t = ToRgb(atmosphere, through) / white;
-                            u16* in = &table.aerialInscatter[((size_t(k) * kAerialHeight + y) * kAerialWidth + x) * 4];
-                            u16* tr =
-                                &table.aerialTransmittance[((size_t(k) * kAerialHeight + y) * kAerialWidth + x) * 4];
-                            in[0] = FloatToHalf(rgb.x);
-                            in[1] = FloatToHalf(rgb.y);
-                            in[2] = FloatToHalf(rgb.z);
-                            in[3] = FloatToHalf(0.0f);
-                            tr[0] = FloatToHalf(std::clamp(t.x, 0.0f, 1.0f));
-                            tr[1] = FloatToHalf(std::clamp(t.y, 0.0f, 1.0f));
-                            tr[2] = FloatToHalf(std::clamp(t.z, 0.0f, 1.0f));
-                            tr[3] = FloatToHalf(1.0f);
-                        }
+                        light[b] = float(inscatter[k][b] * atmosphere.solar[b]);
+                        through[b] = float(transmittance[k][b] * atmosphere.solar[b]);
                     }
-                });
+                    const float3 rgb = ToRgb(atmosphere, light);
+                    const float3 t = ToRgb(atmosphere, through) / white;
+                    u16* in = &table.aerialInscatter[((size_t(k) * kAerialHeight + y) * kAerialWidth + x) * 4];
+                    u16* tr = &table.aerialTransmittance[((size_t(k) * kAerialHeight + y) * kAerialWidth + x) * 4];
+                    // Finite and within the half table's range (gpu::kAerialInscatterScale).
+                    const auto scaled = [](float v)
+                    { return std::isfinite(v) ? std::clamp(v / gpu::kAerialInscatterScale, 0.0f, 65504.0f) : 0.0f; };
+                    in[0] = FloatToHalf(scaled(rgb.x));
+                    in[1] = FloatToHalf(scaled(rgb.y));
+                    in[2] = FloatToHalf(scaled(rgb.z));
+                    in[3] = FloatToHalf(0.0f);
+                    tr[0] = FloatToHalf(std::clamp(t.x, 0.0f, 1.0f));
+                    tr[1] = FloatToHalf(std::clamp(t.y, 0.0f, 1.0f));
+                    tr[2] = FloatToHalf(std::clamp(t.z, 0.0f, 1.0f));
+                    tr[3] = FloatToHalf(1.0f);
+                }
+            }
+        });
     table.data.aerialDistance = float(kAerialDistance);
     table.data.aerialSlices = kAerialSlices;
 

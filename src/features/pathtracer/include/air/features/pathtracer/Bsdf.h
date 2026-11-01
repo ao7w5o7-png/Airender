@@ -34,6 +34,10 @@ struct Material
     float coatRoughness = 0.05f;
     Rgb coatColor = {1.0f, 1.0f, 1.0f}; // let through at normal incidence, one way
     u32 coatSeed = 0;                   // CoatModel::RandomWalk: the walks' random numbers
+    float flakes = 0.0f;                // metallic flakes under the coat (renderer::Material::flakes)
+    float flakeRoughness = 0.3f;
+    Rgb flakeColor = {0.9f, 0.9f, 0.9f};
+    bool subsurfaceExit = false; // where subsurface light leaves: the exit lobe alone (Bsdf.hlsli)
 };
 
 struct BsdfValue

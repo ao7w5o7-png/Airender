@@ -413,17 +413,26 @@ std::optional<GpuAllocation> GpuMemoryAllocator::Allocate(const Request& request
         ++pool.allocationCount;
     };
 
-    for (u32 i = 0; i < pool.blocks.size(); ++i)
+    // Resident heaps first; the spare empty heap is paged back in only when they are full.
+    for (const bool resident : {true, false})
     {
-        Block& block = pool.blocks[i];
-        if (!block.alive || !block.tlsf)
+        for (u32 i = 0; i < pool.blocks.size(); ++i)
         {
-            continue;
-        }
-        if (auto a = block.tlsf->Allocate(request.size, request.alignment))
-        {
-            fill(i, *a);
-            return result;
+            Block& block = pool.blocks[i];
+            if (!block.alive || !block.tlsf || block.resident != resident)
+            {
+                continue;
+            }
+            if (auto a = block.tlsf->Allocate(request.size, request.alignment))
+            {
+                if (!block.resident)
+                {
+                    mProvider.MakeResident(request.memoryTypeKey, block.heap);
+                    block.resident = true;
+                }
+                fill(i, *a);
+                return result;
+            }
         }
     }
 
@@ -486,7 +495,37 @@ void GpuMemoryAllocator::Free(const GpuAllocation& allocation)
                 return;
             }
         }
+        // ...out of video memory: the GPU is done with it (its last allocation was released after
+        // its frames), and paging it back in when needed costs less than creating a heap.
+        if (pool->location == MemoryLocation::DeviceLocal)
+        {
+            mProvider.Evict(allocation.memoryTypeKey, block.heap);
+            block.resident = false;
+        }
     }
+}
+
+void GpuMemoryAllocator::SetResident(const GpuAllocation& allocation, bool resident)
+{
+    AIR_CHECK(allocation.IsValid() && allocation.mDedicated, "SetResident: only dedicated allocations page alone");
+    Pool* pool = FindPool(allocation.memoryTypeKey);
+    AIR_CHECK(pool, "SetResident: unknown memory type {}", allocation.memoryTypeKey);
+    std::lock_guard lock(pool->mutex);
+    Block& block = pool->blocks[allocation.mHeapIndex];
+    AIR_CHECK(block.alive, "SetResident on a dead heap");
+    if (block.resident == resident)
+    {
+        return;
+    }
+    if (resident)
+    {
+        mProvider.MakeResident(allocation.memoryTypeKey, block.heap);
+    }
+    else
+    {
+        mProvider.Evict(allocation.memoryTypeKey, block.heap);
+    }
+    block.resident = resident;
 }
 
 GpuMemoryAllocator::Stats GpuMemoryAllocator::GetStats(MemoryLocation location) const
@@ -506,6 +545,11 @@ GpuMemoryAllocator::Stats GpuMemoryAllocator::GetStats(MemoryLocation location) 
             {
                 stats.reservedBytes += block.heap.size;
                 ++stats.heapCount;
+                if (!block.resident)
+                {
+                    stats.evictedBytes += block.heap.size;
+                    ++stats.evictedHeapCount;
+                }
             }
         }
         stats.usedBytes += pool->usedBytes;
@@ -537,8 +581,14 @@ std::vector<GpuMemoryAllocator::PoolStats> GpuMemoryAllocator::GetPoolStats() co
             heap.dedicated = !block.tlsf;
             heap.usedBytes = block.tlsf ? block.tlsf->GetUsedBytes() : block.heap.size;
             heap.allocationCount = block.tlsf ? block.tlsf->GetAllocationCount() : 1;
+            heap.resident = block.resident;
             out.stats.reservedBytes += heap.size;
             ++out.stats.heapCount;
+            if (!block.resident)
+            {
+                out.stats.evictedBytes += heap.size;
+                ++out.stats.evictedHeapCount;
+            }
             out.heaps.push_back(heap);
         }
         out.stats.usedBytes = pool->usedBytes;
@@ -562,6 +612,8 @@ GpuMemoryAllocator::Stats GpuMemoryAllocator::GetTotalStats() const
         total.heapCount += s.heapCount;
         total.allocationCount += s.allocationCount;
         total.dedicatedCount += s.dedicatedCount;
+        total.evictedHeapCount += s.evictedHeapCount;
+        total.evictedBytes += s.evictedBytes;
     }
     return total;
 }

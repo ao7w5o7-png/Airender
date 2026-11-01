@@ -105,6 +105,30 @@ HeapCategory TextureCategory(const TextureDesc& desc)
                : HeapCategory::Texture;
 }
 
+// D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT: a texture that is no render target or depth buffer, whose
+// most detailed mip covers at most 16 of the 4 KiB standard tiles (64 KiB), may be placed at 4 KiB.
+// Asking for it otherwise is a debug layer error, so this is checked before asking the driver.
+bool FitsSmallPlacement(const TextureDesc& desc)
+{
+    if (desc.dimension != TextureDimension::Tex2D || desc.depthOrArraySize != 1 || desc.sampleCount != 1 ||
+        Any(desc.usage & (TextureUsage::RenderTarget | TextureUsage::DepthStencil)))
+    {
+        return false;
+    }
+    u32 tileWidth = 0; // the 4 KiB standard tile, in texels
+    u32 tileHeight = 0;
+    switch (FormatBytesPerPixel(desc.format))
+    {
+    case 1: tileWidth = 64, tileHeight = 64; break;
+    case 2: tileWidth = 64, tileHeight = 32; break;
+    case 4: tileWidth = 32, tileHeight = 32; break;
+    case 8: tileWidth = 32, tileHeight = 16; break;
+    case 16: tileWidth = 16, tileHeight = 16; break;
+    default: return false;
+    }
+    return u64((desc.width + tileWidth - 1) / tileWidth) * ((desc.height + tileHeight - 1) / tileHeight) <= 16;
+}
+
 D3D12_RESOURCE_STATES InitialBufferState(MemoryLocation location, bool hostVisibleIsUpload)
 {
     switch (location)
@@ -256,6 +280,8 @@ public:
     }
 
     void DestroyHeap(u32, const GpuHeap& heap) override { static_cast<ID3D12Heap*>(heap.native)->Release(); }
+    void Evict(u32, const GpuHeap& heap) override { mDevice.PageOut(static_cast<ID3D12Heap*>(heap.native)); }
+    void MakeResident(u32, const GpuHeap& heap) override { mDevice.PageIn(static_cast<ID3D12Heap*>(heap.native)); }
 
 private:
     D3D12Device& mDevice;
@@ -282,6 +308,10 @@ D3D12Device::~D3D12Device()
         queue.contexts.clear();
     }
     mTimestampFrames.clear();
+    for (PackedPool& pool : mPackedPools)
+    {
+        pool.blocks.clear(); // the shared buffers go before their heaps
+    }
     mAllocator.reset(); // releases the remaining heaps
 }
 
@@ -292,6 +322,12 @@ bool D3D12Device::Initialize()
         return false;
     }
     QueryCapabilities();
+    // ID3D12Device3 pages in without blocking the CPU (EnqueueMakeResident); without it MakeResident blocks.
+    if (SUCCEEDED(mDevice.As(&mDevice3)))
+    {
+        AIR_D3D12_CHECK(mDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mResidencyFence)));
+        SetName(mResidencyFence.Get(), "Residency Fence");
+    }
     mHeapProvider = std::make_unique<HeapProvider>(*this);
     mAllocator = std::make_unique<GpuMemoryAllocator>(*mHeapProvider);
 
@@ -322,17 +358,45 @@ bool D3D12Device::Initialize()
         mTimestampFrames.push_back(std::move(frame));
     }
 
-    AIR_LOG(
-        Info, "D3D12",
-        "device '{}' ({} MiB VRAM, SM {}.{}, ray tracing tier {}.{}, SER {}, linear algebra {}, GPU upload heap {})",
-        mCaps.adapterName, mCaps.dedicatedVideoMemory >> 20, mCaps.shaderModel >> 4, mCaps.shaderModel & 0xF,
-        mCaps.rayTracingTier / 10, mCaps.rayTracingTier % 10, mCaps.shaderExecutionReordering ? "yes" : "no",
-        mCaps.linearAlgebra ? "yes" : "no", mGpuUploadHeap ? "yes" : "no");
+    AIR_LOG(Info, "D3D12",
+            "device '{}' ({} MiB VRAM, SM {}.{}, ray tracing tier {}.{}, SER {}, linear algebra {}, GPU upload heap "
+            "{}, tight "
+            "alignment {})",
+            mCaps.adapterName, mCaps.dedicatedVideoMemory >> 20, mCaps.shaderModel >> 4, mCaps.shaderModel & 0xF,
+            mCaps.rayTracingTier / 10, mCaps.rayTracingTier % 10, mCaps.shaderExecutionReordering ? "yes" : "no",
+            mCaps.linearAlgebra ? "yes" : "no", mGpuUploadHeap ? "yes" : "no",
+            mTightAlignment ? "yes" : "no (small buffers packed)");
     return true;
+}
+
+// PIX attaches only to a process that loaded its GPU capturer before creating a device: the newest
+// installed one (Program Files\Microsoft PIX\<version>), unless PIX launched the process and loaded it.
+static void LoadPixCapturer()
+{
+#if AIR_WITH_PIX
+    if (GetModuleHandleW(L"WinPixGpuCapturer.dll"))
+    {
+        AIR_LOG(Info, "D3D12", "PIX GPU capturer already loaded");
+    }
+    else if (PIXLoadLatestWinPixGpuCapturerLibrary())
+    {
+        AIR_LOG(Info, "D3D12", "PIX GPU capturer loaded: PIX can attach to process {}", GetCurrentProcessId());
+    }
+    else
+    {
+        AIR_LOG(Warning, "D3D12", "PIX GPU capturer not found (install PIX on Windows)");
+    }
+#else
+    AIR_LOG(Warning, "D3D12", "built without WinPixEventRuntime: no PIX GPU capturer");
+#endif
 }
 
 bool D3D12Device::CreateDeviceAndQueues()
 {
+    if (mDesc.loadPixCapturer)
+    {
+        LoadPixCapturer();
+    }
     if (mDesc.enableValidation)
     {
         ComPtr<ID3D12Debug1> debug;
@@ -517,6 +581,14 @@ bool D3D12Device::CreateRootSignature()
     AIR_D3D12_CHECK(mDevice->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                                  IID_PPV_ARGS(&mRootSignature)));
     SetName(mRootSignature.Get(), "Bindless Root Signature");
+    // Indirect dispatches change no root arguments: the signature needs no root signature.
+    D3D12_INDIRECT_ARGUMENT_DESC dispatch = {};
+    dispatch.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC signature = {};
+    signature.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+    signature.NumArgumentDescs = 1;
+    signature.pArgumentDescs = &dispatch;
+    AIR_D3D12_CHECK(mDevice->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&mDispatchSignature)));
     return true;
 }
 
@@ -614,6 +686,12 @@ void D3D12Device::QueryCapabilities()
         mGpuUploadHeap = options16.GPUUploadHeapSupported != FALSE;
     }
     mCaps.rebar = mGpuUploadHeap;
+    D3D12_FEATURE_DATA_TIGHT_ALIGNMENT tightAlignment = {};
+    if (SUCCEEDED(
+            mDevice->CheckFeatureSupport(D3D12_FEATURE_D3D12_TIGHT_ALIGNMENT, &tightAlignment, sizeof(tightAlignment))))
+    {
+        mTightAlignment = mDesc.tightAlignment && tightAlignment.SupportTier >= D3D12_TIGHT_ALIGNMENT_TIER_1;
+    }
     if (!mCaps.rayTracing)
     {
         AIR_LOG(Warning, "D3D12", "'{}' has no DXR 1.1 support; the path tracer will refuse to run", mCaps.adapterName);
@@ -649,6 +727,12 @@ D3D12_RESOURCE_DESC D3D12Device::MakeBufferResourceDesc(const BufferDesc& desc) 
     {
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     }
+    if (mTightAlignment)
+    {
+        // Alignment is the floor the buffer's views need; without it the driver may go down to 8 bytes.
+        rd.Flags |= D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT;
+        rd.Alignment = kTightBufferAlignment;
+    }
     return rd;
 }
 
@@ -680,19 +764,171 @@ D3D12_RESOURCE_DESC D3D12Device::MakeTextureResourceDesc(const TextureDesc& desc
             rd.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
         }
     }
+    if (mTightAlignment)
+    {
+        // Optional for textures: a driver that does not pack them reports the usual 64 KiB / 4 MiB.
+        rd.Flags |= D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT;
+    }
+    else if (FitsSmallPlacement(desc))
+    {
+        // The driver may still refuse 4 KiB (it reports a larger alignment): then the default one.
+        rd.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+        if (ResourceAllocationInfo(mDevice.Get(), rd).Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT)
+        {
+            rd.Alignment = 0;
+        }
+    }
     return rd;
 }
 
 AllocationInfo D3D12Device::GetBufferAllocationInfo(const BufferDesc& desc)
 {
-    return {AlignUp(MakeBufferResourceDesc(desc).Width, kPlacementAlignment), kPlacementAlignment};
+    const D3D12_RESOURCE_DESC rd = MakeBufferResourceDesc(desc);
+    if (!mTightAlignment)
+    {
+        return {AlignUp(rd.Width, kPlacementAlignment), kPlacementAlignment};
+    }
+    const D3D12_RESOURCE_ALLOCATION_INFO info = ResourceAllocationInfo(mDevice.Get(), rd);
+    return {AlignUp(info.SizeInBytes, kTightBufferAlignment), std::max<u64>(info.Alignment, kTightBufferAlignment)};
 }
 
 AllocationInfo D3D12Device::GetTextureAllocationInfo(const TextureDesc& desc)
 {
     const D3D12_RESOURCE_DESC rd = MakeTextureResourceDesc(desc);
     const D3D12_RESOURCE_ALLOCATION_INFO info = ResourceAllocationInfo(mDevice.Get(), rd);
-    return {info.SizeInBytes, std::max<u64>(info.Alignment, kPlacementAlignment)};
+    // 4 KiB for a small texture (FitsSmallPlacement), less with tight alignment.
+    return {AlignUp(info.SizeInBytes, kTightBufferAlignment), std::max<u64>(info.Alignment, kTightBufferAlignment)};
+}
+
+std::optional<D3D12Device::PackedPoolKind> D3D12Device::PackedKind(const BufferDesc& desc) const
+{
+    // A stride that does not divide kPackedAlignment moves the start off it (AllocatePacked), where a
+    // constant buffer view cannot be.
+    const bool offAlignment = desc.stride != 0 && kPackedAlignment % desc.stride != 0;
+    if (mTightAlignment ||
+        AlignUp(desc.size + (offAlignment ? desc.stride : 0), kPackedAlignment) >= kPlacementAlignment ||
+        (offAlignment && Any(desc.usage & BufferUsage::Constant)) ||
+        Any(desc.usage & (BufferUsage::UnorderedAccess | BufferUsage::AccelStructStorage)))
+    {
+        return std::nullopt;
+    }
+    switch (desc.memory)
+    {
+    case MemoryLocation::Upload: return kPackedUpload;
+    case MemoryLocation::Readback: return kPackedReadback;
+    case MemoryLocation::DeviceLocalHost: return kPackedDeviceLocalHost;
+    default: break;
+    }
+    return Any(desc.usage & BufferUsage::Immutable) ? std::optional(kPackedImmutable) : std::nullopt;
+}
+
+bool D3D12Device::ShouldPackAccelStruct(u64 size) const
+{
+    return !mTightAlignment && AlignUp(size, kPackedAlignment) < kPlacementAlignment;
+}
+
+std::optional<D3D12Device::PackedAllocation> D3D12Device::AllocatePacked(PackedPoolKind kind, u64 size, u32 stride,
+                                                                         std::string_view name)
+{
+    // The first element boundary in a range one element longer.
+    const u64 pad = stride != 0 && kPackedAlignment % stride != 0 ? stride : 0;
+    PackedPool& pool = mPackedPools[kind];
+    std::lock_guard lock(pool.mutex);
+    auto place = [&](u32 index) -> std::optional<PackedAllocation>
+    {
+        PackedBlock& block = pool.blocks[index];
+        const auto r = block.resource ? block.ranges->Allocate(size + pad, kPackedAlignment) : std::nullopt;
+        if (!r)
+        {
+            return std::nullopt;
+        }
+        const u64 offset = pad ? (r->offset + stride - 1) / stride * stride : r->offset;
+        PackedAllocation out;
+        out.range = {u32(kind), index, r->node, offset};
+        out.allocation = block.allocation;
+        out.allocation.offset += offset;
+        out.allocation.size = r->size - (offset - r->offset);
+        out.allocation.mapped = block.mapped ? block.mapped + offset : nullptr;
+        out.resource = block.resource;
+        out.mapped = out.allocation.mapped;
+        return out;
+    };
+    u32 live = 0;
+    for (u32 i = 0; i < pool.blocks.size(); ++i)
+    {
+        if (auto out = place(i))
+        {
+            return out;
+        }
+        live += pool.blocks[i].resource ? 1 : 0;
+    }
+
+    static constexpr MemoryLocation kLocations[kPackedPoolCount] = {
+        MemoryLocation::DeviceLocal, MemoryLocation::DeviceLocal, MemoryLocation::Upload, MemoryLocation::Readback,
+        MemoryLocation::DeviceLocalHost};
+    const MemoryLocation location = kLocations[kind];
+    const bool accelStruct = kind == kPackedAccelStruct;
+    const u64 blockSize = std::min(kPackedMaxBlockSize, kPackedFirstBlockSize << std::min(live, 8u));
+    auto heap =
+        mAllocator->Allocate({MemoryTypeKey(location, HeapCategory::Buffer), location, blockSize, kPlacementAlignment});
+    if (!heap)
+    {
+        AIR_LOG(Error, "D3D12", "out of {} memory for a block of small buffers ('{}')", ToString(location), name);
+        return std::nullopt;
+    }
+    const D3D12_RESOURCE_DESC rd = MakeBufferResourceDesc(
+        {.size = blockSize, .usage = accelStruct ? BufferUsage::AccelStructStorage : BufferUsage::None});
+    const D3D12_RESOURCE_STATES initial =
+        accelStruct ? D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE
+                    : InitialBufferState(location, HeapTypeFor(location) == D3D12_HEAP_TYPE_UPLOAD);
+    ComPtr<ID3D12Resource> shared;
+    const HRESULT hr = mDevice->CreatePlacedResource(static_cast<ID3D12Heap*>(heap->nativeHeap), heap->offset, &rd,
+                                                     initial, nullptr, IID_PPV_ARGS(&shared));
+    if (FAILED(hr))
+    {
+        AIR_LOG(Error, "D3D12", "block of small buffers ('{}'): CreatePlacedResource failed: {}", name,
+                HResultToString(hr));
+        mAllocator->Free(*heap);
+        return std::nullopt;
+    }
+    SetName(shared.Get(), accelStruct ? std::string("Packed acceleration structures")
+                                      : std::format("Packed buffers ({})", ToString(location)));
+    u8* mapped = nullptr;
+    if (location != MemoryLocation::DeviceLocal)
+    {
+        void* pointer = nullptr;
+        const D3D12_RANGE noRead = {0, 0};
+        AIR_D3D12_CHECK(shared->Map(0, location == MemoryLocation::Readback ? nullptr : &noRead, &pointer));
+        mapped = static_cast<u8*>(pointer);
+    }
+    u32 slot = 0;
+    while (slot < pool.blocks.size() && pool.blocks[slot].resource)
+    {
+        ++slot;
+    }
+    if (slot == pool.blocks.size())
+    {
+        pool.blocks.emplace_back();
+    }
+    pool.blocks[slot] = {std::move(shared), *heap, std::make_unique<TlsfAllocator>(blockSize), mapped};
+    return place(slot);
+}
+
+void D3D12Device::FreePacked(const PackedRange& range)
+{
+    PackedPool& pool = mPackedPools[range.pool];
+    std::lock_guard lock(pool.mutex);
+    PackedBlock& block = pool.blocks[range.block];
+    block.ranges->Free(range.node);
+    if (block.ranges->IsEmpty())
+    {
+        // Frees are deferred until the GPU is done with a range, so with the last one it is done
+        // with the whole block.
+        block.resource.Reset(); // unmaps a host visible one
+        block.ranges.reset();
+        block.mapped = nullptr;
+        mAllocator->Free(block.allocation);
+    }
 }
 
 BufferHandle D3D12Device::FinishBuffer(const BufferDesc& desc, const GpuAllocation& allocation, ID3D12Heap* heap,
@@ -737,6 +973,28 @@ BufferHandle D3D12Device::FinishBuffer(const BufferDesc& desc, const GpuAllocati
 BufferHandle D3D12Device::CreateBuffer(const BufferDesc& desc)
 {
     AIR_CHECK(desc.size > 0, "buffer '{}' has zero size", desc.debugName);
+    AIR_CHECK(!Any(desc.usage & BufferUsage::Immutable) ||
+                  !Any(desc.usage & (BufferUsage::UnorderedAccess | BufferUsage::AccelStructStorage)),
+              "buffer '{}': an Immutable buffer is not written on the GPU (UnorderedAccess / AccelStructStorage)",
+              desc.debugName);
+    if (const auto kind = PackedKind(desc))
+    {
+        auto packed = AllocatePacked(*kind, desc.size, desc.stride, desc.debugName);
+        if (!packed)
+        {
+            return {};
+        }
+        D3D12Buffer buffer;
+        buffer.desc = desc;
+        buffer.ownsAllocation = false;
+        buffer.hostVisible = desc.memory != MemoryLocation::DeviceLocal;
+        buffer.packed = packed->range;
+        buffer.allocation = packed->allocation;
+        buffer.resource = std::move(packed->resource);
+        buffer.mapped = packed->mapped;
+        buffer.address = buffer.resource->GetGPUVirtualAddress() + buffer.packed.offset;
+        return mBuffers.Allocate(std::move(buffer));
+    }
     const AllocationInfo info = GetBufferAllocationInfo(desc);
     auto allocation = mAllocator->Allocate(
         {MemoryTypeKey(desc.memory, HeapCategory::Buffer), desc.memory, info.size, info.alignment});
@@ -824,7 +1082,11 @@ void D3D12Device::DestroyBuffer(BufferHandle handle)
             ReleaseDescriptor(buffer->uav);
             ReleaseDescriptor(buffer->cbv);
             buffer->resource.Reset();
-            if (buffer->ownsAllocation)
+            if (buffer->packed.IsValid())
+            {
+                FreePacked(buffer->packed);
+            }
+            else if (buffer->ownsAllocation)
             {
                 mAllocator->Free(buffer->allocation);
             }
@@ -900,6 +1162,147 @@ void D3D12Device::DestroyHeap(HeapHandle handle)
             mAllocator->Free(heap->allocation);
             mHeaps.Free(handle);
         });
+}
+
+// ---------------------------------------------------------------------------
+// Residency
+// ---------------------------------------------------------------------------
+
+// The residency fields of a heap change under mResidencyMutex (and the handle pool's lock, so that
+// GetResourceList sees them); the allocator pages the native heap outside the pool's lock.
+void D3D12Device::Evict(std::span<const HeapHandle> heaps)
+{
+    for (HeapHandle handle : heaps)
+    {
+        u64 request = 0;
+        std::string name;
+        {
+            std::lock_guard lock(mResidencyMutex);
+            const bool live = mHeaps.Modify(handle,
+                                            [&](D3D12Heap& heap)
+                                            {
+                                                AIR_CHECK(!heap.destroyed, "Evict on destroyed heap '{}'", heap.name);
+                                                if (heap.resident)
+                                                {
+                                                    heap.resident = false;
+                                                    request = heap.evictRequest = ++mEvictRequests;
+                                                    name = heap.name;
+                                                }
+                                            });
+            AIR_CHECK(live, "Evict on stale heap handle");
+        }
+        if (request == 0)
+        {
+            continue;
+        }
+        if (CaptureEnabled())
+        {
+            std::lock_guard lock(mCaptureMutex);
+            mCaptured.push_back(std::format("[Residency] Evict heap '{}'", name));
+        }
+        // Frames in flight may still use the heap: it is paged out once the GPU has finished them,
+        // unless MakeResident() took it back meanwhile.
+        DeferDelete(
+            [this, handle, request]
+            {
+                std::lock_guard lock(mResidencyMutex);
+                std::optional<GpuAllocation> allocation;
+                mHeaps.Modify(handle,
+                              [&](D3D12Heap& heap)
+                              {
+                                  if (!heap.resident && heap.evictRequest == request)
+                                  {
+                                      allocation = heap.allocation;
+                                  }
+                              });
+                if (allocation)
+                {
+                    mAllocator->SetResident(*allocation, false);
+                }
+            });
+    }
+}
+
+void D3D12Device::MakeResident(std::span<const HeapHandle> heaps)
+{
+    std::lock_guard lock(mResidencyMutex);
+    for (HeapHandle handle : heaps)
+    {
+        std::optional<GpuAllocation> allocation;
+        std::string name;
+        const bool live =
+            mHeaps.Modify(handle,
+                          [&](D3D12Heap& heap)
+                          {
+                              AIR_CHECK(!heap.destroyed, "MakeResident on destroyed heap '{}'", heap.name);
+                              if (!heap.resident)
+                              {
+                                  heap.resident = true;
+                                  allocation = heap.allocation;
+                                  name = heap.name;
+                              }
+                          });
+        AIR_CHECK(live, "MakeResident on stale heap handle");
+        if (!allocation)
+        {
+            continue;
+        }
+        if (CaptureEnabled())
+        {
+            std::lock_guard captureLock(mCaptureMutex);
+            mCaptured.push_back(std::format("[Residency] MakeResident heap '{}'", name));
+        }
+        // A no-op while the page-out is still pending: the heap never left.
+        mAllocator->SetResident(*allocation, true);
+    }
+}
+
+bool D3D12Device::IsResident(HeapHandle handle)
+{
+    bool resident = false;
+    mHeaps.Modify(handle, [&](D3D12Heap& heap) { resident = heap.resident; });
+    return resident;
+}
+
+void D3D12Device::PageOut(ID3D12Pageable* object)
+{
+    const HRESULT hr = mDevice->Evict(1, &object);
+    if (FAILED(hr))
+    {
+        AIR_LOG(Warning, "D3D12", "Evict failed: {}", HResultToString(hr));
+    }
+}
+
+void D3D12Device::PageIn(ID3D12Pageable* object)
+{
+    if (!mDevice3)
+    {
+        const HRESULT hr = mDevice->MakeResident(1, &object); // blocks until resident
+        if (FAILED(hr))
+        {
+            LogDeviceRemoved(hr, "MakeResident");
+        }
+        return;
+    }
+    u64 value = 0;
+    {
+        std::lock_guard lock(mPageInMutex);
+        value = ++mPageInValue;
+        // Over budget the OS pages other memory out (ours too, lowest priority first) to make room.
+        const HRESULT hr =
+            mDevice3->EnqueueMakeResident(D3D12_RESIDENCY_FLAG_NONE, 1, &object, mResidencyFence.Get(), value);
+        if (FAILED(hr))
+        {
+            LogDeviceRemoved(hr, "EnqueueMakeResident");
+            return;
+        }
+    }
+    // Every queue's later work waits on the GPU for the page-in; the CPU goes on.
+    for (Queue& queue : mQueues)
+    {
+        std::lock_guard lock(queue.mutex);
+        queue.queue->Wait(mResidencyFence.Get(), value);
+    }
 }
 
 TextureHandle D3D12Device::CreatePlacedTexture(const TextureDesc& desc, HeapHandle heapHandle, u64 offset)
@@ -1062,12 +1465,14 @@ BindlessIndex D3D12Device::GetBindlessSRV(BufferHandle handle)
         if (b->desc.stride > 0)
         {
             srv.Format = DXGI_FORMAT_UNKNOWN;
+            srv.Buffer.FirstElement = b->packed.offset / b->desc.stride;
             srv.Buffer.NumElements = UINT(b->desc.size / b->desc.stride);
             srv.Buffer.StructureByteStride = b->desc.stride;
         }
         else
         {
             srv.Format = DXGI_FORMAT_R32_TYPELESS;
+            srv.Buffer.FirstElement = b->packed.offset / 4;
             srv.Buffer.NumElements = UINT(AlignUp(b->desc.size, 4) / 4);
             srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         }
@@ -1209,6 +1614,8 @@ void* D3D12Device::GetNativeResource(TextureHandle handle)
 void* D3D12Device::GetNativeResource(BufferHandle handle)
 {
     D3D12Buffer* b = mBuffers.Get(handle);
+    AIR_CHECK(!b || !b->packed.IsValid(), "GetNativeResource: '{}' is packed into a shared buffer at offset {}",
+              b->desc.debugName, b->packed.offset);
     return b ? b->resource.Get() : nullptr;
 }
 
@@ -1410,6 +1817,9 @@ void D3D12Device::EndFrame()
         std::lock_guard lock(mQueues[i].mutex);
         record.fences[i] = mQueues[i].lastSignaled;
     }
+    // The copy queue streams across frames (renderer::UploadQueue): frame pacing does not wait for it, and
+    // whoever submits copies keeps their resources alive until they are done.
+    record.fences[size_t(QueueType::Copy)] = 0;
     {
         std::lock_guard lock(mDeferredMutex);
         mPendingFrames.push_back(record);
@@ -1648,7 +2058,7 @@ std::vector<ResourceInfo> D3D12Device::GetResourceList()
                 return;
             }
             list.push_back({ResourceInfo::Kind::Buffer, b.desc.debugName, b.allocation.size, b.desc.memory,
-                            !b.ownsAllocation, heapId(b.allocation), b.allocation.offset});
+                            !b.ownsAllocation && !b.packed.IsValid(), heapId(b.allocation), b.allocation.offset});
         });
     mTextures.ForEach(
         [&](TextureHandle, const D3D12Texture& t)
@@ -1669,7 +2079,7 @@ std::vector<ResourceInfo> D3D12Device::GetResourceList()
                 return;
             }
             list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.allocation.location, false,
-                            heapId(h.allocation), h.allocation.offset});
+                            heapId(h.allocation), h.allocation.offset, h.resident});
         });
     mAccelStructs.ForEach(
         [&](AccelStructHandle, const D3D12AccelStruct& as)
@@ -1694,6 +2104,31 @@ std::vector<std::string> D3D12Device::TakeCapturedCommands()
 {
     std::lock_guard lock(mCaptureMutex);
     return std::exchange(mCaptured, {});
+}
+
+bool D3D12Device::CanCaptureGpuFrames() const
+{
+    return AIR_WITH_PIX && GetModuleHandleW(L"WinPixGpuCapturer.dll") != nullptr;
+}
+
+bool D3D12Device::CaptureGpuFrames(const std::filesystem::path& path, u32 frames)
+{
+#if AIR_WITH_PIX
+    if (!CanCaptureGpuFrames())
+    {
+        return false;
+    }
+    const HRESULT hr = PIXGpuCaptureNextFrames(path.c_str(), frames);
+    if (FAILED(hr))
+    {
+        AIR_LOG(Error, "D3D12", "PIXGpuCaptureNextFrames failed (0x{:08X})", u32(hr));
+    }
+    return SUCCEEDED(hr);
+#else
+    (void)path;
+    (void)frames;
+    return false;
+#endif
 }
 
 void D3D12Device::ReportValidation(std::string message)

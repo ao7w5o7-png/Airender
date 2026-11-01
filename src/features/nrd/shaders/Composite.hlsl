@@ -26,7 +26,7 @@ void Main(uint3 id : SV_DispatchThreadID)
     Texture2D<float> viewDepth = ResourceDescriptorHeap[g.viewDepth];
     if (!(viewDepth[id.xy] < g.denoisingRange))
     {
-        if (g.view == 1u)
+        if (g.view != 0u)
         {
             RWTexture2D<float4> sky = ResourceDescriptorHeap[g.color];
             sky[id.xy] = float4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -68,6 +68,14 @@ void Main(uint3 id : SV_DispatchThreadID)
     {
         // The global illumination alone (the signals carry the indirect light), denoised.
         color[id.xy] = float4(transmittance * (da * max(diffuse, 0.0f) + sa * max(specular, 0.0f)), c.a);
+        return;
+    }
+    if (g.view >= 2u)
+    {
+        // One signal alone, denoised, before its albedo (the producer's view of it: renderer::slots::kSignalView;
+        // the path tracer divides by the albedos itself and gives albedo guides of 1, so that NRD's floor on
+        // them takes nothing away).
+        color[id.xy] = float4(max(g.view == 2u ? diffuse : specular, 0.0f), c.a);
         return;
     }
     color[id.xy] = float4(max(c.rgb + transmittance * change, 0.0f), c.a);

@@ -92,25 +92,48 @@ AccelStructHandle D3D12Device::CreateBlas(const BlasDesc& desc)
     mDevice->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
     as.scratchSize = AlignUp(prebuild.ScratchDataSizeInBytes, 256);
 
-    const BufferDesc storage = {.size = AlignUp(prebuild.ResultDataMaxSizeInBytes, 256),
-                                .usage = BufferUsage::AccelStructStorage,
-                                .debugName = desc.debugName};
+    if (!CreateAccelStructStorage(as, prebuild.ResultDataMaxSizeInBytes, desc.debugName))
+    {
+        return {};
+    }
+    return mAccelStructs.Allocate(std::move(as));
+}
+
+bool D3D12Device::CreateAccelStructStorage(D3D12AccelStruct& as, u64 size, const std::string& name)
+{
+    const char* kind = as.isTlas ? "TLAS" : "BLAS";
+    size = AlignUp(size, 256);
+    if (ShouldPackAccelStruct(size))
+    {
+        auto packed = AllocatePacked(kPackedAccelStruct, size, 0, name);
+        if (!packed)
+        {
+            AIR_LOG(Error, "D3D12", "out of video memory for {} '{}'", kind, name);
+            return false;
+        }
+        as.packed = packed->range;
+        as.allocation = packed->allocation;
+        as.resource = std::move(packed->resource);
+        as.address = as.resource->GetGPUVirtualAddress() + as.packed.offset;
+        return true;
+    }
+    const BufferDesc storage = {.size = size, .usage = BufferUsage::AccelStructStorage, .debugName = name};
     const AllocationInfo info = GetBufferAllocationInfo(storage);
     auto allocation = mAllocator->Allocate({u32(MemoryLocation::DeviceLocal) * 4 + u32(HeapCategory::Buffer),
                                             MemoryLocation::DeviceLocal, info.size, info.alignment});
     if (!allocation)
     {
-        AIR_LOG(Error, "D3D12", "out of video memory for BLAS '{}'", desc.debugName);
-        return {};
+        AIR_LOG(Error, "D3D12", "out of video memory for {} '{}'", kind, name);
+        return false;
     }
     const D3D12_RESOURCE_DESC rd = MakeBufferResourceDesc(storage);
     AIR_D3D12_CHECK(mDevice->CreatePlacedResource(static_cast<ID3D12Heap*>(allocation->nativeHeap), allocation->offset,
                                                   &rd, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr,
                                                   IID_PPV_ARGS(&as.resource)));
-    as.resource->SetName(Widen(desc.debugName).c_str());
+    as.resource->SetName(Widen(name).c_str());
     as.allocation = *allocation;
     as.address = as.resource->GetGPUVirtualAddress();
-    return mAccelStructs.Allocate(std::move(as));
+    return true;
 }
 
 AccelStructHandle D3D12Device::CreateTlas(const TlasDesc& desc)
@@ -129,24 +152,10 @@ AccelStructHandle D3D12Device::CreateTlas(const TlasDesc& desc)
     mDevice->GetRaytracingAccelerationStructurePrebuildInfo(&inputs, &prebuild);
     as.scratchSize = AlignUp(prebuild.ScratchDataSizeInBytes, 256);
 
-    const BufferDesc storage = {.size = AlignUp(prebuild.ResultDataMaxSizeInBytes, 256),
-                                .usage = BufferUsage::AccelStructStorage,
-                                .debugName = desc.debugName};
-    const AllocationInfo info = GetBufferAllocationInfo(storage);
-    auto allocation = mAllocator->Allocate({u32(MemoryLocation::DeviceLocal) * 4 + u32(HeapCategory::Buffer),
-                                            MemoryLocation::DeviceLocal, info.size, info.alignment});
-    if (!allocation)
+    if (!CreateAccelStructStorage(as, prebuild.ResultDataMaxSizeInBytes, desc.debugName))
     {
-        AIR_LOG(Error, "D3D12", "out of video memory for TLAS '{}'", desc.debugName);
         return {};
     }
-    const D3D12_RESOURCE_DESC rd = MakeBufferResourceDesc(storage);
-    AIR_D3D12_CHECK(mDevice->CreatePlacedResource(static_cast<ID3D12Heap*>(allocation->nativeHeap), allocation->offset,
-                                                  &rd, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, nullptr,
-                                                  IID_PPV_ARGS(&as.resource)));
-    as.resource->SetName(Widen(desc.debugName).c_str());
-    as.allocation = *allocation;
-    as.address = as.resource->GetGPUVirtualAddress();
 
     // Enough slots that a build never reuses instance memory the GPU may still read.
     as.ringSlots = mDesc.framesInFlight + 2;
@@ -170,7 +179,14 @@ void D3D12Device::DestroyAccelStruct(AccelStructHandle handle)
             ReleaseDescriptor(as->srv);
             as->resource.Reset();
             as->instanceRing.Reset();
-            mAllocator->Free(as->allocation);
+            if (as->packed.IsValid())
+            {
+                FreePacked(as->packed);
+            }
+            else
+            {
+                mAllocator->Free(as->allocation);
+            }
             mAccelStructs.Free(handle);
         });
 }

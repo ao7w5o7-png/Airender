@@ -13,12 +13,14 @@
 
 #include "air/renderer/Clouds.h"
 #include "air/renderer/Sky.h"
+#include "air/renderer/UploadQueue.h"
 #include "air/renderer/Volume.h"
 #include "air/renderer/shader/SceneShared.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -70,6 +72,20 @@ struct Material
     bool coat = false;
     float coatRoughness = 0.05f;
     float3 coatColor = {1.0f, 1.0f, 1.0f};
+    // Under a coat, metallic flakes (car paint, docs/architecture.md §8.17): this share of what the light
+    // meets under the coat is a metal of flakeColor whose flakes' normals spread like a GGX surface of
+    // flakeRoughness; the rest is the material itself (its pigment).
+    float flakes = 0.0f;
+    float flakeRoughness = 0.3f;
+    float3 flakeColor = {0.9f, 0.9f, 0.9f};
+    // Subsurface scattering (docs/architecture.md §8.20): light that enters the surface spreads about
+    // this far beneath it before it leaves again, per channel, metres (skin: millimetres, its red
+    // furthest; marble and jade: centimetres); baseColor is the colour the material reflects in all, as
+    // without. 0: none, the light leaves where it entered. The anisotropy of the scattering inside is
+    // Henyey-Greenstein's g (0..0.9). Dielectric materials (metallic 0) on closed meshes whose triangles
+    // wind outwards.
+    float3 subsurfaceRadius = {0.0f, 0.0f, 0.0f};
+    float subsurfaceAnisotropy = 0.0f;
     // A cutout (leaves, chains, decals): where the colour texture's alpha is below this the surface is
     // a hole that rays pass through; 0: opaque. Its instances are non-opaque in the acceleration
     // structure, so it is fixed once the scene is uploaded (SetMaterial keeps it).
@@ -155,6 +171,7 @@ void SetTransform(Instance& instance, float3 translation, float yawRadians = 0.0
 //                  afternoon sun: normal maps, glazed and metallic texels (MaterialTextures)
 //   coated         the courtyard with clear coats: car paint, lacquered tiles, coated metal plates
 //                  (Material::coat)
+//   car_paint      metallic flake paints under clear coats on a body and five spheres (Material::flakes)
 SceneDesc MakeCornellBox();
 SceneDesc MakeFurnaceScene();
 // Procedural material textures, size x size texels, repeating (MaterialTextures.cpp): red bricks in
@@ -194,8 +211,9 @@ struct GpuScene
     // StructuredBuffer<gpu::TextureSetData> (bindless indices of RGBA8 SRGB / UNORM Texture2Ds, or of a
     // neural set's latents and data), one per SceneDesc::textureSets entry, at least one element.
     rhi::BufferHandle textureSetTable;
-    bool neuralTextures = false;  // some set is decoded on sample (TextureSetData::latents)
-    bool coatedMaterials = false; // some material wears a clear coat (Material::coat)
+    bool neuralTextures = false;      // some set is decoded on sample (TextureSetData::latents)
+    bool coatedMaterials = false;     // some material wears a clear coat (Material::coat)
+    bool subsurfaceMaterials = false; // some material scatters beneath its surface (Material::subsurfaceRadius)
     // The description the scene was made from, kept current by its edits: for features that need the
     // materials on the CPU (the path tracer trains the neural coat for the coated ones).
     const SceneDesc* desc = nullptr;
@@ -247,7 +265,9 @@ struct GpuScene
 class Scene
 {
 public:
-    // Uploads geometry, builds the acceleration structures and waits for the GPU.
+    // Streams geometry and textures to the GPU on the copy queue and builds the acceleration structures on
+    // the graphics queue, which waits for the copies on the GPU: the CPU does not wait, and graphics work
+    // submitted afterwards sees the whole scene. Update() streams what it rebuilds the same way.
     Scene(rhi::Device& device, SceneDesc desc);
     ~Scene();
     Scene(const Scene&) = delete;
@@ -277,6 +297,13 @@ private:
     void Upload();
     void UploadTextures();
     void WriteDynamicData();
+    // Device-local resources filled through mUploads, in SRVCompute for the graphics queue's work submitted
+    // after the next mUploads->MakeAvailable(). Invalid (and logged) when out of memory.
+    rhi::BufferHandle UploadBuffer(rhi::BufferDesc desc, const void* data, u64 size);
+    // One mip; mip 0 of a 2D texture or every slice of a 3D one, tightly packed.
+    rhi::TextureHandle UploadTexture(rhi::TextureDesc desc, const void* texels);
+    // Every layer's mips, layer by layer (subresources[layer * desc.mipLevels + mip]), tightly packed.
+    rhi::TextureHandle UploadTexture(rhi::TextureDesc desc, std::span<const std::span<const u8>> subresources);
 
     struct GpuMesh
     {
@@ -286,6 +313,7 @@ private:
     };
 
     rhi::Device& mDevice;
+    std::unique_ptr<UploadQueue> mUploads;
     SceneDesc mDesc;
     GpuScene mGpu;
     std::vector<GpuMesh> mMeshes;

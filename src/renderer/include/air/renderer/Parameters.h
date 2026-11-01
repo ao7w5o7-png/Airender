@@ -4,6 +4,8 @@
 // agents, future UI). A feature binds its own fields; callers set them by name from text:
 //   params.Add("maxBounces", &mMaxBounces, "Path length limit", 1, 64);
 //   runner.SetParameter("pathtracer.maxBounces", "4");
+// Group() names the group the parameters added after it belong to (what a UI folds together; reports list
+// it). The first parameters, before any Group(), are the feature's main ones.
 //
 // Threading: only modify between frames, on the thread that drives the frame loop.
 
@@ -24,6 +26,8 @@ public:
     void Add(std::string name, u32* value, std::string description, u32 min = 0, u32 max = ~0u);
     void Add(std::string name, float* value, std::string description, float min = -1e30f, float max = 1e30f);
     void Add(std::string name, bool* value, std::string description);
+    // The group of the parameters added from now on (empty: the main ones).
+    void Group(std::string name) { mGroup = std::move(name); }
 
     // Parses `text` and assigns it. Returns false and fills `error` on unknown name / bad value / out of range.
     bool Set(std::string_view name, std::string_view text, std::string* error = nullptr);
@@ -32,7 +36,7 @@ public:
     // Incremented on every successful Set(); features compare it to react to changes.
     u64 GetVersion() const { return mVersion; }
 
-    // {"name": {"value": ..., "type": "u32", "min": ..., "max": ..., "description": ...}}
+    // {"name": {"value": ..., "type": "u32", "min": ..., "max": ..., "description": ..., "group": ...}}
     json::Value ToJson() const;
 
     struct Entry
@@ -42,6 +46,7 @@ public:
         std::variant<u32*, float*, bool*> value;
         double min = 0;
         double max = 0;
+        std::string group; // empty: a main parameter
     };
     // For UIs that edit the bound fields directly: call Touch() after changing one.
     const std::vector<Entry>& Entries() const { return mEntries; }
@@ -51,6 +56,7 @@ private:
     const Entry* Find(std::string_view name) const;
 
     std::vector<Entry> mEntries;
+    std::string mGroup;
     u64 mVersion = 0;
 };
 

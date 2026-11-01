@@ -4,6 +4,7 @@
 #include "air/rdg/TransientResourcePool.h"
 
 #include <algorithm>
+#include <utility>
 
 using namespace air;
 using namespace air::rhi;
@@ -104,6 +105,48 @@ TEST(RenderGraph_GeneratesTransitionsAndUavBarriers)
     EXPECT(Contains(commands, "tex 'Temp' UAVCompute -> SRVCompute"));   // B->C
     EXPECT(Contains(commands, "tex 'Output' UAVCompute -> SRVCompute")); // final state
     EXPECT(!HasValidationErrors(commands));
+}
+
+// A pass writes the group counts of the next pass's dispatch: the graph moves them to IndirectArgs, where the
+// dispatch reads them; arguments from a buffer without BufferUsage::Indirect are a validation error.
+TEST(RenderGraph_DispatchIndirectReadsItsArguments)
+{
+    for (bool indirect : {true, false})
+    {
+        Fixture f;
+        RenderGraph graph(*f.device);
+        const BufferUsage usage = BufferUsage::UnorderedAccess | BufferUsage::ShaderResource |
+                                  (indirect ? BufferUsage::Indirect : BufferUsage{});
+        BufferRef args = graph.CreateBuffer({.size = 16, .usage = usage, .debugName = "Args"});
+        TextureRef out = graph.ImportTexture(f.output, Access::None, Access::SRVCompute);
+        graph.AddPass(
+            "Count", PassFlags::Compute, [&](PassBuilder& b) { b.Write(args, Access::UAVCompute); }, f.Dispatch());
+        PipelineHandle pso = f.pso;
+        graph.AddPass(
+            "Indirect", PassFlags::Compute,
+            [&](PassBuilder& b)
+            {
+                if (indirect)
+                {
+                    b.Read(args, Access::IndirectArgs);
+                }
+                else
+                {
+                    b.Read(args, Access::SRVCompute); // the graph rejects IndirectArgs without the usage
+                }
+                b.Write(out, Access::UAVCompute);
+            },
+            [=](PassContext& ctx)
+            {
+                ctx.cmd.SetPipeline(pso);
+                ctx.cmd.DispatchIndirect(ctx.Get(args), 0);
+            });
+        graph.Execute();
+        auto commands = f.device->TakeCapturedCommands();
+        EXPECT(Contains(commands, "buf 'Args' UAVCompute -> IndirectArgs") == indirect);
+        EXPECT(Contains(commands, "DispatchIndirect"));
+        EXPECT(HasValidationErrors(commands) == !indirect);
+    }
 }
 
 TEST(RenderGraph_AliasesNonOverlappingLifetimes)
@@ -497,6 +540,113 @@ TEST(RenderGraph_TransientPoolReusesMemoryAcrossFrames)
     EXPECT(!HasValidationErrors(lines));
     EXPECT(pool.GetStats().heaps == 1 && pool.GetStats().heapsCreated == 0 && pool.GetStats().resources == 1);
     EXPECT(f.device->GetMemoryStats().liveTextures == texturesBefore + 1); // only the pooled Temp
+}
+
+// A heap no frame used for Config::evictAfterFrames frames is evicted, and made resident again when a
+// frame takes it; the device pages it out only after the frames in flight.
+TEST(RenderGraph_TransientPoolEvictsIdleHeaps)
+{
+    Fixture f;
+    TransientResourcePool pool(*f.device, {.retireAfterFrames = 100, .evictAfterFrames = 3});
+    Access outState = Access::None;
+    auto frame = [&](bool transient)
+    {
+        {
+            RenderGraph graph(*f.device, nullptr, {}, &pool);
+            TextureRef out =
+                graph.ImportTexture(f.output, std::exchange(outState, Access::UAVCompute), Access::UAVCompute);
+            if (transient)
+            {
+                TextureRef temp = graph.CreateTexture(UavTexture("Temp"));
+                graph.AddPass(
+                    "Write", PassFlags::Compute, [&](PassBuilder& b) { b.Write(temp, Access::UAVCompute); },
+                    f.Dispatch());
+                graph.AddPass(
+                    "Read", PassFlags::Compute,
+                    [&](PassBuilder& b)
+                    {
+                        b.Read(temp, Access::SRVCompute);
+                        b.Write(out, Access::UAVCompute);
+                    },
+                    f.Dispatch());
+            }
+            else
+            {
+                graph.AddPass(
+                    "Clear", PassFlags::Compute, [&](PassBuilder& b) { b.Write(out, Access::UAVCompute); },
+                    f.Dispatch());
+            }
+            graph.Execute();
+        }
+        f.device->EndFrame();
+    };
+    frame(true);
+    const u64 heapBytes = pool.GetStats().heapBytes;
+    for (int i = 0; i < 2; ++i)
+    {
+        frame(false);
+    }
+    EXPECT(pool.GetStats().heapsEvicted == 0 && pool.GetStats().evictedBytes == 0);
+    frame(false); // the third frame without the heap
+    EXPECT(pool.GetStats().heapsEvicted == 1 && pool.GetStats().evictedBytes == heapBytes);
+    const auto isHeap = [](const ResourceInfo& r) { return r.kind == ResourceInfo::Kind::Heap; };
+    auto resources = f.device->GetResourceList();
+    const auto heap = std::find_if(resources.begin(), resources.end(), isHeap);
+    EXPECT(heap != resources.end() && !heap->resident);
+    // Paged out once the frames in flight are done.
+    EXPECT(f.device->GetMemoryStats().perLocation[size_t(MemoryLocation::DeviceLocal)].evictedBytes == 0);
+    for (u32 i = 0; i < f.device->GetFramesInFlight(); ++i)
+    {
+        frame(false);
+    }
+    EXPECT(f.device->GetMemoryStats().perLocation[size_t(MemoryLocation::DeviceLocal)].evictedBytes == heapBytes);
+
+    frame(true); // takes the evicted heap back
+    EXPECT(pool.GetStats().heapsMadeResident == 1 && pool.GetStats().heapsCreated == 0);
+    EXPECT(pool.GetStats().evictedBytes == 0 && pool.GetStats().resourcesReused == 1);
+    EXPECT(f.device->GetMemoryStats().perLocation[size_t(MemoryLocation::DeviceLocal)].evictedBytes == 0);
+    const auto lines = f.device->TakeCapturedCommands();
+    EXPECT(Contains(lines, "[Residency] Evict heap 'RDG Transient Pool'"));
+    EXPECT(Contains(lines, "[Residency] MakeResident heap 'RDG Transient Pool'"));
+    EXPECT(!HasValidationErrors(lines));
+}
+
+// The GPU must not touch resources in an evicted heap: the Null backend reports it. MakeResident
+// before the paging happened cancels the eviction.
+TEST(RenderGraph_EvictedHeapUseIsReported)
+{
+    Fixture f;
+    const TextureDesc desc = UavTexture("Placed");
+    const HeapHandle heap =
+        f.device->CreateHeap(f.device->GetTextureAllocationInfo(desc).size, MemoryLocation::DeviceLocal, "Heap");
+    const TextureHandle placed = f.device->CreatePlacedTexture(desc, heap, 0);
+    auto use = [&](Access before, Access after)
+    {
+        auto cmd = f.device->CreateCommandList(QueueType::Graphics);
+        cmd->Begin();
+        const Barrier barrier = Barrier::Tex(placed, before, after);
+        cmd->Barriers({&barrier, 1});
+        cmd->End();
+        CommandList* list = cmd.get();
+        f.device->Submit(QueueType::Graphics, {&list, 1});
+        return f.device->TakeCapturedCommands();
+    };
+    EXPECT(!HasValidationErrors(use(Access::None, Access::UAVCompute)));
+    f.device->Evict({&heap, 1});
+    EXPECT(!f.device->IsResident(heap));
+    EXPECT(
+        Contains(use(Access::UAVCompute, Access::SRVCompute), "VALIDATION: tex 'Placed' is used but its heap 'Heap'"));
+    f.device->MakeResident({&heap, 1});
+    EXPECT(f.device->IsResident(heap));
+    EXPECT(!HasValidationErrors(use(Access::SRVCompute, Access::UAVCompute)));
+    // The deferred page-out of the cancelled eviction does nothing.
+    for (u32 i = 0; i <= f.device->GetFramesInFlight(); ++i)
+    {
+        f.device->EndFrame();
+    }
+    EXPECT(f.device->GetMemoryStats().perLocation[size_t(MemoryLocation::DeviceLocal)].evictedBytes == 0);
+    f.device->DestroyTexture(placed);
+    f.device->DestroyHeap(heap);
 }
 
 // A pooled transient first used on the compute queue but last read by a pixel shader ends the frame

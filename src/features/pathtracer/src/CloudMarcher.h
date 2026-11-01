@@ -8,8 +8,8 @@
 //                       rendered when the clouds or the sun change
 //   Clouds.Sky          what they add to and leave of the sky towards each upward direction, seen from
 //                       the camera: the light of the rays that leave the scene after a bounce
-//   Clouds.March        the clouds over one pixel of every 2 x 2 block of the half-size layer (a
-//                       sixteenth of the render's pixels), a different one each frame
+//   Clouds.March        the clouds over one pixel of every 4 x 4 block of the layer (a sixteenth of
+//                       the render's pixels), a different one each frame
 //   Clouds.Reconstruct  the layer: the marched pixels blended into their history, the others reprojected
 //                       from it along the depth of the clouds' light
 // all before PathTracer.Trace, which lays the layer over its camera rays (AddCloudLayer in
@@ -62,12 +62,15 @@ private:
     rhi::TextureHandle mShadowMap; // R32F, kCloudShadowMapSize^2
     rhi::Access mShadowAccess = rhi::Access::None;
     u64 mShadowVersion = ~0ull; // the scene version it shows
+    // Where the wind had moved the detail over the base density when it was rendered (metres).
+    std::array<float, 3> mShadowDrift{};
+    float mShadowFlowPhase = 0.0f; // and where the flow was
     bool mRenderShadow = false;
     u32 mShadowRenders = 0;
     rhi::TextureHandle mSkyMap; // RGBA32F, kCloudSkyMapSize^2
     rhi::Access mSkyAccess = rhi::Access::None;
 
-    // The layer and its depth (half the render size): [mCurrent] is written this frame, the other holds
+    // The layer and its depth (the render's size): [mCurrent] is written this frame, the other holds
     // last frame's when mHistory.
     std::array<rhi::TextureHandle, 2> mLayers;
     std::array<rhi::TextureHandle, 2> mDepths;
@@ -77,6 +80,9 @@ private:
     u32 mCurrent = 0;
     bool mHistory = false;
     bool mUseHistory = false;
+    // The base density's offset last frame, and how far the wind carried it since.
+    std::array<float, 2> mBaseOffset{};
+    std::array<float, 2> mWindStep{};
 
     // This frame's, for DeclareReads.
     rdg::TextureRef mShadowRef;

@@ -1,12 +1,13 @@
 #include "air/renderer/Scene.h"
 
 #include "air/core/Assert.h"
+#include "air/core/Log.h"
 #include "air/core/Profiler.h"
 #include "air/renderer/NeuralTextures.h"
-#include "air/renderer/Transfer.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <format>
 #include <numbers>
@@ -250,14 +251,23 @@ std::vector<gpu::LightGroup> BuildLightGroups(const std::vector<gpu::LightTriang
     return groups;
 }
 
-Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::move(desc))
+Scene::Scene(rhi::Device& device, SceneDesc desc)
+    : mDevice(device), mUploads(std::make_unique<UploadQueue>(device)), mDesc(std::move(desc))
 {
     const std::string problem = Validate(mDesc);
     AIR_CHECK(problem.empty(), "scene '{}': {}", mDesc.name, problem);
     SceneBounds(mDesc, mGpu.boundsMin, mGpu.boundsMax);
     mGpu.desc = &mDesc;
-    Upload();
+    const auto uploadStart = std::chrono::steady_clock::now();
     UploadTextures();
+    Upload(); // hands the textures over too, before building the acceleration structures
+    const UploadQueue::Stats uploads = mUploads->GetStats();
+    AIR_LOG(Info, "Scene",
+            "'{}': {:.1f} MiB of geometry and textures staged in {:.0f} ms ({} copy queue batches, {:.0f} ms "
+            "waiting for staging memory)",
+            mDesc.name, double(mGeometryBytes) / double(1 << 20),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uploadStart).count(),
+            uploads.batches, uploads.waitMs);
     const u32 slots = mDevice.GetFramesInFlight() + 1;
     for (u32 i = 0; i < slots; ++i)
     {
@@ -289,6 +299,7 @@ Scene::Scene(rhi::Device& device, SceneDesc desc) : mDevice(device), mDesc(std::
 
 Scene::~Scene()
 {
+    mUploads.reset(); // waits for the copies into the resources released below
     for (GpuMesh& mesh : mMeshes)
     {
         mDevice.DestroyBuffer(mesh.vertices);
@@ -339,6 +350,60 @@ Scene::~Scene()
     mDevice.DestroyAccelStruct(mGpu.tlas);
 }
 
+rhi::BufferHandle Scene::UploadBuffer(rhi::BufferDesc desc, const void* data, u64 size)
+{
+    desc.memory = MemoryLocation::DeviceLocal;
+    // Written once on the copy queue, then only read: small ones may share a buffer (Immutable).
+    desc.usage |= BufferUsage::CopyDst | BufferUsage::Immutable;
+    desc.size = std::max(desc.size, size);
+    const rhi::BufferHandle buffer = mDevice.CreateBuffer(desc);
+    if (!buffer.IsValid())
+    {
+        AIR_LOG(Error, "Scene", "out of memory creating '{}'", desc.debugName);
+        return buffer;
+    }
+    mUploads->WriteBuffer(buffer, 0, {static_cast<const u8*>(data), size});
+    return buffer;
+}
+
+rhi::TextureHandle Scene::UploadTexture(rhi::TextureDesc desc, const void* texels)
+{
+    desc.usage |= rhi::TextureUsage::CopyDst | rhi::TextureUsage::ShaderResource;
+    desc.mipLevels = 1;
+    const rhi::TextureHandle texture = mDevice.CreateTexture(desc);
+    if (!texture.IsValid())
+    {
+        AIR_LOG(Error, "Scene", "out of memory creating '{}'", desc.debugName);
+        return texture;
+    }
+    const u64 slices = desc.dimension == rhi::TextureDimension::Tex3D ? desc.depthOrArraySize : 1u;
+    const u64 bytes = u64(desc.width) * desc.height * slices * rhi::FormatBytesPerPixel(desc.format);
+    mUploads->WriteTexture(texture, 0, 0, {static_cast<const u8*>(texels), bytes});
+    return texture;
+}
+
+rhi::TextureHandle Scene::UploadTexture(rhi::TextureDesc desc, std::span<const std::span<const u8>> subresources)
+{
+    desc.usage |= rhi::TextureUsage::CopyDst | rhi::TextureUsage::ShaderResource;
+    const u32 layers = desc.dimension == rhi::TextureDimension::Tex2D ? desc.depthOrArraySize : 1u;
+    AIR_CHECK(subresources.size() == size_t(layers) * desc.mipLevels, "'{}': {} subresources for {} x {}",
+              desc.debugName, subresources.size(), layers, desc.mipLevels);
+    const rhi::TextureHandle texture = mDevice.CreateTexture(desc);
+    if (!texture.IsValid())
+    {
+        AIR_LOG(Error, "Scene", "out of memory creating '{}'", desc.debugName);
+        return texture;
+    }
+    for (u32 layer = 0; layer < layers; ++layer)
+    {
+        for (u32 mip = 0; mip < desc.mipLevels; ++mip)
+        {
+            mUploads->WriteTexture(texture, mip, layer, subresources[size_t(layer) * desc.mipLevels + mip]);
+        }
+    }
+    return texture;
+}
+
 void Scene::UploadTextures()
 {
     std::vector<gpu::TextureSetData> table;
@@ -346,14 +411,12 @@ void Scene::UploadTextures()
     {
         auto make = [&](const std::vector<u32>& texels, u32 width, u32 height, rhi::Format format, const char* kind)
         {
-            const rhi::TextureHandle texture =
-                CreateTextureWithData(mDevice,
-                                      {.format = format,
-                                       .width = width,
-                                       .height = height,
-                                       .usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDst,
-                                       .debugName = std::format("{}.{}", t.name, kind)},
-                                      texels.data());
+            const rhi::TextureHandle texture = UploadTexture({.format = format,
+                                                              .width = width,
+                                                              .height = height,
+                                                              .usage = rhi::TextureUsage::ShaderResource,
+                                                              .debugName = std::format("{}.{}", t.name, kind)},
+                                                             texels.data());
             AIR_CHECK(texture.IsValid(), "out of device memory uploading the textures '{}'", t.name);
             mTextures.push_back(texture);
             mGeometryBytes += texels.size() * sizeof(u32);
@@ -364,22 +427,19 @@ void Scene::UploadTextures()
         {
             const NeuralTextureGpuData& n = *t.neural;
             std::vector<std::span<const u8>> subresources(n.latents.begin(), n.latents.end());
-            const rhi::TextureHandle latents =
-                CreateTextureWithSubresources(mDevice,
-                                              {.format = rhi::Format::RGBA8_UNORM,
-                                               .width = n.latentWidth,
-                                               .height = n.latentHeight,
-                                               .depthOrArraySize = n.latentLayers,
-                                               .mipLevels = n.latentMips,
-                                               .usage = rhi::TextureUsage::ShaderResource,
-                                               .debugName = t.name + ".Latents"},
-                                              subresources);
+            const rhi::TextureHandle latents = UploadTexture({.format = rhi::Format::RGBA8_UNORM,
+                                                              .width = n.latentWidth,
+                                                              .height = n.latentHeight,
+                                                              .depthOrArraySize = n.latentLayers,
+                                                              .mipLevels = n.latentMips,
+                                                              .usage = rhi::TextureUsage::ShaderResource,
+                                                              .debugName = t.name + ".Latents"},
+                                                             subresources);
             AIR_CHECK(latents.IsValid(), "out of device memory uploading the latents of '{}'", t.name);
             mTextures.push_back(latents);
-            mNeuralData.push_back(CreateBufferWithData(mDevice,
-                                                       {.usage = BufferUsage::ShaderResource, // stride 0: a raw view
-                                                        .debugName = t.name + ".Neural"},
-                                                       n.data.data(), n.data.size()));
+            mNeuralData.push_back(UploadBuffer({.usage = BufferUsage::ShaderResource, // stride 0: a raw view
+                                                .debugName = t.name + ".Neural"},
+                                               n.data.data(), n.data.size()));
             for (const std::vector<u8>& latent : n.latents)
             {
                 mGeometryBytes += latent.size();
@@ -404,11 +464,10 @@ void Scene::UploadTextures()
     {
         table.push_back({gpu::kInvalidIndex, gpu::kInvalidIndex, gpu::kInvalidIndex, gpu::kInvalidIndex});
     }
-    mGpu.textureSetTable = CreateBufferWithData(mDevice,
-                                                {.stride = sizeof(gpu::TextureSetData),
-                                                 .usage = BufferUsage::ShaderResource,
-                                                 .debugName = mDesc.name + ".TextureSets"},
-                                                table.data(), table.size() * sizeof(gpu::TextureSetData));
+    mGpu.textureSetTable = UploadBuffer({.stride = sizeof(gpu::TextureSetData),
+                                         .usage = BufferUsage::ShaderResource,
+                                         .debugName = mDesc.name + ".TextureSets"},
+                                        table.data(), table.size() * sizeof(gpu::TextureSetData));
 }
 
 void Scene::Upload()
@@ -416,34 +475,11 @@ void Scene::Upload()
     AIR_PROFILE_SCOPE("Scene.Upload");
     const BufferUsage geometryUsage =
         BufferUsage::ShaderResource | BufferUsage::AccelStructBuildInput | BufferUsage::CopyDst;
-    // One staging buffer for all geometry and instance data.
-    u64 stagingSize = mDesc.instances.size() * sizeof(gpu::InstanceData);
-    for (const Mesh& mesh : mDesc.meshes)
-    {
-        stagingSize += mesh.vertices.size() * sizeof(gpu::Vertex) + mesh.indices.size() * sizeof(u32);
-    }
-    const rhi::BufferHandle staging = mDevice.CreateBuffer({.size = stagingSize,
-                                                            .usage = BufferUsage::CopySrc,
-                                                            .memory = MemoryLocation::Upload,
-                                                            .debugName = mDesc.name + ".Staging"});
-    auto* stagingBytes = static_cast<u8*>(mDevice.GetMappedPointer(staging));
-    AIR_CHECK(stagingBytes, "staging buffer is not host visible");
-    u64 stagingOffset = 0;
-
-    auto cmd = mDevice.CreateCommandList(rhi::QueueType::Graphics);
-    cmd->Begin();
-    cmd->BeginEvent("Scene.Upload");
-    std::vector<Barrier> toShaderRead;
     auto uploadBuffer = [&](const void* data, u64 size, u32 stride, BufferUsage usage, std::string name)
     {
         const rhi::BufferHandle buffer =
-            mDevice.CreateBuffer({.size = size, .stride = stride, .usage = usage, .debugName = std::move(name)});
+            UploadBuffer({.stride = stride, .usage = usage, .debugName = std::move(name)}, data, size);
         AIR_CHECK(buffer.IsValid(), "out of device memory uploading scene '{}'", mDesc.name);
-        std::memcpy(stagingBytes + stagingOffset, data, size);
-        cmd->Barriers(std::array{Barrier::Buf(buffer, Access::None, Access::CopyDst)});
-        cmd->CopyBuffer(buffer, 0, staging, stagingOffset, size);
-        toShaderRead.push_back(Barrier::Buf(buffer, Access::CopyDst, Access::SRVCompute));
-        stagingOffset += size;
         mGeometryBytes += size;
         return buffer;
     };
@@ -488,7 +524,8 @@ void Scene::Upload()
     }
     mInstances = uploadBuffer(instances.data(), instances.size() * sizeof(gpu::InstanceData), sizeof(gpu::InstanceData),
                               BufferUsage::ShaderResource | BufferUsage::CopyDst, mDesc.name + ".Instances");
-    cmd->Barriers(toShaderRead);
+    // The graphics queue waits for the copies on the GPU, then takes everything into SRVCompute.
+    mUploads->MakeAvailable(rhi::QueueType::Graphics, Access::SRVCompute);
 
     mGpu.tlas = mDevice.CreateTlas(
         {.maxInstances = u32(tlasInstances.size()), .allowUpdate = false, .debugName = mDesc.name + ".TLAS"});
@@ -497,6 +534,9 @@ void Scene::Upload()
     const rhi::BufferHandle scratch = mDevice.CreateBuffer({.size = std::max<u64>(scratchSize, 256),
                                                             .usage = BufferUsage::UnorderedAccess,
                                                             .debugName = mDesc.name + ".BuildScratch"});
+    auto cmd = mDevice.CreateCommandList(rhi::QueueType::Graphics);
+    cmd->Begin();
+    cmd->BeginEvent("Scene.BuildAccelStructs");
     cmd->Barriers(std::array{Barrier::Buf(scratch, Access::None, Access::UAVCompute)});
     // Builds that share the scratch buffer are serialized by the UAV barrier each build ends with.
     for (const GpuMesh& mesh : mMeshes)
@@ -506,12 +546,9 @@ void Scene::Upload()
     cmd->BuildTlas(mGpu.tlas, tlasInstances, scratch);
     cmd->EndEvent();
     cmd->End();
-
     rhi::CommandList* lists[] = {cmd.get()};
-    const u64 fence = mDevice.Submit(rhi::QueueType::Graphics, lists);
-    mDevice.WaitForFence(rhi::QueueType::Graphics, fence);
-    mDevice.DestroyBuffer(staging);
-    mDevice.DestroyBuffer(scratch);
+    mDevice.Submit(rhi::QueueType::Graphics, lists);
+    mDevice.DestroyBuffer(scratch); // deferred until the GPU is done with the builds
     mGpu.instances = mInstances;
 }
 
@@ -588,8 +625,12 @@ void Scene::Update()
     }
     mRingSlot = (mRingSlot + 1) % u32(mMaterialRing.size());
     WriteDynamicData();
+    // What it rebuilt (sky, clouds, volumes) streams on the copy queue; the next frame waits for it on the GPU.
+    mUploads->MakeAvailable(rhi::QueueType::Graphics, Access::SRVCompute);
     mGpu.coatedMaterials =
         std::any_of(mDesc.materials.begin(), mDesc.materials.end(), [](const Material& m) { return m.coat; });
+    mGpu.subsurfaceMaterials = std::any_of(mDesc.materials.begin(), mDesc.materials.end(), [](const Material& m)
+                                           { return m.ToGpu().subsurfaceRadius != float3(0.0f); });
     ++mGpu.version;
     mDirty = false;
 }
@@ -664,14 +705,13 @@ void Scene::WriteDynamicData()
         {
             auto upload = [&](const std::vector<u16>& texels, const char* what)
             {
-                return CreateTextureWithData(mDevice,
-                                             {.dimension = rhi::TextureDimension::Tex3D,
-                                              .format = rhi::Format::RGBA16_FLOAT,
-                                              .width = mSkyTable.aerialWidth,
-                                              .height = mSkyTable.aerialHeight,
-                                              .depthOrArraySize = mSkyTable.data.aerialSlices,
-                                              .debugName = std::format("{}.{}", mDesc.name, what)},
-                                             texels.data());
+                return UploadTexture({.dimension = rhi::TextureDimension::Tex3D,
+                                      .format = rhi::Format::RGBA16_FLOAT,
+                                      .width = mSkyTable.aerialWidth,
+                                      .height = mSkyTable.aerialHeight,
+                                      .depthOrArraySize = mSkyTable.data.aerialSlices,
+                                      .debugName = std::format("{}.{}", mDesc.name, what)},
+                                     texels.data());
             };
             mGpu.aerialInscatter = upload(mSkyTable.aerialInscatter, "AerialInscatter");
             mGpu.aerialTransmittance = upload(mSkyTable.aerialTransmittance, "AerialTransmittance");
@@ -695,28 +735,24 @@ void Scene::WriteDynamicData()
         if (volume.data.enabled != 0)
         {
             const gpu::CloudData& c = volume.data;
-            mGpu.cloudBase = CreateTextureWithData(mDevice,
-                                                   {.dimension = rhi::TextureDimension::Tex3D,
-                                                    .format = rhi::Format::R8_UNORM,
-                                                    .width = c.gridX,
-                                                    .height = c.gridZ,
-                                                    .depthOrArraySize = c.gridY + 2,
-                                                    .debugName = std::format("{}.CloudBase", mDesc.name)},
-                                                   volume.base.data());
-            mGpu.cloudDetail = CreateTextureWithData(mDevice,
-                                                     {.dimension = rhi::TextureDimension::Tex3D,
-                                                      .format = rhi::Format::R8_UNORM,
-                                                      .width = volume.detailSize,
-                                                      .height = volume.detailSize,
-                                                      .depthOrArraySize = volume.detailSize,
-                                                      .debugName = std::format("{}.CloudDetail", mDesc.name)},
-                                                     volume.detail.data());
-            mGpu.cloudMajorants =
-                CreateBufferWithData(mDevice,
-                                     {.stride = sizeof(float),
-                                      .usage = BufferUsage::ShaderResource,
-                                      .debugName = std::format("{}.CloudMajorants", mDesc.name)},
-                                     volume.majorants.data(), volume.majorants.size() * sizeof(float));
+            mGpu.cloudBase = UploadTexture({.dimension = rhi::TextureDimension::Tex3D,
+                                            .format = rhi::Format::R8_UNORM,
+                                            .width = c.gridX,
+                                            .height = c.gridZ,
+                                            .depthOrArraySize = c.gridY + 2,
+                                            .debugName = std::format("{}.CloudBase", mDesc.name)},
+                                           volume.base.data());
+            mGpu.cloudDetail = UploadTexture({.dimension = rhi::TextureDimension::Tex3D,
+                                              .format = rhi::Format::R8_UNORM,
+                                              .width = volume.detailSize,
+                                              .height = volume.detailSize,
+                                              .depthOrArraySize = volume.detailSize,
+                                              .debugName = std::format("{}.CloudDetail", mDesc.name)},
+                                             volume.detail.data());
+            mGpu.cloudMajorants = UploadBuffer({.stride = sizeof(float),
+                                                .usage = BufferUsage::ShaderResource,
+                                                .debugName = std::format("{}.CloudMajorants", mDesc.name)},
+                                               volume.majorants.data(), volume.majorants.size() * sizeof(float));
         }
         mCloudsFor = mDesc.clouds;
         mCloudsBuilt = true;
@@ -814,19 +850,17 @@ void Scene::UpdateVolumes()
         }
         const VolumeResources built = BuildVolume(desc, *grid);
         const gpu::VolumeData& v = built.data;
-        out.density = CreateTextureWithData(mDevice,
-                                            {.dimension = rhi::TextureDimension::Tex3D,
-                                             .format = rhi::Format::R16_FLOAT,
-                                             .width = v.sizeX + 2,
-                                             .height = v.sizeY + 2,
-                                             .depthOrArraySize = v.sizeZ + 2,
-                                             .debugName = std::format("{}.Volume{}.Density", mDesc.name, i)},
-                                            built.density.data());
-        out.majorants = CreateBufferWithData(mDevice,
-                                             {.stride = sizeof(float),
-                                              .usage = BufferUsage::ShaderResource,
-                                              .debugName = std::format("{}.Volume{}.Majorants", mDesc.name, i)},
-                                             built.majorants.data(), built.majorants.size() * sizeof(float));
+        out.density = UploadTexture({.dimension = rhi::TextureDimension::Tex3D,
+                                     .format = rhi::Format::R16_FLOAT,
+                                     .width = v.sizeX + 2,
+                                     .height = v.sizeY + 2,
+                                     .depthOrArraySize = v.sizeZ + 2,
+                                     .debugName = std::format("{}.Volume{}.Density", mDesc.name, i)},
+                                    built.density.data());
+        out.majorants = UploadBuffer({.stride = sizeof(float),
+                                      .usage = BufferUsage::ShaderResource,
+                                      .debugName = std::format("{}.Volume{}.Majorants", mDesc.name, i)},
+                                     built.majorants.data(), built.majorants.size() * sizeof(float));
         out.data = v;
         out.data.density = mDevice.GetBindlessSRV(out.density);
         out.data.majorants = mDevice.GetBindlessSRV(out.majorants);
@@ -834,8 +868,8 @@ void Scene::UpdateVolumes()
         auto upload = [&](const std::vector<u32>& words, std::string name)
         {
             const u32 none = 0;
-            const rhi::BufferHandle buffer = CreateBufferWithData(
-                mDevice, {.stride = sizeof(u32), .usage = BufferUsage::ShaderResource, .debugName = std::move(name)},
+            const rhi::BufferHandle buffer = UploadBuffer(
+                {.stride = sizeof(u32), .usage = BufferUsage::ShaderResource, .debugName = std::move(name)},
                 words.empty() ? &none : words.data(), std::max<size_t>(words.size(), 1) * sizeof(u32));
             out.brickBuffers.push_back(buffer);
             return mDevice.GetBindlessSRV(buffer);
@@ -852,14 +886,13 @@ void Scene::UpdateVolumes()
             l.ranges = upload(source.ranges, name + ".Ranges");
         }
         const VolumeBricks& bricks = built.bricks;
-        out.ao = CreateTextureWithData(mDevice,
-                                       {.dimension = rhi::TextureDimension::Tex3D,
-                                        .format = rhi::Format::R8_UNORM,
-                                        .width = bricks.data.aoX,
-                                        .height = bricks.data.aoY,
-                                        .depthOrArraySize = bricks.data.aoZ,
-                                        .debugName = std::format("{}.Volume{}.Occlusion", mDesc.name, i)},
-                                       bricks.ao.data());
+        out.ao = UploadTexture({.dimension = rhi::TextureDimension::Tex3D,
+                                .format = rhi::Format::R8_UNORM,
+                                .width = bricks.data.aoX,
+                                .height = bricks.data.aoY,
+                                .depthOrArraySize = bricks.data.aoZ,
+                                .debugName = std::format("{}.Volume{}.Occlusion", mDesc.name, i)},
+                               bricks.ao.data());
         out.march = bricks.data;
         out.march.ao = mDevice.GetBindlessSRV(out.ao);
         if (findGrid(desc) == grid || keptBytes() + grid->density.size() * sizeof(float) <= (size_t(512) << 20))
@@ -899,11 +932,10 @@ void Scene::UpdateVolumes()
     {
         auto table = [&](const void* data, size_t count, u32 stride, const char* what)
         {
-            return CreateBufferWithData(mDevice,
-                                        {.stride = stride,
-                                         .usage = BufferUsage::ShaderResource,
-                                         .debugName = std::format("{}.{}", mDesc.name, what)},
-                                        data, count * stride);
+            return UploadBuffer({.stride = stride,
+                                 .usage = BufferUsage::ShaderResource,
+                                 .debugName = std::format("{}.{}", mDesc.name, what)},
+                                data, count * stride);
         };
         mGpu.volumeTable = table(mGpu.volumes.data(), mGpu.volumes.size(), sizeof(gpu::VolumeData), "Volumes");
         mGpu.volumeMarchTable =

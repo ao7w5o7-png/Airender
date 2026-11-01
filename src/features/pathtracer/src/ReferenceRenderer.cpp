@@ -30,6 +30,7 @@ struct Kernel : SceneHooks
 #define AIR_PT_VOLUME 1 // the reference renders everything
 #define AIR_PT_PROBE 1  // and the probes of the real-time volumes (kFlagProbe)
 #define AIR_BSDF_COATS 1
+#define AIR_PT_SUBSURFACE 1
 #include "Integrator.hlsli"
 #include "VolumeProbes.hlsli"
     // NOLINTEND(readability-identifier-naming)

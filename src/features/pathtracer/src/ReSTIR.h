@@ -53,7 +53,7 @@ public:
     // they are valid (slots::kDiffuseSignal, kSpecularSignal).
     void AddPasses(rdg::RenderGraph& graph, const ReSTIRSettings& settings, const gpu::ReSTIRConstants& scene,
                    rdg::TextureRef accumulation, rdg::TextureRef diffuseSignal, rdg::TextureRef specularSignal,
-                   bool shadeDirect, bool shadeIndirect, bool coatModels);
+                   bool shadeDirect, bool shadeIndirect, bool coatModels, bool directToSignals);
 
     // A frame without ReSTIR: the next one starts without history.
     void Invalidate();

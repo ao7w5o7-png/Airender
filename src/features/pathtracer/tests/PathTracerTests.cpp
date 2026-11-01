@@ -128,15 +128,32 @@ TEST(PathTracer_WritesGuidesForDenoisers)
 TEST(PathTracer_DebugViewsAndFurnaceRun)
 {
     Headless h({"pathtracer", "tonemap"});
-    for (int view = 0; view < 15; ++view)
+    for (int view = 0; view < 18; ++view)
     {
         EXPECT(h.runner->SetParameter("pathtracer.debugView", std::to_string(view)));
         EXPECT(h.Frame().validationErrors.empty());
     }
-    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "15"));
+    EXPECT(!h.runner->SetParameter("pathtracer.debugView", "18"));
     EXPECT(h.runner->SetParameter("pathtracer.furnace", "true"));
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "false"));
     EXPECT(h.Frame().validationErrors.empty());
+}
+
+// The GI's irradiance and specular views are the paths' own estimate: in real time too, without ReSTIR or
+// the radiance cache, which do not split their light by the first surface's lobes.
+TEST(PathTracer_GiLobeViewsTraceThePathsAlone)
+{
+    Headless h({"pathtracer", "tonemap"});
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "false"));
+    EXPECT(h.Frame().graphText.find("ReSTIR") != std::string::npos);
+    for (const char* view : {"16", "17"})
+    {
+        EXPECT(h.runner->SetParameter("pathtracer.debugView", view));
+        const auto result = h.Frame();
+        EXPECT(result.graphText.find("ReSTIR") == std::string::npos);
+        EXPECT(result.graphText.find("Nrc") == std::string::npos);
+        EXPECT(result.validationErrors.empty());
+    }
 }
 
 // ReSTIR DI adds its three passes after the trace; from the second frame on the temporal pass reads
@@ -384,28 +401,35 @@ TEST(PathTracer_RealTimeVolumesGuideDenoisers)
 }
 
 // Under a denoiser of the surfaces alone (NRD) the path tracer writes their indirect light split by lobe
-// (the trace, then ReSTIR GI adds its own; the direct light, ReSTIR DI's too, passes the denoiser), the
-// guides keep describing the surfaces, and the volumes' layer is filtered over frames by
-// VolumeMarch.Temporal, which also writes what it lets through of the surfaces' light.
+// (the trace, then ReSTIR GI adds its own) and, with denoiseDirect, the area lights' diffuse direct light
+// (ReSTIR DI's shading too; without, the direct light passes the denoiser), the guides keep describing
+// the surfaces, and the volumes' layer is filtered over frames by VolumeMarch.Temporal, which also
+// writes what it lets through of the surfaces' light.
 TEST(PathTracer_SignalsForDenoisersOfSurfaces)
 {
     Headless h({"pathtracer", "tonemap"});
     EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
     EXPECT(h.runner->AddFeature("denoiser", std::make_unique<GuideReader>(GuideReader::Kind::Surfaces)));
-    const auto plain = h.Frame();
-    EXPECT(plain.validationErrors.empty());
-    for (const char* pass : {"PathTracer.Trace (RayTracing)", "PathTracer.ReSTIRDI.Spatial (Compute)",
-                             "PathTracer.ReSTIRGI.Spatial (Compute)"})
+    for (const char* direct : {"false", "true"})
     {
-        const bool writes = std::string(pass).find("ReSTIRDI") == std::string::npos;
-        const size_t at = plain.graphText.find(pass);
-        EXPECT(at != std::string::npos);
-        const size_t next = plain.graphText.find("\n  [", at);
-        for (const char* signal :
-             {"write PathTracer.DiffuseSignal as UAVCompute", "write PathTracer.SpecularSignal as UAVCompute"})
+        EXPECT(h.runner->SetParameter("pathtracer.denoiseDirect", direct));
+        const auto plain = h.Frame();
+        EXPECT(plain.validationErrors.empty());
+        for (const char* pass : {"PathTracer.Trace (RayTracing)", "PathTracer.ReSTIRDI.Spatial (Compute)",
+                                 "PathTracer.ReSTIRGI.Spatial (Compute)"})
         {
-            const size_t write = plain.graphText.find(signal, at);
-            EXPECT((write != std::string::npos && write < next) == writes);
+            const bool restirDi = std::string(pass).find("ReSTIRDI") != std::string::npos;
+            const size_t at = plain.graphText.find(pass);
+            EXPECT(at != std::string::npos);
+            const size_t next = plain.graphText.find("\n  [", at);
+            for (const char* signal :
+                 {"write PathTracer.DiffuseSignal as UAVCompute", "write PathTracer.SpecularSignal as UAVCompute"})
+            {
+                // ReSTIR DI writes both signals' textures (the specular one untouched) when it adds to them.
+                const bool writes = !restirDi || std::string(direct) == "true";
+                const size_t write = plain.graphText.find(signal, at);
+                EXPECT((write != std::string::npos && write < next) == writes);
+            }
         }
     }
     h.scene->SetVolumes({{.enabled = true, .position = {0.0f, 0.0f, 0.0f}, .size = 1.2f}});
@@ -461,4 +485,14 @@ TEST(PathTracer_RealTimeCloudsMarchIntoMaps)
     const auto accumulated = h.Frame();
     EXPECT(accumulated.validationErrors.empty());
     EXPECT(accumulated.graphText.find("Clouds.") == std::string::npos);
+    // The wind moving the detail over the base (67 m in a 10 s step) renders the shadow map again;
+    // stilled, it stays.
+    EXPECT(h.runner->SetParameter("pathtracer.accumulate", "0"));
+    EXPECT(h.runner->SetParameter("pathtracer.cloudWindStep", "10"));
+    for (int frame = 0; frame < 2; ++frame)
+    {
+        EXPECT(h.Frame().graphText.find("Clouds.Shadow (Compute)") != std::string::npos);
+    }
+    EXPECT(h.runner->SetParameter("pathtracer.cloudWindStep", "0"));
+    EXPECT(h.Frame().graphText.find("Clouds.Shadow (Compute)") == std::string::npos);
 }

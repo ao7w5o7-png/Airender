@@ -84,6 +84,10 @@ enum class BufferUsage : u32
     AccelStructStorage = 1 << 8,    // backing memory of a BLAS/TLAS
     AccelStructBuildInput = 1 << 9, // vertex/index/instance data read by a build
     ShaderTable = 1 << 10,
+    // Written only on the copy queue (renderer::UploadQueue), then only read: never a UAV or a copy
+    // destination on another queue. Lets a backend pack a small buffer into a buffer it shares with
+    // others, where a resource of its own would take a whole 64 KiB placement.
+    Immutable = 1 << 11,
 };
 AIR_ENUM_FLAGS(BufferUsage)
 

@@ -51,6 +51,11 @@ gpu::MaterialData Material::ToGpu() const
     out.coat = coat ? 1u : 0u;
     out.coatRoughness = coatRoughness;
     out.coatColor = coatColor;
+    out.flakes = coat ? flakes : 0.0f;
+    out.flakeRoughness = flakeRoughness;
+    out.flakeColor = flakeColor;
+    out.subsurfaceRadius = coat || metallic > 0.0f ? float3(0.0f) : subsurfaceRadius;
+    out.subsurfaceAnisotropy = subsurfaceAnisotropy;
     out.alphaCutoff = textures == kNoTextures ? 0.0f : alphaCutoff;
     return out;
 }
@@ -336,6 +341,8 @@ constexpr BuiltinScene kBuiltinScenes[] = {
     {"braziers", detail::MakeBraziers},
     {"textured", detail::MakeTextured},
     {"coated", detail::MakeCoated},
+    {"car_paint", detail::MakeCarPaint},
+    {"subsurface", detail::MakeSubsurface},
 };
 
 } // namespace
@@ -427,6 +434,21 @@ std::string Validate(const SceneDesc& desc)
         {
             return std::format("material '{}': coat roughness and colour must be in [0, 1]", m.name);
         }
+        if (!(m.flakes >= 0.0f && m.flakes <= 1.0f) || !(m.flakeRoughness >= 0.0f && m.flakeRoughness <= 1.0f) ||
+            !(std::min({m.flakeColor.x, m.flakeColor.y, m.flakeColor.z}) >= 0.0f &&
+              std::max({m.flakeColor.x, m.flakeColor.y, m.flakeColor.z}) <= 1.0f))
+        {
+            return std::format("material '{}': flakes, their roughness and colour must be in [0, 1]", m.name);
+        }
+        if (!(std::min({m.subsurfaceRadius.x, m.subsurfaceRadius.y, m.subsurfaceRadius.z}) >= 0.0f) ||
+            !(m.subsurfaceAnisotropy >= 0.0f && m.subsurfaceAnisotropy <= 0.9f) ||
+            (std::max({m.subsurfaceRadius.x, m.subsurfaceRadius.y, m.subsurfaceRadius.z}) > 0.0f &&
+             (m.metallic > 0.0f || m.coat)))
+        {
+            return std::format("material '{}': subsurface radius must be >= 0 and its anisotropy in [0, 0.9], on "
+                               "a dielectric without a coat",
+                               m.name);
+        }
         if (m.textures != kNoTextures && m.textures >= desc.textureSets.size())
         {
             return std::format("material '{}' references missing textures {}", m.name, m.textures);
@@ -488,6 +510,11 @@ std::string Validate(const SceneDesc& desc)
         {
             return "clouds: need top >= bottom + 100 m * scale, coverage and albedo in [0, 1], extinction, "
                    "droplet size and scale > 0";
+        }
+        if (!(clouds.cirrus >= 0.0f && clouds.cirrus <= 1.0f) || !(clouds.cirrusDepth >= 0.0f) ||
+            (clouds.cirrus > 0.0f && !(clouds.cirrusAltitude > clouds.top)))
+        {
+            return "clouds: need cirrus coverage in [0, 1], its optical depth >= 0 and its altitude above the tops";
         }
         // Only camera rays look for clouds in front of a surface (Integrator.hlsli).
         const float highest = HighestPoint(desc);

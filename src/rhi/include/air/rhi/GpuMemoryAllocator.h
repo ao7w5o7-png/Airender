@@ -98,6 +98,10 @@ public:
     virtual ~IGpuHeapProvider() = default;
     virtual std::optional<GpuHeap> CreateHeap(u32 memoryTypeKey, MemoryLocation location, u64 size) = 0;
     virtual void DestroyHeap(u32 memoryTypeKey, const GpuHeap& heap) = 0;
+    // Residency (ID3D12Device::Evict / EnqueueMakeResident). Evict() is called only once the GPU is
+    // done with the heap; MakeResident() must order later GPU work after the page-in.
+    virtual void Evict(u32 /*memoryTypeKey*/, const GpuHeap& /*heap*/) {}
+    virtual void MakeResident(u32 /*memoryTypeKey*/, const GpuHeap& /*heap*/) {}
 };
 
 struct GpuAllocation
@@ -145,6 +149,8 @@ public:
         u32 heapCount = 0;
         u32 allocationCount = 0;
         u32 dedicatedCount = 0;
+        u32 evictedHeapCount = 0; // heaps paged out of video memory (included in the counts above)
+        u64 evictedBytes = 0;
     };
 
     GpuMemoryAllocator(IGpuHeapProvider& provider, Config config);
@@ -153,6 +159,10 @@ public:
 
     std::optional<GpuAllocation> Allocate(const Request& request);
     void Free(const GpuAllocation& allocation);
+    // Pages a dedicated allocation's heap out of video memory or back in, through the provider (only
+    // once the GPU is done with it, for an eviction). The spare empty heap a DeviceLocal pool keeps
+    // is paged out by the allocator itself, and back in when an allocation lands in it.
+    void SetResident(const GpuAllocation& allocation, bool resident);
 
     // Per heap block usage, for memory visualisation (fragmentation, dedicated heaps).
     struct HeapUsage
@@ -162,6 +172,7 @@ public:
         u64 usedBytes = 0;
         u32 allocationCount = 0;
         bool dedicated = false;
+        bool resident = true;
     };
     struct PoolStats
     {
@@ -181,6 +192,7 @@ private:
         GpuHeap heap;
         std::unique_ptr<TlsfAllocator> tlsf; // null for dedicated heaps
         bool alive = false;
+        bool resident = true;
     };
     struct Pool
     {

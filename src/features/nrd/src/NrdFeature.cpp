@@ -143,11 +143,17 @@ public:
     {
         mParameters.Add("enabled", &mEnabled, "Denoise the path tracer's frame (in real time: accumulate=false)");
         mParameters.Add("denoiser", &mDenoiser, "0 RELAX, 1 REBLUR (diffuse and specular)", 0, 1);
+        mParameters.Add("view", &mView, "0 the frame, 1 the global illumination alone (the indirect light, denoised)",
+                        0, 1);
+        mParameters.Group("Filter");
         mParameters.Add("historyFrames", &mHistoryFrames, "Frames NRD accumulates at most (30: half a second)", 1, 63);
         mParameters.Add("antiFirefly", &mAntiFirefly,
                         "NRD's firefly suppression (clamps bright samples: 4% of the sphere field's light)");
-        mParameters.Add("view", &mView, "0 the frame, 1 the global illumination alone (the indirect light, denoised)",
-                        0, 1);
+        mParameters.Add("fastHistorySigma", &mFastHistorySigma,
+                        "RELAX: deviations of the fast history its slow history is clamped to (1 to 3)", 1.0f, 3.0f);
+        mParameters.Add("phiLuminance", &mPhiLuminance, "RELAX: the diffuse a-trous luminance edge stopping", 0.0f,
+                        10.0f);
+        mParameters.Add("prepassBlur", &mPrepassBlur, "RELAX: the diffuse pre-pass blur radius, pixels", 0.0f, 60.0f);
     }
 
     ~NrdFeature() override
@@ -345,6 +351,9 @@ public:
         relax.diffuseMaxFastAccumulatedFrameNum = std::max(mHistoryFrames / 5, 1u);
         relax.specularMaxFastAccumulatedFrameNum = std::max(mHistoryFrames / 5, 1u);
         relax.enableAntiFirefly = mAntiFirefly;
+        relax.fastHistoryClampingSigmaScale = mFastHistorySigma;
+        relax.diffusePhiLuminance = mPhiLuminance;
+        relax.diffusePrepassBlurRadius = mPrepassBlur;
         nrd::ReblurSettings reblur;
         reblur.maxAccumulatedFrameNum = mHistoryFrames;
         reblur.maxFastAccumulatedFrameNum = std::max(mHistoryFrames / 5, 1u);
@@ -374,7 +383,9 @@ public:
             c.height = mHeight;
             c.denoiser = mInstanceKind;
             c.denoisingRange = kDenoisingRange;
-            c.view = mView;
+            // The producer's view of one signal (the path tracer's GI lobe views) wins over this feature's own.
+            const double signalView = context.blackboard.GetValue(slots::kSignalView);
+            c.view = signalView == 1.0 ? 2u : signalView == 2.0 ? 3u : mView;
             c.surfaceTransmittance = air::gpu::kInvalidIndex;
             const rhi::PipelineHandle pipeline = mComposite.Get(*mDevice);
             const rdg::TextureRef reads[] = {
@@ -763,6 +774,9 @@ private:
     u32 mDenoiser = gpu::kNrdRelax;
     u32 mHistoryFrames = 30;
     bool mAntiFirefly = false;
+    float mFastHistorySigma = 2.0f; // RELAX's defaults
+    float mPhiLuminance = 2.0f;
+    float mPrepassBlur = 30.0f;
     u32 mView = 0;
 
     rhi::Device* mDevice = nullptr;

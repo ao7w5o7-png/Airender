@@ -86,9 +86,22 @@ inline constexpr std::string_view kSpecularSignal = "signal.specular";
 // R16F: how much of the surface's light reaches the camera through media in front of it (real-time
 // volumes); absent means 1. sceneColor = what lies in front + this * (emission + diffuse + specular).
 inline constexpr std::string_view kSurfaceTransmittance = "signal.surfaceTransmittance";
+// RGBA16F, exposed and dimmed by the air like sceneColor: the light the first surface emits towards the
+// camera (0 where the camera ray meets nothing).
+inline constexpr std::string_view kEmission = "guide.emission";
+// Consumed by a feature that adds the first surface's indirect light itself (probe_gi, docs/architecture.md
+// §8.21): the light of the sky and the light other surfaces reflect, but not what they emit. The producer
+// of sceneColor then leaves it out and sets this value to 1: sceneColor holds the emission and the direct
+// light of the emitters and the sun (next event estimation, and what the BSDF's sample reaches of them).
+inline constexpr std::string_view kExternalGi = "gi.external";
 // Values.
 inline constexpr std::string_view kJitterX = "camera.jitterX"; // sub-pixel offset of the frame's samples, pixels
 inline constexpr std::string_view kJitterY = "camera.jitterY";
+// Radiance (nits) times this is sceneColor (renderer::ExposureScale, or the furnace's own).
+inline constexpr std::string_view kExposure = "camera.exposure";
+// 1 in the white furnace: white materials, no emitters and no sun under a uniform sky (the scene's uniform
+// environment, white for a physical sky), exposed to 0.18.
+inline constexpr std::string_view kFurnace = "frame.furnace";
 // 1 when temporal history is meaningless (first frame, scene or render settings changed); camera
 // motion alone does not reset it.
 inline constexpr std::string_view kHistoryReset = "history.reset";
@@ -97,6 +110,10 @@ inline constexpr std::string_view kHistoryReset = "history.reset";
 inline constexpr std::string_view kRealTime = "frame.realTime";
 // 1 when the output is already display-referred (debug views): no tone curve.
 inline constexpr std::string_view kOutputIsDisplay = "output.isDisplay";
+// Set by the producer of kDiffuseSignal / kSpecularSignal for a view of one of them: a denoiser of the
+// signals then shows that signal alone, denoised and divided by its albedo (as if the surfaces were white,
+// exposed like sceneColor) instead of the frame: 1 the diffuse, 2 the specular; absent or 0 the frame.
+inline constexpr std::string_view kSignalView = "signal.view";
 } // namespace slots
 
 // Per-frame named exchange between features. Lives for one RenderFrame().

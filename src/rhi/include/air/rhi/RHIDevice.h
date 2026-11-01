@@ -10,10 +10,14 @@
 //   * Submit(): thread-safe; submissions to one queue are serialised in call order.
 //   * Queues run concurrently. Work on one queue that depends on another's waits for it on the GPU
 //     with QueueWait(); the render graph inserts those waits for async compute passes.
+//   * The copy queue is not part of frames: frame pacing and deferred destruction do not wait for it.
+//     Whoever submits copies keeps their resources alive until the copies are done (renderer::UploadQueue
+//     waits for its own before releasing anything).
 
 #include "air/rhi/GpuMemoryAllocator.h"
 #include "air/rhi/RHITypes.h"
 
+#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -50,6 +54,9 @@ public:
     // Root constants (D3D12) / push constants (Vulkan). Shaders read bindless indices from here.
     virtual void PushConstants(const void* data, u32 size) = 0;
     virtual void Dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) = 0;
+    // The group counts read on the GPU: three u32 (x, y, z) at byte `offset` (a multiple of 4) of `args`, a
+    // buffer created with BufferUsage::Indirect and in Access::IndirectArgs (a pass declares it so).
+    virtual void DispatchIndirect(BufferHandle args, u64 offset) = 0;
     virtual void DispatchRays(u32 width, u32 height, u32 depth) = 0;
 
     virtual void BuildBlas(AccelStructHandle blas, BufferHandle scratch) = 0;
@@ -123,6 +130,13 @@ struct DeviceDesc
     // D3D12 with the preview Agility SDK: enable experimental shader models (Shader Model 6.10 linear
     // algebra) where Windows allows it (Developer Mode). Falls back to none if the device fails.
     bool experimentalShaderModels = true;
+    // D3D12: load PIX's GPU capturer (WinPixGpuCapturer.dll of the newest PIX under Program Files)
+    // before the device is created, so that PIX can attach to the running process and capture it.
+    bool loadPixCapturer = false;
+    // D3D12: place resources with tight alignment where the driver supports it. false takes the
+    // fallback even then (small Immutable buffers and acceleration structures packed into shared
+    // buffers), to test it.
+    bool tightAlignment = true;
     bool preferHighPerformanceAdapter = true;
     u32 framesInFlight = 2;
 };
@@ -167,6 +181,7 @@ struct ResourceInfo
     // in it; resources placed in a CreateHeap() heap share that heap's id. 0 when not known.
     u64 heapId = 0;
     u64 heapOffset = 0;
+    bool resident = true; // Kind::Heap: false from Device::Evict() until Device::MakeResident()
 };
 
 // GPU duration of one BeginEvent/EndEvent scope.
@@ -217,6 +232,19 @@ public:
     virtual void DestroyHeap(HeapHandle heap) = 0;
     virtual TextureHandle CreatePlacedTexture(const TextureDesc& desc, HeapHandle heap, u64 offset) = 0;
     virtual BufferHandle CreatePlacedBuffer(const BufferDesc& desc, HeapHandle heap, u64 offset) = 0;
+
+    // Residency of CreateHeap() heaps: page out memory no frame needs for a while, so that it stops
+    // counting against the process's video memory budget, and page it back in before it is used.
+    //   * Evict(): work submitted after the call must not use the heap's resources (the Null backend
+    //     reports barriers on them). The page-out itself waits until the GPU has finished the frames
+    //     that may still use the heap; resources may still be placed in an evicted heap.
+    //   * MakeResident(): does not block. Work submitted to any queue after the call waits on the GPU
+    //     until the heaps are back (D3D12 EnqueueMakeResident). Cancels an Evict() still pending.
+    // Heaps start resident; heaps already in the requested state are skipped. A paged-out heap's
+    // contents survive, but the OS is free to keep it in video memory while nothing else wants it.
+    virtual void Evict(std::span<const HeapHandle> heaps) = 0;
+    virtual void MakeResident(std::span<const HeapHandle> heaps) = 0;
+    virtual bool IsResident(HeapHandle heap) = 0;
 
     // Bindless views. Indices stay valid until the resource is destroyed.
     virtual BindlessIndex GetBindlessSRV(TextureHandle texture) = 0;
@@ -292,6 +320,12 @@ public:
     // Backends that validate state also emit "VALIDATION: ..." lines.
     virtual void SetCommandCapture(bool enabled) = 0;
     virtual std::vector<std::string> TakeCapturedCommands() = 0;
+
+    // GPU captures for a graphics debugger (D3D12: PIX's capturer, DeviceDesc::loadPixCapturer, or PIX
+    // having launched or attached to the process). CaptureGpuFrames captures the next `frames` frames
+    // (up to the presents that end them) into `path` (.wpix); false where nothing captures.
+    virtual bool CanCaptureGpuFrames() const = 0;
+    virtual bool CaptureGpuFrames(const std::filesystem::path& path, u32 frames) = 0;
 };
 
 std::unique_ptr<Device> CreateDevice(const DeviceDesc& desc);

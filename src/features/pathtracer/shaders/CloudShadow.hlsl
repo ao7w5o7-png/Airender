@@ -1,6 +1,6 @@
 // The real-time clouds' shadow map (CloudMaps.hlsli, docs/architecture.md §8.19): over one tile of the
 // clouds, the optical depth along the sun from each point of their base up through the layer. Rendered
-// when the clouds or the sun change.
+// when the clouds or the sun change, and as the wind moves their detail over the base density.
 
 #include "air/renderer/shader/SceneShared.h"
 #include "PathTracerShared.h"
@@ -25,8 +25,11 @@ void Main(uint3 id : SV_DispatchThreadID)
     {
         // A sun grazing the layer would cross it for hundreds of kilometres: its rays leave at 3 degrees.
         sun = normalize(float3(sun.x, max(sun.y, 0.05f), sun.z));
-        float3 o = float3((float(id.x) + 0.5f) / float(g.width) * c.tileSize, c.bottom,
-                          (float(id.y) + 0.5f) / float(g.height) * c.tileSize);
+        // A point of the base, at its altitude. (The tile is small next to the planet: its texels serve
+        // the base wherever it repeats.)
+        float x = (float(id.x) + 0.5f) / float(g.width) * c.tileSize + c.baseOffsetX;
+        float z = (float(id.y) + 0.5f) / float(g.height) * c.tileSize + c.baseOffsetZ;
+        float3 o = float3(x, c.bottom - (x * x + z * z) * (0.5f / kCloudPlanetRadius), z);
         CloudMarch m;
         if (BeginCloudMarch(c, o, sun, 1e30f, m))
         {

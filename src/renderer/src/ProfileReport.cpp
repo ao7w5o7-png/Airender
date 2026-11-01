@@ -178,6 +178,7 @@ json::Value MemoryJson(const FrameCapture& capture)
             h["used"] = heap.usedBytes;
             h["allocations"] = heap.allocationCount;
             h["dedicated"] = heap.dedicated;
+            h["resident"] = heap.resident;
             json::Value resources = json::Value::MakeArray();
             if (auto it = byHeap.find(heap.id); it != byHeap.end())
             {
@@ -218,6 +219,10 @@ std::vector<std::string_view> CommandStages(std::string_view op)
     if (op == "Dispatch")
     {
         return StageIds(Bit(Stage::ComputeShader));
+    }
+    if (op == "DispatchIndirect")
+    {
+        return StageIds(Bit(Stage::FrontEnd) | Bit(Stage::ComputeShader));
     }
     if (op == "DispatchRays")
     {

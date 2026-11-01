@@ -6,11 +6,15 @@
 //                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
 //                   [--no-async-compute] [--no-transient-pool] [--html profile.html]   (report of the last frame)
+//                   [--no-tight-alignment]   (D3D12: pack small buffers, the fallback without driver support)
+//                   [--gpu-validation]   (D3D12 GPU-based validation, slow)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //                   [--output-frames N]   (also the N - 1 frames before the last: image.<frame>.pfm)
-//                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)
+//                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH[,FRAMES]]]]   (every frame: metres, degrees;
+//                                    FRAMES: only the first so many, then still)
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
-//                   [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)
+//                   [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)
+//                   [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]   (the high cirrus over the layer; 0: none)
 //                   [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)
 //                   [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]] [--volume-grid NAME]
 //                   [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels among the surfaces)
@@ -20,7 +24,8 @@
 //   aircli scenes                           list built-in scenes and their sizes (JSON)
 //   aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N] [--bounces N]
 //                    [--furnace] [--no-nee] [--light-tree-bounces N] [--sun E,A] [--aerosols D]
-//                    [--clouds C[,B,T]] [--clouds-exact] [--cloud-events N] [--camera ...] [--ev EV100]
+//                    [--clouds C[,B,T]] [--clouds-exact] [--cirrus C[,A,D]] [--cloud-events N] [--camera ...]
+//                    [--ev EV100] [--subsurface-model 0|1|2]
 //                    [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]
 //                    [--neural-textures ...] [--ntc-cache DIR]
 //                    [--volume-march [--frames N] [--probe-frames N] [--volume-step S]
@@ -33,6 +38,9 @@
 //   aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]   neural
 //                    texture decoding in the shader (as on sample) against LibNTC's on CUDA (JSON)
 //   aircli coat-check [--scene NAME] [--directions N]   the neural coat of a scene's coated materials
+//   aircli subsurface-fit [--walks N] [--steps N] [--write FILE]   the neural subsurface profile against
+//                         the half-space walk; --write fits it anew and writes the header (the
+//                         feature's shaders/SubsurfaceProfileNetwork.h)
 //                    against the random walk it learnt from: errors and albedos (JSON)
 //
 // `render` fails (exit 1) if any frame produced a validation error.
@@ -45,6 +53,7 @@
 #include "air/core/TaskSystem.h"
 #include "air/features/pathtracer/NeuralCoat.h"
 #include "air/features/pathtracer/ReferenceRenderer.h"
+#include "air/features/pathtracer/SubsurfaceFit.h"
 #include "air/renderer/Diagnostics.h"
 #include "air/renderer/FrameRunner.h"
 #include "air/renderer/NeuralNetwork.h"
@@ -80,37 +89,45 @@ constexpr int kExitUsage = 2;
 
 int Usage()
 {
-    std::fputs("usage:\n"
-               "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
-               "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
-               "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
-               "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
-               "                [--scene NAME] [--output image.pfm|image.ppm] [--output-frames N]\n"
-               "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)\n"
-               "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
-               "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact]   (cloud layer; 0: none)\n"
-               "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
-               "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
-               "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
-               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
-               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
-               "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
-               "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
-               "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
-               "                [--clouds COVERAGE[,BOTTOM,TOP]] [--clouds-exact] [--cloud-events N]\n"
-               "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
-               "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
-               "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
-               "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
-               "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
-               "                [--volume-shadow-size N] [--volume-lights N]]\n"
-               "  aircli features | scenes\n"
-               "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
-               "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
-               "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
-               "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n"
-               "  aircli coat-check [--scene NAME] [--directions N]\n",
-               stderr);
+    std::fputs(
+        "usage:\n"
+        "  aircli render [--backend null|d3d12|vulkan] [--features a,b] [--set feature.param=value]...\n"
+        "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
+        "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
+        "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
+        "                [--no-tight-alignment]   (D3D12: pack small buffers, the fallback without driver support)\n"
+        "                [--gpu-validation]   (D3D12 GPU-based validation, slow)\n"
+        "                [--scene NAME] [--output image.pfm|image.ppm] [--output-frames N]\n"
+        "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH[,FRAMES]]]]   (every frame: metres, degrees;\n"
+        "                                 FRAMES: only the first so many, then still)\n"
+        "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
+        "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)\n"
+        "                [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]   (high cirrus over the layer; 0: none)\n"
+        "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]   (eye, target, degrees)\n"
+        "                [--volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]]]\n"
+        "                [--volume-grid NAME] [--volume-at X,Y,Z[,SIZE]]...   (smoke or clouds of voxels)\n"
+        "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+        "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
+        "  aircli reference --output image.pfm [--scene NAME] [--width W] [--height H] [--spp N]\n"
+        "                [--bounces N] [--furnace] [--no-nee] [--light-tree-bounces N]\n"
+        "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]\n"
+        "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact] [--cloud-events N]\n"
+        "                [--subsurface-model 0|1|2]   (neural profile, random walk, Burley's profile)\n"
+        "                [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]\n"
+        "                [--camera EX,EY,EZ,TX,TY,TZ[,FOV]] [--ev EV100]\n"
+        "                [--volume ...] [--volume-grid NAME] [--volume-at ...] [--volume-events N]\n"
+        "                [--neural-textures off|load|sample[,BPP[,STEPS]]] [--ntc-cache DIR]\n"
+        "                [--model FILE[,X,Y,Z[,HEIGHT[,YAW]]]]...   (glTF, FBX, OBJ)\n"
+        "                [--volume-march [--frames N] [--probe-frames N] [--volume-step S]\n"
+        "                [--volume-shadow-size N] [--volume-lights N]]\n"
+        "  aircli features | scenes\n"
+        "  aircli vdb FILE.vdb [--read GRID] [--max-resolution N]\n"
+        "  aircli compare REF TEST [--diff out.ppm] [--max-rmse X] [--threshold T] [--max-differing F]\n"
+        "  aircli mlp-check [--backend d3d12] [--shaders DIR] [--samples N]\n"
+        "  aircli ntc-check [--backend d3d12] [--shaders DIR] [--bpp B] [--steps N] [--ntc-cache DIR]\n"
+        "  aircli coat-check [--scene NAME] [--directions N]\n"
+        "  aircli subsurface-fit [--walks N] [--steps N] [--write SubsurfaceProfileNetwork.h]\n",
+        stderr);
     return kExitUsage;
 }
 
@@ -227,8 +244,9 @@ int CommandScenes()
 
 // Changes to a built-in scene:
 //   --sun ELEVATION,AZIMUTH (degrees) and --aerosols DEPTH give it the physical sky (Sky.h);
-//   --clouds COVERAGE[,BOTTOM,TOP] (metres) adds a cloud layer (Clouds.h), 0 removes it; --clouds-exact
-//   keeps their phase function's diffraction peak;
+//   --clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]] (metres) adds a cloud layer (Clouds.h), 0 removes it;
+//   --clouds-exact keeps their phase function's diffraction peak; --cirrus COVERAGE[,ALTITUDE[,DEPTH]]
+//   sets the high cirrus over them (the fraction of the sky, metres, its vertical optical depth);
 //   --camera EX,EY,EZ,TX,TY,TZ[,FOV] puts the camera at the eye looking at the target (vertical field
 //   of view in degrees), --ev EV100 sets its exposure;
 //   --volume FILE.vdb|plume|none[,EXTINCTION[,ALBEDO[,ANISOTROPY]]] puts a volume (Volume.h) in it: a
@@ -250,6 +268,7 @@ struct SceneOptions
     std::optional<float> aerosols;
     std::vector<std::string> clouds;
     bool cloudsExact = false;
+    std::vector<std::string> cirrus;
     std::vector<std::string> camera;
     std::optional<float> ev100;
     struct VolumeOption
@@ -315,6 +334,11 @@ struct SceneOptions
         if (arg == "--clouds-exact")
         {
             cloudsExact = true;
+            return true;
+        }
+        if (arg == "--cirrus")
+        {
+            cirrus = Split(args.Next(), ',');
             return true;
         }
         if (arg == "--camera")
@@ -403,10 +427,30 @@ struct SceneOptions
                 scene.clouds.bottom = std::stof(clouds[1]);
                 scene.clouds.top = std::stof(clouds[2]);
             }
+            if (clouds.size() >= 4)
+            {
+                scene.clouds.windSpeed = std::stof(clouds[3]);
+            }
+            if (clouds.size() >= 5)
+            {
+                scene.clouds.windHeading = std::stof(clouds[4]);
+            }
             // Clouds in a uniform environment would have no sun to light them.
             scene.sky.physical = scene.sky.physical || scene.clouds.enabled;
         }
         scene.clouds.exactPhase = scene.clouds.exactPhase || cloudsExact;
+        if (!cirrus.empty())
+        {
+            scene.clouds.cirrus = std::stof(cirrus[0]);
+            if (cirrus.size() >= 2)
+            {
+                scene.clouds.cirrusAltitude = std::stof(cirrus[1]);
+            }
+            if (cirrus.size() >= 3)
+            {
+                scene.clouds.cirrusDepth = std::stof(cirrus[2]);
+            }
+        }
         if (camera.size() >= 6)
         {
             const hlsl::float3 eye(std::stof(camera[0]), std::stof(camera[1]), std::stof(camera[2]));
@@ -570,6 +614,10 @@ int CommandReference(Args& args)
         else if (arg == "--volume-events")
         {
             settings.volumeEvents = u32(std::stoul(std::string(args.Next()))); // as pathtracer.volumeEvents
+        }
+        else if (arg == "--subsurface-model")
+        {
+            settings.subsurfaceModel = u32(std::stoul(std::string(args.Next()))); // as pathtracer.subsurfaceModel
         }
         else if (arg == "--light-tree-bounces")
         {
@@ -883,6 +931,62 @@ int CommandMlpCheck(Args& args)
 }
 
 // ---------------------------------------------------------------------------
+// subsurface-fit
+// ---------------------------------------------------------------------------
+int CommandSubsurfaceFit(Args& args)
+{
+    u32 walks = 200000;
+    pt::SubsurfaceFitSettings settings;
+    std::string write;
+    while (!args.Done())
+    {
+        const std::string_view arg = args.Take();
+        if (arg == "--walks")
+        {
+            walks = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--steps")
+        {
+            settings.steps = u32(std::stoul(std::string(args.Next())));
+        }
+        else if (arg == "--write")
+        {
+            write = args.Next();
+        }
+        else
+        {
+            args.error = true;
+        }
+    }
+    if (args.error)
+    {
+        return Usage();
+    }
+    TaskSystem tasks;
+    auto start = std::chrono::steady_clock::now();
+    const std::vector<pt::SubsurfaceProfileTable::Config> configs = pt::SubsurfaceFitConfigs();
+    const pt::SubsurfaceProfileTable table = pt::SimulateSubsurfaceProfiles(configs, walks, 1, &tasks);
+    const double walkSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    json::Value report = json::Value::MakeObject();
+    report["walksPerConfig"] = walks;
+    report["configs"] = u32(configs.size());
+    report["walkSeconds"] = walkSeconds;
+    report["compiled"] = pt::CheckSubsurfaceProfile(table, pt::CompiledSubsurfaceProfile());
+    if (!write.empty())
+    {
+        start = std::chrono::steady_clock::now();
+        const pt::SubsurfaceFitResult fit = pt::FitSubsurfaceProfile(table, settings, &tasks);
+        report["fitSeconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        report["fitLoss"] = fit.loss;
+        report["fitted"] = pt::CheckSubsurfaceProfile(table, fit.parameters);
+        std::ofstream(write, std::ios::binary) << pt::SubsurfaceProfileHeader(fit.parameters);
+        report["written"] = write;
+    }
+    std::printf("%s\n", report.Dump(2).c_str());
+    return kExitOk;
+}
+
+// ---------------------------------------------------------------------------
 // coat-check
 // ---------------------------------------------------------------------------
 int CommandCoatCheck(Args& args)
@@ -997,6 +1101,8 @@ int CommandRender(Args& args)
 {
     rhi::Backend backend = rhi::Backend::Null;
     bool validation = true;
+    bool tightAlignment = true;
+    bool gpuValidation = false;
     u32 frames = 4;
     renderer::FrameRunnerDesc desc;
     std::vector<std::string> featureNames = {"pathtracer"};
@@ -1007,7 +1113,7 @@ int CommandRender(Args& args)
     std::string sceneName = "cornell_box";
     std::string outputPath;
     u32 outputFrames = 0;
-    std::vector<float> cameraMotion; // per frame: metres right, up, forward; degrees of yaw, pitch
+    std::vector<float> cameraMotion; // per frame: metres right, up, forward; degrees of yaw, pitch; frames (0: all)
     SceneOptions sceneOptions;
     bool dumpCommands = false;
 
@@ -1026,7 +1132,7 @@ int CommandRender(Args& args)
             {
                 cameraMotion.push_back(std::stof(value));
             }
-            cameraMotion.resize(5, 0.0f);
+            cameraMotion.resize(6, 0.0f);
         }
         else if (arg == "--output-frames")
         {
@@ -1084,6 +1190,14 @@ int CommandRender(Args& args)
         {
             desc.graphConfig.enableAsyncCompute = false; // async passes run on the graphics queue
         }
+        else if (arg == "--no-tight-alignment")
+        {
+            tightAlignment = false; // D3D12: small buffers packed into shared ones, as without driver support
+        }
+        else if (arg == "--gpu-validation")
+        {
+            gpuValidation = true; // D3D12 GPU-based validation: resource states as the GPU uses them (slow)
+        }
         else if (arg == "--html")
         {
             htmlPath = args.Next();
@@ -1119,7 +1233,10 @@ int CommandRender(Args& args)
     Profiler::Get().SetEnabled(desc.profile);
     Profiler::Get().SetThreadName("Main");
 
-    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = validation});
+    auto device = rhi::CreateDevice({.backend = backend,
+                                     .enableValidation = validation || gpuValidation,
+                                     .enableGpuValidation = gpuValidation,
+                                     .tightAlignment = tightAlignment});
     if (!device)
     {
         return kExitUsage;
@@ -1216,7 +1333,7 @@ int CommandRender(Args& args)
             {
                 runner.RequestCapture();
             }
-            if (frame > 0 && !cameraMotion.empty())
+            if (frame > 0 && !cameraMotion.empty() && (cameraMotion[5] <= 0.0f || float(frame) <= cameraMotion[5]))
             {
                 // Along the camera's own axes, then turned.
                 camera.position += camera.Right() * cameraMotion[0] + camera.Up() * cameraMotion[1] +
@@ -1263,6 +1380,12 @@ int CommandRender(Args& args)
             frameReports.Push(result.ToJson());
         }
         report["frames"] = std::move(frameReports);
+        // Where the last frame's camera was, as --camera takes it: render a static camera there to compare
+        // with a moving one's last frame.
+        const hlsl::float3 target = camera.position + camera.Forward();
+        report["finalCamera"] =
+            std::format("{},{},{},{},{},{},{}", camera.position.x, camera.position.y, camera.position.z, target.x,
+                        target.y, target.z, camera.verticalFov * 180.0f / 3.14159265f);
         if (!outputPath.empty() && writeOutput(outputPath))
         {
             report["output"] = outputPath;
@@ -1384,6 +1507,10 @@ int main(int argc, char** argv)
     if (command == "coat-check")
     {
         return CommandCoatCheck(args);
+    }
+    if (command == "subsurface-fit")
+    {
+        return CommandSubsurfaceFit(args);
     }
     if (command == "vdb")
     {

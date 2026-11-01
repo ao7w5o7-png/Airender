@@ -11,6 +11,7 @@
 #include <atomic>
 #include <format>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <utility>
 
@@ -69,6 +70,7 @@ struct NullBuffer
     BufferDesc desc;
     GpuAllocation allocation;
     bool placed = false;
+    HeapHandle heap; // the CreateHeap() heap it is placed in
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
     BindlessIndex cbv = kInvalidBindless;
@@ -80,6 +82,7 @@ struct NullTexture
     TextureDesc desc;
     GpuAllocation allocation;
     bool placed = false;
+    HeapHandle heap; // the CreateHeap() heap it is placed in
     BindlessIndex srv = kInvalidBindless;
     BindlessIndex uav = kInvalidBindless;
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
@@ -92,6 +95,8 @@ struct NullHeap
     GpuAllocation allocation;
     std::string name;
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
+    bool resident = true;   // false from Evict() until MakeResident()
+    u64 evictRequest = 0;   // the Evict() whose deferred page-out may run
 };
 
 struct NullAccelStruct
@@ -111,11 +116,13 @@ struct NullPipeline
 
 class NullDevice;
 
-// A texture state a command relies on (e.g. a render pass target must be in RenderTarget).
+// A resource state a command relies on (e.g. a render pass target must be in RenderTarget, an indirect
+// dispatch's arguments in IndirectArgs): a texture, or the buffer when `buffer` is valid.
 struct StateRequirement
 {
     TextureHandle texture;
     Access access = Access::None;
+    BufferHandle buffer;
 };
 
 struct RecordedCommand
@@ -170,6 +177,7 @@ public:
         AIR_CHECK(mPipeline.IsValid(), "Dispatch without pipeline");
         Record(std::format("Dispatch {}x{}x{}", x, y, z));
     }
+    void DispatchIndirect(BufferHandle args, u64 offset) override;
     void DispatchRays(u32 w, u32 h, u32 d) override
     {
         AIR_CHECK(mPipeline.IsValid(), "DispatchRays without pipeline");
@@ -275,6 +283,10 @@ public:
     BufferHandle CreateBuffer(const BufferDesc& desc) override
     {
         AIR_CHECK(desc.size > 0, "buffer '{}' has zero size", desc.debugName);
+        AIR_CHECK(!Any(desc.usage & BufferUsage::Immutable) ||
+                      !Any(desc.usage & (BufferUsage::UnorderedAccess | BufferUsage::AccelStructStorage)),
+                  "buffer '{}': an Immutable buffer is not written on the GPU (UnorderedAccess / AccelStructStorage)",
+                  desc.debugName);
         NullBuffer buffer;
         buffer.desc = desc;
         const AllocationInfo info = GetBufferAllocationInfo(desc);
@@ -416,6 +428,7 @@ public:
         NullTexture texture;
         texture.desc = desc;
         texture.placed = true;
+        texture.heap = heapHandle;
         texture.allocation = heap->allocation;
         texture.allocation.offset += offset;
         texture.allocation.size = info.size;
@@ -432,6 +445,7 @@ public:
         NullBuffer buffer;
         buffer.desc = desc;
         buffer.placed = true;
+        buffer.heap = heapHandle;
         buffer.allocation = heap->allocation;
         buffer.allocation.offset += offset;
         buffer.allocation.size = info.size;
@@ -440,6 +454,91 @@ public:
             buffer.allocation.mapped += offset;
         }
         return mBuffers.Allocate(std::move(buffer));
+    }
+
+    // Residency, as on D3D12: the page-out waits for the frames in flight; barriers on resources in
+    // an evicted heap are reported.
+    void Evict(std::span<const HeapHandle> heaps) override
+    {
+        for (HeapHandle handle : heaps)
+        {
+            u64 request = 0;
+            std::string name;
+            {
+                std::lock_guard lock(mResidencyMutex);
+                const bool live =
+                    mHeaps.Modify(handle,
+                                  [&](NullHeap& heap)
+                                  {
+                                      AIR_CHECK(!heap.destroyed, "Evict on destroyed heap '{}'", heap.name);
+                                      if (heap.resident)
+                                      {
+                                          heap.resident = false;
+                                          request = heap.evictRequest = ++mEvictRequests;
+                                          name = heap.name;
+                                      }
+                                  });
+                AIR_CHECK(live, "Evict on stale heap handle");
+            }
+            if (request == 0)
+            {
+                continue;
+            }
+            CaptureLine(std::format("[Residency] Evict heap '{}'", name));
+            DeferDelete(
+                [this, handle, request]
+                {
+                    std::lock_guard lock(mResidencyMutex);
+                    std::optional<GpuAllocation> allocation;
+                    mHeaps.Modify(handle,
+                                  [&](NullHeap& heap)
+                                  {
+                                      if (!heap.resident && heap.evictRequest == request)
+                                      {
+                                          allocation = heap.allocation;
+                                      }
+                                  });
+                    if (allocation)
+                    {
+                        mAllocator.SetResident(*allocation, false);
+                    }
+                });
+        }
+    }
+
+    void MakeResident(std::span<const HeapHandle> heaps) override
+    {
+        std::lock_guard lock(mResidencyMutex);
+        for (HeapHandle handle : heaps)
+        {
+            std::optional<GpuAllocation> allocation;
+            std::string name;
+            const bool live =
+                mHeaps.Modify(handle,
+                              [&](NullHeap& heap)
+                              {
+                                  AIR_CHECK(!heap.destroyed, "MakeResident on destroyed heap '{}'", heap.name);
+                                  if (!heap.resident)
+                                  {
+                                      heap.resident = true;
+                                      allocation = heap.allocation;
+                                      name = heap.name;
+                                  }
+                              });
+            AIR_CHECK(live, "MakeResident on stale heap handle");
+            if (allocation)
+            {
+                CaptureLine(std::format("[Residency] MakeResident heap '{}'", name));
+                mAllocator.SetResident(*allocation, true);
+            }
+        }
+    }
+
+    bool IsResident(HeapHandle handle) override
+    {
+        bool resident = false;
+        mHeaps.Modify(handle, [&](NullHeap& heap) { resident = heap.resident; });
+        return resident;
     }
 
     BindlessIndex GetBindlessSRV(TextureHandle handle) override
@@ -591,7 +690,15 @@ public:
                 }
                 for (const StateRequirement& requirement : command.requirements)
                 {
-                    ValidateStateLocked(QueueName(queue), requirement.texture, requirement.access, command.text);
+                    if (requirement.buffer.IsValid())
+                    {
+                        ValidateStateLocked(QueueName(queue), StateKey(requirement.buffer),
+                                            Describe(requirement.buffer), requirement.access, command.text);
+                    }
+                    else
+                    {
+                        ValidateStateLocked(QueueName(queue), requirement.texture, requirement.access, command.text);
+                    }
                 }
                 if (mProfiling && command.event == RecordedCommand::Event::Begin)
                 {
@@ -667,8 +774,8 @@ public:
             stats.perLocation[i] = mAllocator.GetStats(MemoryLocation(i));
         }
         stats.pools = mAllocator.GetPoolStats();
-        stats.local = {mCaps.dedicatedVideoMemory,
-                       stats.perLocation[size_t(MemoryLocation::DeviceLocal)].reservedBytes};
+        const GpuMemoryAllocator::Stats& local = stats.perLocation[size_t(MemoryLocation::DeviceLocal)];
+        stats.local = {mCaps.dedicatedVideoMemory, local.reservedBytes - local.evictedBytes}; // evicted: paged out
         stats.liveBuffers = mBuffers.LiveCount();
         stats.liveTextures = mTextures.LiveCount();
         stats.liveAccelStructs = mAccelStructs.LiveCount();
@@ -713,7 +820,7 @@ public:
                     return;
                 }
                 list.push_back({ResourceInfo::Kind::Heap, h.name, h.size, h.location, false, heapId(h.allocation),
-                                h.allocation.offset});
+                                h.allocation.offset, h.resident});
             });
         mAccelStructs.ForEach(
             [&](AccelStructHandle, const NullAccelStruct& as)
@@ -749,6 +856,8 @@ public:
         std::lock_guard lock(mSubmitMutex);
         return std::exchange(mCaptured, {});
     }
+    bool CanCaptureGpuFrames() const override { return false; }
+    bool CaptureGpuFrames(const std::filesystem::path&, u32) override { return false; }
 
     // --- helpers used by the command list ----------------------------------------------------
     std::string Describe(TextureHandle handle)
@@ -805,6 +914,43 @@ private:
     static u64 StateKey(TextureHandle h) { return (1ull << 62) | (u64(h.index) << 32) | h.generation; }
     static u64 StateKey(BufferHandle h) { return (2ull << 62) | (u64(h.index) << 32) | h.generation; }
 
+    void CaptureLine(std::string line)
+    {
+        std::lock_guard lock(mSubmitMutex);
+        if (mCapture)
+        {
+            mCaptured.push_back(std::move(line));
+        }
+    }
+
+    // The evicted CreateHeap() heap a resource is placed in, if any.
+    std::optional<std::string> EvictedHeapOf(HeapHandle heap)
+    {
+        std::optional<std::string> name;
+        mHeaps.Modify(heap,
+                      [&](NullHeap& h)
+                      {
+                          if (!h.resident)
+                          {
+                              name = h.name;
+                          }
+                      });
+        return name;
+    }
+    std::optional<std::string> EvictedHeapOf(const Barrier& barrier)
+    {
+        HeapHandle heap;
+        if (barrier.type == Barrier::Type::Texture)
+        {
+            mTextures.Modify(barrier.texture, [&](NullTexture& t) { heap = t.heap; });
+        }
+        else
+        {
+            mBuffers.Modify(barrier.buffer, [&](NullBuffer& b) { heap = b.heap; });
+        }
+        return heap.IsValid() ? EvictedHeapOf(heap) : std::nullopt;
+    }
+
     void Report(QueueType queue, const std::string& message)
     {
         AIR_LOG(Error, "NullRHI", "{}", message);
@@ -830,6 +976,12 @@ private:
         {
             Report(queue, std::format("VALIDATION: barrier on {} ({} -> {}) uses a state the {} queue does not support",
                                       describe(), ToString(barrier.before), ToString(barrier.after), QueueName(queue)));
+        }
+        // The GPU cannot touch memory paged out of video memory (Device::Evict without MakeResident).
+        if (const auto heap = EvictedHeapOf(barrier))
+        {
+            Report(queue, std::format("VALIDATION: {} is used but its heap '{}' is evicted (call MakeResident first)",
+                                      describe(), *heap));
         }
         // A resource last used on another queue must not be touched before waiting for that use.
         LastUse& last = mLastUse[key];
@@ -860,12 +1012,19 @@ private:
 
     void ValidateStateLocked(std::string_view where, TextureHandle texture, Access expected, std::string_view what)
     {
-        const auto it = mTrackedState.find(StateKey(texture));
+        ValidateStateLocked(where, StateKey(texture), Describe(texture), expected, what, false);
+    }
+
+    // `includes`: the state may hold other read states besides `expected` (a buffer read several ways at once).
+    void ValidateStateLocked(std::string_view where, u64 key, const std::string& name, Access expected,
+                             std::string_view what, bool includes = true)
+    {
+        const auto it = mTrackedState.find(key);
         const Access actual = it == mTrackedState.end() ? Access::None : it->second;
-        if (actual != expected)
+        if (includes ? (actual & expected) != expected : actual != expected)
         {
-            const std::string message = std::format("VALIDATION: '{}' needs {} in {} but it is in {}", what,
-                                                    Describe(texture), ToString(expected), ToString(actual));
+            const std::string message = std::format("VALIDATION: '{}' needs {} in {} but it is in {}", what, name,
+                                                    ToString(expected), ToString(actual));
             AIR_LOG(Error, "NullRHI", "{}", message);
             if (mCapture)
             {
@@ -944,6 +1103,9 @@ private:
     HandlePool<AccelStructTag, NullAccelStruct> mAccelStructs;
     HandlePool<PipelineTag, NullPipeline> mPipelines;
 
+    std::mutex mResidencyMutex; // serialises Evict / MakeResident / deferred page-outs
+    u64 mEvictRequests = 0;     // NullHeap::evictRequest counter
+
     std::mutex mSubmitMutex; // guards fences, tracked state and capture
     u64 mFence[size_t(QueueType::Count)] = {};
     // mWaited[waiter][signaler]: the highest signaler fence the waiter queue waited for.
@@ -1007,6 +1169,32 @@ void NullCommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle s
 {
     Record(std::format("CopyBuffer {}+{} <- {}+{} ({} bytes)", mDevice.Describe(dst), dstOffset, mDevice.Describe(src),
                        srcOffset, size));
+    const BufferDesc* desc = mDevice.GetBufferDesc(dst);
+    if (desc && Any(desc->usage & BufferUsage::Immutable) && mQueue != QueueType::Copy)
+    {
+        // D3D12 may pack it into a buffer shared with others, whose state only the copy queue may change.
+        const std::string message = std::format("VALIDATION: CopyBuffer into Immutable {} on the {} queue",
+                                                mDevice.Describe(dst), QueueName(mQueue));
+        AIR_LOG(Error, "NullRHI", "{}", message);
+        Record(message);
+    }
+}
+void NullCommandList::DispatchIndirect(BufferHandle args, u64 offset)
+{
+    AIR_CHECK(mPipeline.IsValid(), "DispatchIndirect without pipeline");
+    const BufferDesc* desc = mDevice.GetBufferDesc(args);
+    AIR_CHECK(desc, "DispatchIndirect: invalid buffer");
+    AIR_CHECK(offset % 4 == 0 && offset + 12 <= desc->size, "DispatchIndirect: offset {} out of {}", offset,
+              mDevice.Describe(args));
+    std::vector<StateRequirement> requirements = {{.access = Access::IndirectArgs, .buffer = args}};
+    Record(std::format("DispatchIndirect {}+{}", mDevice.Describe(args), offset), {}, std::move(requirements));
+    if (!Any(desc->usage & BufferUsage::Indirect))
+    {
+        const std::string message =
+            std::format("VALIDATION: DispatchIndirect from {} without BufferUsage::Indirect", mDevice.Describe(args));
+        AIR_LOG(Error, "NullRHI", "{}", message);
+        Record(message);
+    }
 }
 void NullCommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer, BufferHandle src, u64 srcOffset)
 {
