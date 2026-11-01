@@ -6,9 +6,12 @@
 //                   [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]
 //                   [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile] [--no-validation]
 //                   [--no-async-compute] [--no-transient-pool] [--html profile.html]   (report of the last frame)
+//                   [--no-tight-alignment]   (D3D12: pack small buffers, the fallback without driver support)
+//                   [--gpu-validation]   (D3D12 GPU-based validation, slow)
 //                   [--scene NAME] [--output image.pfm|image.ppm]   (aircli scenes lists them)
 //                   [--output-frames N]   (also the N - 1 frames before the last: image.<frame>.pfm)
-//                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)
+//                   [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH[,FRAMES]]]]   (every frame: metres, degrees;
+//                                    FRAMES: only the first so many, then still)
 //                   [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky, degrees)
 //                   [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)
 //                   [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]   (the high cirrus over the layer; 0: none)
@@ -92,8 +95,11 @@ int Usage()
         "                [--frames N] [--width W] [--height H] [--render-scale S] [--shaders DIR]\n"
         "                [--dump-graph out.dot] [--dump-commands] [--report out.json] [--profile]\n"
         "                [--no-validation] [--no-async-compute] [--no-transient-pool] [--html profile.html]\n"
+        "                [--no-tight-alignment]   (D3D12: pack small buffers, the fallback without driver support)\n"
+        "                [--gpu-validation]   (D3D12 GPU-based validation, slow)\n"
         "                [--scene NAME] [--output image.pfm|image.ppm] [--output-frames N]\n"
-        "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH]]]   (every frame: metres, degrees)\n"
+        "                [--camera-motion RIGHT,UP,FORWARD[,YAW[,PITCH[,FRAMES]]]]   (every frame: metres, degrees;\n"
+        "                                 FRAMES: only the first so many, then still)\n"
         "                [--sun ELEVATION,AZIMUTH] [--aerosols DEPTH]   (physical sky)\n"
         "                [--clouds COVERAGE[,BOTTOM,TOP[,WIND[,HEADING]]]] [--clouds-exact]   (cloud layer; 0: none)\n"
         "                [--cirrus COVERAGE[,ALTITUDE[,DEPTH]]]   (high cirrus over the layer; 0: none)\n"
@@ -1095,6 +1101,8 @@ int CommandRender(Args& args)
 {
     rhi::Backend backend = rhi::Backend::Null;
     bool validation = true;
+    bool tightAlignment = true;
+    bool gpuValidation = false;
     u32 frames = 4;
     renderer::FrameRunnerDesc desc;
     std::vector<std::string> featureNames = {"pathtracer"};
@@ -1105,7 +1113,7 @@ int CommandRender(Args& args)
     std::string sceneName = "cornell_box";
     std::string outputPath;
     u32 outputFrames = 0;
-    std::vector<float> cameraMotion; // per frame: metres right, up, forward; degrees of yaw, pitch
+    std::vector<float> cameraMotion; // per frame: metres right, up, forward; degrees of yaw, pitch; frames (0: all)
     SceneOptions sceneOptions;
     bool dumpCommands = false;
 
@@ -1124,7 +1132,7 @@ int CommandRender(Args& args)
             {
                 cameraMotion.push_back(std::stof(value));
             }
-            cameraMotion.resize(5, 0.0f);
+            cameraMotion.resize(6, 0.0f);
         }
         else if (arg == "--output-frames")
         {
@@ -1182,6 +1190,14 @@ int CommandRender(Args& args)
         {
             desc.graphConfig.enableAsyncCompute = false; // async passes run on the graphics queue
         }
+        else if (arg == "--no-tight-alignment")
+        {
+            tightAlignment = false; // D3D12: small buffers packed into shared ones, as without driver support
+        }
+        else if (arg == "--gpu-validation")
+        {
+            gpuValidation = true; // D3D12 GPU-based validation: resource states as the GPU uses them (slow)
+        }
         else if (arg == "--html")
         {
             htmlPath = args.Next();
@@ -1217,7 +1233,10 @@ int CommandRender(Args& args)
     Profiler::Get().SetEnabled(desc.profile);
     Profiler::Get().SetThreadName("Main");
 
-    auto device = rhi::CreateDevice({.backend = backend, .enableValidation = validation});
+    auto device = rhi::CreateDevice({.backend = backend,
+                                     .enableValidation = validation || gpuValidation,
+                                     .enableGpuValidation = gpuValidation,
+                                     .tightAlignment = tightAlignment});
     if (!device)
     {
         return kExitUsage;
@@ -1314,7 +1333,7 @@ int CommandRender(Args& args)
             {
                 runner.RequestCapture();
             }
-            if (frame > 0 && !cameraMotion.empty())
+            if (frame > 0 && !cameraMotion.empty() && (cameraMotion[5] <= 0.0f || float(frame) <= cameraMotion[5]))
             {
                 // Along the camera's own axes, then turned.
                 camera.position += camera.Right() * cameraMotion[0] + camera.Up() * cameraMotion[1] +
@@ -1361,6 +1380,12 @@ int CommandRender(Args& args)
             frameReports.Push(result.ToJson());
         }
         report["frames"] = std::move(frameReports);
+        // Where the last frame's camera was, as --camera takes it: render a static camera there to compare
+        // with a moving one's last frame.
+        const hlsl::float3 target = camera.position + camera.Forward();
+        report["finalCamera"] =
+            std::format("{},{},{},{},{},{},{}", camera.position.x, camera.position.y, camera.position.z, target.x,
+                        target.y, target.z, camera.verticalFov * 180.0f / 3.14159265f);
         if (!outputPath.empty() && writeOutput(outputPath))
         {
             report["output"] = outputPath;

@@ -46,6 +46,9 @@ void Main(uint3 id : SV_DispatchThreadID)
     case kDebugNone:
     case kDebugDirect:
     case kDebugIndirect:
+    case kDebugExternalGi:
+    case kDebugGiIrradiance:
+    case kDebugGiSpecular:
     case kDebugNrcCache: value *= f.exposure; break; // radiance -> scene-linear
     case kDebugBaseColor: break;                           // already linear reflectance
     case kDebugIntersections:

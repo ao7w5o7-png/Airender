@@ -201,6 +201,11 @@ struct PathSample
     BsdfMaterial material;
     float3 diffuseAlbedo;
     float3 specularAlbedo;
+    // The first hit's emission towards the camera (slots::kEmission), and the sky the first surface's
+    // BSDF sample reached, times its throughput: part of directRadiance, but an external GI's light
+    // (kDebugExternalGi).
+    float3 emission;
+    float3 skyRadiance;
     uint bounces; // surfaces the path scattered at
     // The first hit as TraceClosest reported it (instance kInvalidIndex: none), for ReSTIR.
     uint instance;
@@ -213,6 +218,10 @@ struct PathSample
     float3 diffuseRadiance;
     float3 specularRadiance;
     float reflectionDistance;
+    // kDebugExternalGi's light split by the first vertex's lobe that reflects it, before the air in front
+    // (kDebugGiIrradiance, kDebugGiSpecular). With neither ReSTIR GI nor the radiance cache.
+    float3 giDiffuse;
+    float3 giSpecular;
 };
 
 float3 TransformRow3(float4 r0, float4 r1, float4 r2, float3 p, float w)
@@ -735,6 +744,8 @@ void AddAerialPerspective(IntegratorParams params, float3 direction, AIR_INOUT(P
         s.directRadiance = air.inscatter + air.transmittance * s.directRadiance;
         s.diffuseRadiance *= air.transmittance;
         s.specularRadiance *= air.transmittance;
+        s.emission *= air.transmittance;
+        s.skyRadiance *= air.transmittance;
     }
 }
 
@@ -846,6 +857,8 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.material.metallic = 0.0f;
     result.diffuseAlbedo = float3(0.0f, 0.0f, 0.0f);
     result.specularAlbedo = float3(0.0f, 0.0f, 0.0f);
+    result.emission = float3(0.0f, 0.0f, 0.0f);
+    result.skyRadiance = float3(0.0f, 0.0f, 0.0f);
     result.bounces = 0u;
     result.instance = kInvalidIndex;
     result.primitive = 0u;
@@ -863,12 +876,20 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     result.diffuseRadiance = float3(0.0f, 0.0f, 0.0f);
     result.specularRadiance = float3(0.0f, 0.0f, 0.0f);
     result.reflectionDistance = 0.0f;
+    result.giDiffuse = float3(0.0f, 0.0f, 0.0f);
+    result.giSpecular = float3(0.0f, 0.0f, 0.0f);
     // The split: the path beyond the first vertex (from `reflectedFrom` on) by the parts of the BSDF
     // sample it continued with. The first vertex's next event estimation is in neither: the direct
     // light passes the denoiser (docs/architecture.md §8.14).
     bool signals = (params.flags & kFlagSignals) != 0u;
+    // The diffuse lobe's part of the first vertex's next event estimation of the emissive triangles too
+    // (kFlagDirectSignals). Not the specular part (sharp highlights of small lights, which the specular
+    // filter smeared: veach_mis lost 5% of its light) nor the sun's (its sharp shadows washed out;
+    // docs/architecture.md §8.14).
+    bool directSignals = signals && (params.flags & kFlagDirectSignals) != 0u;
     bool reflected = false;
     float3 reflectedFrom = float3(0.0f, 0.0f, 0.0f);
+    float3 reflectedDirectFrom = float3(0.0f, 0.0f, 0.0f); // directRadiance at that point
     float3 diffuseShare = float3(0.0f, 0.0f, 0.0f);
 
     bool useNee = params.lightCount > 0u && (params.flags & kFlagNoNee) == 0u && (params.flags & kFlagFurnace) == 0u;
@@ -884,6 +905,10 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
     // the rest. Other samples stop at x2.
     bool gi = AIR_PT_RESTIR_GI != 0 && (params.flags & kFlagReSTIRGI) != 0u;
     bool recordGi = gi && (params.flags & kFlagRecordGi) != 0u;
+    // Another feature adds the first surface's reflection of the sky and of other surfaces' light: the
+    // path ends at the hit of the first surface's BSDF sample, with what it found there of the emitters
+    // and the sun's disc.
+    bool externalGi = (params.flags & kFlagExternalGi) != 0u;
     float firstBsdfPdf = 0.0f; // solid angle pdf of the ray from the first surface to x2
     float x2AreaPdf = 0.0f;
     float3 x2Throughput = float3(0.0f, 0.0f, 0.0f);
@@ -1093,6 +1118,14 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     sunWeight = 0.0f; // a probe's direct sunlight: the march's own
                 }
 #endif
+                if (bounce == 1u && externalGi)
+                {
+                    sky = float3(0.0f, 0.0f, 0.0f); // the external GI's
+                }
+                else if (bounce == 1u)
+                {
+                    result.skyRadiance += throughput * sky;
+                }
                 float3 environment = sky + sun * sunWeight;
                 if (beyondX2)
                 {
@@ -1117,6 +1150,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             result.position = s.position;
             result.normal = s.shadingNormal;
             result.material = s.material;
+            result.emission = s.emission;
             GuideAlbedos(s.material, dot(s.shadingNormal, -direction), result.diffuseAlbedo, result.specularAlbedo);
 #if AIR_PT_SUBSURFACE
             if (s.subsurface)
@@ -1244,7 +1278,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
             }
         }
 #endif
-        if (bounce == params.maxBounces + events || (gi && !recordGi && bounce == 1u))
+        if (bounce == params.maxBounces + events || (((gi && !recordGi) || externalGi) && bounce == 1u))
         {
             break;
         }
@@ -1278,6 +1312,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                     recordGi = false;
                     reflected = true;
                     reflectedFrom = result.radiance;
+                    reflectedDirectFrom = result.directRadiance;
                     diffuseShare = float3(1.0f, 1.0f, 1.0f);
                 }
             }
@@ -1367,6 +1402,10 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
                         if (bounce == 0u)
                         {
                             result.directRadiance += contribution;
+                            if (directSignals && !beneath)
+                            {
+                                result.diffuseRadiance += throughput * e.fCosDiffuse * light.radiance * (weight / lightPdf);
+                            }
                         }
                     }
                 }
@@ -1436,6 +1475,7 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         {
             reflected = true;
             reflectedFrom = result.radiance;
+            reflectedDirectFrom = result.directRadiance;
             // diffuseWeight is 0 wherever weight is.
             diffuseShare = bs.diffuseWeight / max(bs.weight, float3(1e-30f, 1e-30f, 1e-30f));
         }
@@ -1548,6 +1588,15 @@ PathSample TracePath(float3 origin, float3 direction, IntegratorParams params, A
         float3 rest = result.radiance - reflectedFrom;
         result.diffuseRadiance += rest * diffuseShare;
         result.specularRadiance += rest * (1.0f - diffuseShare);
+    }
+    if (reflected)
+    {
+        // What the path found beyond the first vertex, less what its BSDF sample reached directly of the
+        // emitters and the sun (the sky it reached stays: an external GI's).
+        float3 external =
+            result.radiance - reflectedFrom - (result.directRadiance - reflectedDirectFrom) + result.skyRadiance;
+        result.giDiffuse = external * diffuseShare;
+        result.giSpecular = external * (1.0f - diffuseShare);
     }
     return result;
 }

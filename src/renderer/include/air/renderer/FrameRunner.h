@@ -60,6 +60,7 @@ struct FrameResult
     u64 frameIndex = 0;
     rdg::RenderGraph::Stats graphStats;
     rdg::TransientResourcePool::Stats transientPool; // after this frame; zero without a pool
+    rdg::UploadAllocator::Stats uploads;             // the frame's upload memory (RenderGraph::AllocateUpload)
     double cpuMilliseconds = 0.0;
     std::string graphText;             // when captureGraph
     std::string graphviz;              // when captureGraph
@@ -121,6 +122,7 @@ private:
     FrameRunnerDesc mDesc;
     std::vector<Entry> mFeatures;
     std::unique_ptr<rdg::TransientResourcePool> mTransientPool; // when FrameRunnerDesc::poolTransients
+    std::unique_ptr<rdg::UploadAllocator> mUploads;             // every frame's upload memory
     rhi::TextureHandle mOutput;
     rhi::Access mOutputAccess = rhi::Access::None;
     u64 mFrameIndex = 0;

@@ -13,6 +13,7 @@ add_library(air_renderer
     src/Parameters.cpp
     src/ProfileReport.cpp
     src/Transfer.cpp
+    src/UploadQueue.cpp
     src/Scene.cpp
     src/SceneFiles.cpp
     src/FileScenes.cpp

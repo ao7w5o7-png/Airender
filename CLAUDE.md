@@ -10,7 +10,9 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
 - Run a subset of tests: `python3 tools/air.py test <name substring>`.
 - After editing HLSL: `python3 tools/air.py shaders` compiles every shader with the build's exact
   dxc command lines (no C++ build needed). A running editor hot-reloads saved shaders by itself
-  (docs/architecture.md §9.1).
+  (docs/architecture.md §9.1). It only checks them (into `build/shader-check`): `aircli` reads
+  `build/shaders`, which `cmake --build build --config Release --target air_feature_<name>_shaders`
+  updates (a restored file keeps its old time: touch it, or the build keeps the newer binary).
 - Run the renderer: `python3 tools/air.py run -- render --features pathtracer,example --frames 2 --report out/report.json`
   - The report is JSON: per-frame stats, feature parameters and status, `errors`, `passed`. Exit
     code 0 = passed, 1 = validation errors or leaks, 2 = usage or environment error.
@@ -21,6 +23,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   barriers, transient aliasing and heap offsets; docs/architecture.md §9.2). The data is the JSON
   in its `<script id="report-data">` element. The editor shows the same page live in its
   Profiler (HTML) panel; `aireditor --focus "Profiler (HTML)"` opens with that tab selected.
+- GPU captures (docs/architecture.md §9, WinPixEventRuntime's pix3.h): `aireditor --pix` lets PIX
+  attach to the running editor, and F11 writes the next frame's capture to `out/captures/*.wpix`; open
+  it in PIX, or read it with `pixtool open-capture X.wpix save-event-list events.csv`. Shader sources
+  for PIX's shader debugger are in `build/shaders/pdb/*.pdb` (add it to PIX's PDB search paths;
+  `-DAIR_SHADER_OPTIMIZE=OFF` keeps every variable).
 - Image comparison: `aircli compare ref.pfm test.pfm --diff diff.ppm` prints rmse / psnr /
   differing pixels as JSON.
 - A failing golden snapshot (`tests/golden/`) means the command stream or render graph changed:
@@ -85,20 +92,41 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   (network, random walk reference, approximation). After changing the coat or its network run
   `aircli coat-check` and compare an accumulated `coatModel=0` image with a `coatModel=1` one; raise the
   version in `TrainNeuralCoat`'s cache key so stale networks are not reused.
-- Real-time denoising (docs/architecture.md §8.14): the editor's default chain is
-  `pathtracer,nrd,taa,tonemap` (NRD on the surfaces' indirect light split by lobe, TAA for edges and
-  the direct light; nrd needs D3D12), the alternative `pathtracer,dlss`. Indirect light added at the
+- Probe GI (docs/architecture.md §8.21): indirect light without ray tracing (voxel cascades, screen
+  probes, a world-space radiance cache): `--features pathtracer,probe_gi,taa,tonemap --set
+  pathtracer.accumulate=0` (nrd before taa denoises the direct light). Compare `--set probe_gi.view=1`
+  (its GI alone) with the path tracer's reference of it, `--set pathtracer.debugView=15` accumulated,
+  over a few hundred frames (the voxels' bounces converge over frames), and by lobe `view=2` / `3`
+  (diffuse irradiance / pi, specular light) with `pathtracer.debugView=16` / `17`; `view=4..7` show the voxels
+  (albedo, light, steps, cascades), `multiBounce=0` against `maxBounces=2` checks one bounce, and the
+  report's `voxelization` status shows each cascade's voxels and what overflowed. Move the camera
+  (`--camera-motion`) to check the cascades' scrolling. Compare the mean of the last 100 of 400 frames
+  (`--output-frames 100`), not one frame: the voxels' light drifts slowly (many_lights about 1%).
+  `probe_gi.reflections=0` / `rayFilterRadius=0` / `filterRadius=1` switch the traced reflections and the
+  probes' per-direction filter for comparison; the specular light of smooth pixels alone: mask with
+  `pathtracer.debugView=3` (roughness).
+- Real-time denoising (docs/architecture.md §8.14): two alternatives, never combined:
+  `pathtracer,dlss,tonemap` (DLSS Ray Reconstruction denoises, anti-aliases and upscales; the editor's
+  default, `--no-dlss` or a GPU without it falls back) and `pathtracer,nrd,taa,tonemap` (NRD on the
+  surfaces' indirect light split by lobe, TAA for edges and the direct light; nrd needs D3D12). Indirect light added at the
   first surface must also add its lobe split to `kDiffuseSignal` / `kSpecularSignal` (as ReSTIR GI
-  does), or NRD leaves it noisy; direct light stays out of them (NRD spreads shadows: 2-10% of the
-  light lost). Energy is part of correctness: check the mean of 32 real-time frames against an
+  does), or NRD leaves it noisy. Direct light: only the diffuse part of the emissive triangles' goes to
+  them (`pathtracer.denoiseDirect`, on); the sun's and specular direct light stay out (NRD washed out
+  sharp shadows and highlights). The editor's ReSTIR DI / GI checkboxes switch them for comparison. Energy is part of correctness: check the mean of 32 real-time frames against an
   accumulated reference, in real lighting and in the white furnace (`--set pathtracer.furnace=1`;
   docs/architecture.md §8.14 "Energy"); a filter that clips or clamps noisy samples loses light.
 - Real time is judged over frames, and a static camera hides trails: `--camera-motion
-  RIGHT,UP,FORWARD[,YAW[,PITCH]]` moves the camera every frame and `--output-frames N` writes the last
-  N frames. Compare a moving camera's last frame with a static camera's at the same place (trails,
+  RIGHT,UP,FORWARD[,YAW[,PITCH[,FRAMES]]]` moves the camera every frame (only the first FRAMES, then
+  holds it: what a move leaves behind) and `--output-frames N` writes the last N frames. Compare a moving
+  camera's last frame with a static camera's at the same place (the report's `finalCamera` is that place
+  in `--camera` syntax; a static camera elsewhere is no baseline, even a few centimetres away) (trails,
   e.g. a denoiser reprojecting with the wrong motion), and a static camera's consecutive frames
   (flicker). Anything laid over the surfaces must keep the denoiser's guides consistent with it
   (docs/architecture.md §8.13, "Under a denoiser").
+- Small GPU allocations (docs/architecture.md §4.2): with the driver's tight alignment a buffer takes
+  its own size, else small buffers are packed into shared ones; `--no-tight-alignment` forces that
+  fallback. A buffer written once by `renderer::UploadQueue` and then only read should carry
+  `BufferUsage::Immutable` so the fallback can pack it.
 - Before trusting GPU timings, check the report's `vramBudgetBytes`: other processes holding VRAM
   (graphics debuggers, IDEs) make WDDM page resources to system memory and inflate every pass.
 - Debug a frame with `--set pathtracer.debugView=N` (normals, albedo, depth, heatmaps, direct /
@@ -119,6 +147,11 @@ docs/architecture.md. Do not name or reference other game engines anywhere in th
   pass them through push constants (≤ 128 bytes).
 - Structs shared between C++ and HLSL live in the feature's `shaders/XxxShared.h` with
   `static_assert` size checks.
+- CPU data of one frame goes through the frame's upload memory (docs/architecture.md §4.6):
+  `graph.AllocateUpload()` for data shaders read in place (`ByteAddressBuffer` at the allocation's
+  offset), `graph.UploadBuffer` / `UploadTexture` / `UploadToBuffer` for a Copy pass the graph orders.
+  Do not keep host-visible rings of your own. Loading and rebuilding stream through
+  `renderer::UploadQueue` (copy queue; `MakeAvailable` hands the resources to a queue).
 - Execute lambdas may run concurrently on worker threads: capture by value or read only immutable data.
 - Every new pass gets at least one Null backend test (`Headless` in `tests/TestHelpers.h`)
   asserting there are no validation errors.

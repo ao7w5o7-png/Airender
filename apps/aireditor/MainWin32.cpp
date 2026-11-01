@@ -1,12 +1,16 @@
 // aireditor: Win32 window + DXGI swapchain + Dear ImGui (Win32 / DX12 backends) around EditorApp.
 //
-//   aireditor [--scene NAME] [--shaders DIR] [--features a,b,...] [--no-vsync] [--dlss]
+//   aireditor [--scene NAME] [--shaders DIR] [--features a,b,...] [--no-vsync] [--no-dlss]
 //             [--dlss-mode dlaa|quality|balanced|performance|ultra] [--gpu-validation] [--no-validation]
-//             [--focus WINDOW] [--neural-textures off|load|sample]
+//             [--focus WINDOW] [--neural-textures off|load|sample] [--pix]
 //
-// --features replaces the feature chain (default pathtracer,tonemap); dlss is inserted after the
-// path tracer when enabled. --focus brings a window to front at startup (selects its dock tab),
-// e.g. --focus "Profiler (HTML)".
+// --pix loads PIX's GPU capturer before the device is created, so PIX (Attach) can capture the running
+// editor, and File > Capture GPU frame (PIX) writes the next frame's capture to out/captures; without
+// it PIX can only capture an editor it launched itself.
+// --features replaces the feature chain (default pathtracer,nrd,taa,tonemap). DLSS Ray Reconstruction is the
+// default denoiser: it is inserted after the path tracer in place of nrd and taa (--no-dlss keeps them; where
+// it cannot run, not an RTX GPU, the editor falls back to them). --focus brings a window to front at startup (selects
+// its dock tab), e.g. --focus "Profiler (HTML)".
 //
 // The HTML profiler panel is a WebView2 control (WebViewHost.cpp) in a child window over the
 // panel; the main window clips its children so the swapchain does not paint over it.
@@ -154,7 +158,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     editor::EditorOptions options;
     rhi::DeviceDesc deviceDesc{.backend = rhi::Backend::D3D12};
-    bool dlss = false;
+    bool dlss = true;
 #ifdef NDEBUG
     deviceDesc.enableValidation = false;
 #endif
@@ -190,6 +194,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             {
                 dlss = true;
             }
+            else if (arg == "--no-dlss")
+            {
+                dlss = false;
+            }
             else if (arg == "--dlss-mode" && i + 1 < argc)
             {
                 const std::string mode = Narrow(argv[++i]);
@@ -216,6 +224,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
             else if (arg == "--no-validation")
             {
                 deviceDesc.enableValidation = false;
+            }
+            else if (arg == "--pix")
+            {
+                deviceDesc.loadPixCapturer = true;
             }
             else if (arg == "--focus" && i + 1 < argc)
             {
@@ -286,6 +298,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         return 1;
     }
     gDevice = device.get();
+    // PIX's capturer (--pix, or PIX launched the editor) captures frames into files on request.
+    if (device->CanCaptureGpuFrames())
+    {
+        rhi::Device* captureDevice = device.get();
+        options.captureGpuFrame = [captureDevice](const std::filesystem::path& path)
+        { return captureDevice->CaptureGpuFrames(path, 1); };
+    }
     RECT client = {};
     GetClientRect(hwnd, &client);
     gWindow.width = u32(std::max<LONG>(client.right - client.left, 8));
@@ -324,6 +343,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand)
         if (dlss)
         {
             app.SetDlssEnabled(true);
+            const auto& active = app.GetActiveFeatures();
+            if (std::find(active.begin(), active.end(), "dlss") == active.end())
+            {
+                AIR_LOG(Warning, "Editor", "DLSS Ray Reconstruction is unavailable: denoising with NRD and TAA");
+                app.SetDlssEnabled(false);
+            }
         }
         auto last = std::chrono::steady_clock::now();
         bool running = true;

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <format>
 #include <memory>
 #include <sstream>
@@ -99,10 +100,17 @@ rhi::BufferHandle PassContext::Get(BufferRef buffer) const
 // RenderGraph: building
 // ===========================================================================
 
-RenderGraph::RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config, TransientResourcePool* pool)
-    : mDevice(device), mTasks(tasks), mConfig(config), mOwnerThread(std::this_thread::get_id()), mPool(pool)
+RenderGraph::RenderGraph(rhi::Device& device, TaskSystem* tasks, Config config, TransientResourcePool* pool,
+                         UploadAllocator* uploads)
+    : mDevice(device), mTasks(tasks), mConfig(config), mOwnerThread(std::this_thread::get_id()), mPool(pool),
+      mUploads(uploads)
 {
     mConfig.passesPerCommandList = std::max(1u, mConfig.passesPerCommandList);
+    if (!mUploads)
+    {
+        mOwnUploads = std::make_unique<UploadAllocator>(mDevice); // pages only once something is uploaded
+        mUploads = mOwnUploads.get();
+    }
 }
 
 RenderGraph::~RenderGraph()
@@ -110,6 +118,10 @@ RenderGraph::~RenderGraph()
     if (mCompiled && !mExecuted)
     {
         AIR_LOG(Warning, "RDG", "render graph compiled but never executed ({} passes)", mPasses.size());
+    }
+    if (!mUploadsEnded)
+    {
+        mUploads->EndFrame(0); // nothing was submitted: the frame's upload memory is free again
     }
 }
 
@@ -147,6 +159,78 @@ BufferRef RenderGraph::CreateBuffer(const rhi::BufferDesc& desc)
     r.bufferDesc.debugName = r.name;
     mResources.push_back(std::move(r));
     return {u32(mResources.size() - 1)};
+}
+
+UploadAllocator::Allocation RenderGraph::AllocateUpload(u64 size, u64 alignment)
+{
+    AIR_CHECK(!mUploadsEnded, "AllocateUpload after Execute() submitted the frame");
+    mUploadBytes.fetch_add(size, std::memory_order_relaxed);
+    return mUploads->Allocate(size, alignment);
+}
+
+BufferRef RenderGraph::UploadBuffer(rhi::BufferDesc desc, const void* data, u64 size)
+{
+    desc.size = std::max(desc.size, size);
+    desc.usage |= BufferUsage::CopyDst;
+    const BufferRef buffer = CreateBuffer(desc);
+    UploadToBuffer(buffer, 0, data, size);
+    return buffer;
+}
+
+void RenderGraph::UploadToBuffer(BufferRef buffer, u64 offset, const void* data, u64 size)
+{
+    CheckThread();
+    AIR_CHECK(buffer.id < mResources.size() && mResources[buffer.id].kind == ResourceKind::Buffer,
+              "UploadToBuffer: invalid ref");
+    const std::string name = mResources[buffer.id].name;
+    AIR_CHECK(size > 0 && offset + size <= mResources[buffer.id].bufferDesc.size,
+              "UploadToBuffer: {} bytes at {} are out of the bounds of '{}' ({} bytes)", size, offset, name,
+              mResources[buffer.id].bufferDesc.size);
+    const UploadAllocator::Allocation source = AllocateUpload(size, 16);
+    std::memcpy(source.cpu, data, size);
+    ++mUploadCount;
+    AddPass(
+        "Upload " + name, PassFlags::Copy, [&](PassBuilder& b) { b.Write(buffer, Access::CopyDst); },
+        [source, buffer, offset](PassContext& ctx)
+        { ctx.cmd.CopyBuffer(ctx.Get(buffer), offset, source.buffer, source.offset, source.size); });
+}
+
+TextureRef RenderGraph::UploadTexture(rhi::TextureDesc desc, const void* texels)
+{
+    CheckThread();
+    desc.usage |= TextureUsage::CopyDst;
+    desc.mipLevels = 1;
+    const TextureRef texture = CreateTexture(desc);
+    const bool volume = desc.dimension == rhi::TextureDimension::Tex3D;
+    const u32 layers = volume ? 1u : desc.depthOrArraySize;
+    const u64 rows = u64(desc.height) * (volume ? desc.depthOrArraySize : 1u);
+    const u64 rowBytes = u64(desc.width) * rhi::FormatBytesPerPixel(desc.format);
+    const u64 pitch = rhi::TextureCopyRowPitch(desc.format, desc.width);
+    // Each layer starts 512-byte aligned (D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT).
+    const u64 layerBytes = AlignUp(pitch * rows, 512);
+    const UploadAllocator::Allocation source = AllocateUpload(layerBytes * layers, 512);
+    auto* to = static_cast<u8*>(source.cpu);
+    const auto* from = static_cast<const u8*>(texels);
+    for (u32 layer = 0; layer < layers; ++layer)
+    {
+        for (u64 row = 0; row < rows; ++row)
+        {
+            std::memcpy(to + layer * layerBytes + row * pitch, from + (layer * rows + row) * rowBytes, rowBytes);
+        }
+    }
+    ++mUploadCount;
+    AddPass(
+        "Upload " + mResources[texture.id].name, PassFlags::Copy,
+        [&](PassBuilder& b) { b.Write(texture, Access::CopyDst); },
+        [source, texture, layers, layerBytes](PassContext& ctx)
+        {
+            for (u32 layer = 0; layer < layers; ++layer)
+            {
+                ctx.cmd.CopyBufferToTexture(ctx.Get(texture), 0, layer, source.buffer,
+                                            source.offset + layer * layerBytes);
+            }
+        });
+    return texture;
 }
 
 TextureRef RenderGraph::ImportTexture(rhi::TextureHandle texture, Access current, Access final)
@@ -291,6 +375,8 @@ void RenderGraph::Compile()
     mCompiled = true;
     mStats = {};
     mStats.passCount = u32(mPasses.size());
+    mStats.uploadCount = mUploadCount;
+    mStats.uploadBytes = mUploadBytes.load(std::memory_order_relaxed);
 
     CullPasses();
     BuildBatches();
@@ -967,6 +1053,10 @@ u64 RenderGraph::Execute()
     {
         mDevice.DestroyHeap(mTransientHeap);
     }
+    // Passes may have allocated while they recorded; the frame's upload memory comes back after its fence.
+    mStats.uploadBytes = mUploadBytes.load(std::memory_order_relaxed);
+    mUploads->EndFrame(fence);
+    mUploadsEnded = true;
     return fence;
 }
 
@@ -1084,6 +1174,8 @@ json::Value RenderGraph::DumpJson() const
     stats["transientHeapsCreated"] = mStats.transientHeapsCreated;
     stats["transientResourcesCreated"] = mStats.transientResourcesCreated;
     stats["transientResourcesReused"] = mStats.transientResourcesReused;
+    stats["uploadBytes"] = mStats.uploadBytes;
+    stats["uploads"] = mStats.uploadCount;
 
     json::Value passes = json::Value::MakeArray();
     for (u32 p = 0; p < mPasses.size(); ++p)

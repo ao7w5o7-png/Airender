@@ -57,6 +57,8 @@ json::Value ToJson(const rhi::MemoryStats& stats)
         m["usedBytes"] = s.usedBytes;
         m["allocations"] = s.allocationCount;
         m["dedicated"] = s.dedicatedCount;
+        m["evictedHeaps"] = s.evictedHeapCount;
+        m["evictedBytes"] = s.evictedBytes;
     }
     out["locations"] = std::move(locations);
     json::Value pools = json::Value::MakeArray();
@@ -77,6 +79,7 @@ json::Value ToJson(const rhi::MemoryStats& stats)
             h["used"] = heap.usedBytes;
             h["allocations"] = heap.allocationCount;
             h["dedicated"] = heap.dedicated;
+            h["resident"] = heap.resident;
             heaps.Push(std::move(h));
         }
         p["heaps"] = std::move(heaps);

@@ -5,6 +5,26 @@
 using namespace air;
 using namespace airtest;
 
+// Parameters added after Group() belong to it (the editor folds them under it; reports list it); those added
+// before any are the main ones.
+TEST(Parameters_Groups)
+{
+    renderer::ParameterSet params;
+    u32 a = 0;
+    u32 b = 0;
+    bool c = false;
+    params.Add("main", &a, "a main parameter");
+    params.Group("Advanced");
+    params.Add("tuning", &b, "a tuning");
+    params.Add("check", &c, "a check");
+    const auto& entries = params.Entries();
+    EXPECT(entries.size() == 3 && entries[0].group.empty());
+    EXPECT(entries[1].group == "Advanced" && entries[2].group == "Advanced");
+    const json::Value out = params.ToJson();
+    EXPECT(out.Find("main")->Find("group") == nullptr);
+    EXPECT(out.Find("tuning")->Find("group")->AsString() == "Advanced");
+}
+
 TEST(Parameters_ParseValidateAndVersion)
 {
     renderer::ParameterSet params;

@@ -428,6 +428,14 @@ void GiSpatialPass(uint2 pixel)
     {
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[g.accumulation];
         float3 air = CameraAirTransmittance(f, r.position);
+        // FrameData::fireflyClamp, as the paths' indirect light.
+        float luminance = Luminance(indirect * air) * f.exposure;
+        if (f.fireflyClamp > 0.0f && luminance > f.fireflyClamp)
+        {
+            float keep = f.fireflyClamp / luminance;
+            indirect *= keep;
+            indirectDiffuse *= keep;
+        }
         accumulation[pixel] += float4(indirect * air * float(f.samplesPerPixel), 0.0f);
         if ((g.flags & kReSTIRSignals) != 0u)
         {

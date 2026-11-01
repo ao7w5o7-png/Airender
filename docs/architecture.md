@@ -105,6 +105,10 @@ Files: `src/rhi/include/air/rhi/`
    backend also validates that each barrier's `before` matches the resource's real state and emits
    a `VALIDATION:` line when it does not. AI can see what a frame did, and what went wrong,
    without looking at a screen.
+6. **Indirect dispatch**: `CommandList::DispatchIndirect(args, offset)` reads the group counts (three
+   u32) from a buffer created with `BufferUsage::Indirect`, which the pass declares as
+   `Access::IndirectArgs` (D3D12: `ExecuteIndirect` with one dispatch command signature). The Null
+   backend validates the usage and that the buffer is in `IndirectArgs` when the dispatch executes.
 
 ### 3.2 Backends
 
@@ -117,7 +121,8 @@ Files: `src/rhi/include/air/rhi/`
 ### 3.3 Queues
 
 There are `Graphics`, `Compute` and `Copy` queues. The render graph submits to Graphics, and to
-Compute for passes flagged `PassFlags::AsyncCompute` (§5.4).
+Compute for passes flagged `PassFlags::AsyncCompute` (§5.4); `renderer::UploadQueue` streams data on
+Copy (§4.6).
 
 - `Device::Submit(queue, lists)` returns the fence value the submission signals on its queue.
   `Device::QueueWait(waiter, signaler, value)` makes one queue wait on the GPU until another
@@ -219,8 +224,31 @@ GpuMemoryAllocator           thread-safe; one pool per memoryTypeKey, one mutex 
 - **TLSF** (Two-Level Segregated Fit): constant-time allocation and free with low fragmentation,
   a common choice for GPU allocators in game engines. It only manages offsets and never touches
   GPU objects, so it can be stress tested on its own (`Tlsf_RandomStress`).
-- Empty heaps: each pool keeps at most one empty heap to avoid create/destroy thrashing.
+- Empty heaps: each pool keeps at most one empty heap to avoid create/destroy thrashing; in a
+  `DeviceLocal` pool it is evicted until an allocation needs it (§4.5).
 - Upload / Readback use smaller blocks (64 MiB) because they consume system memory / BAR space.
+- Placement alignment: D3D12 places a buffer at 64 KiB granularity, so every small buffer (a
+  mesh's indices, vertices, BLAS) would take 64 KiB. Where the driver reports
+  `D3D12_TIGHT_ALIGNMENT_TIER_1`, every resource is created with
+  `D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT` and sized by `GetResourceAllocationInfo`: buffers take
+  their own size at 256-byte alignment (the floor constant buffer views, raw views and
+  acceleration structures need), textures what the driver allows (packing them is optional for
+  drivers). This applies to the render graph's transients too. The device log line says whether it
+  is on (`tight alignment yes`); on Sponza it returns about 14 MiB of the buffer heap.
+- Without tight alignment (or with `aircli render --no-tight-alignment`, `DeviceDesc::tightAlignment
+  = false`, to test it), small buffers that need no resource state of their own are packed into
+  shared buffers, ranges of a TLSF per block (`PackedPool`; blocks start at 256 KiB and double up to
+  4 MiB): `BufferUsage::Immutable` device-local buffers, host visible buffers (their heap's state
+  is fixed) and acceleration structures (fixed state, UAV barriers). A packed buffer's views,
+  copies and GPU address add its offset in the shared buffer; it never gets a transition barrier.
+  `Immutable` is the contract that makes that safe under legacy barriers: the buffer is written
+  only on the copy queue (`renderer::UploadQueue`; `Scene` uploads all its buffers so), then only
+  read. Buffers are promoted from `COMMON` to any combination of read states on first use and
+  decay back after every `ExecuteCommandLists`, and they allow one queue to write a range while
+  others read different ranges. A copy into an `Immutable` buffer on another queue fails a check
+  (D3D12) or reports `VALIDATION` (Null backend). Small textures that are no render target or depth
+  buffer are placed at 4 KiB (`D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT`; their most detailed mip
+  fits in 16 standard 4 KiB tiles). On Sponza this returns about 9 MiB.
 - Statistics: `Device::GetMemoryStats()` reports heaps / reserved bytes / used bytes / allocation
   count / dedicated count per memory type.
 
@@ -257,6 +285,8 @@ or `aircli render --no-transient-pool` turns it off):
   and the graph patches the next first barrier's `before` to it. A transient first used on the
   compute queue that a frame would leave in a graphics-only state ends that frame in common
   (a final barrier), or the compute queue could never take it back.
+- a heap unused for 30 frames (`Config::evictAfterFrames`) is evicted (§4.5) and made resident
+  again when a frame takes it; frames prefer resident heaps.
 - heaps and resources unused for 120 frames are released; FrameRunner calls `Trim()` sooner when
   the process uses over 95% of its VRAM budget (checked every 120 frames).
 
@@ -270,7 +300,111 @@ per frame on the CPU instead of 5.7 ms, two 48 MiB heaps instead of a 41 MiB hea
 ### 4.4 Deferred release
 
 `Destroy*` only records the request; `EndFrame()` releases objects recorded `framesInFlight`
-frames ago, so the GPU never touches freed memory.
+frames ago, so the GPU never touches freed memory. The graphics and compute queues' work is part of
+the frames; the copy queue's is not (§4.6): whoever submits copies keeps their resources alive until
+they are done.
+
+### 4.5 Residency
+
+Memory the process holds counts against its video memory budget (`MemoryStats::local`) while it
+is resident. Over the budget the OS demotes memory to system memory, and every pass touching it
+then runs at PCIe bandwidth. Memory that no frame needs for a while is therefore paged out on
+purpose, and paged back in before it is used:
+
+| | D3D12 | Null |
+|---|---|---|
+| `Device::Evict(heaps)` | `ID3D12Device::Evict`, deferred like a release until the GPU has finished the frames that may use the heap | the same bookkeeping; a barrier on a resource in an evicted heap is a `VALIDATION:` error |
+| `Device::MakeResident(heaps)` | `ID3D12Device3::EnqueueMakeResident` signals a residency fence that every queue waits for on the GPU: the CPU does not block (without `ID3D12Device3`, `MakeResident` blocks) | cancels a pending eviction, as on D3D12 |
+| priority | video memory heaps get `D3D12_RESIDENCY_PRIORITY_HIGH`: when other processes fill the GPU, idle memory goes before ours | — |
+
+- The unit is a heap: with bindless resources a command list does not know what its shaders will
+  read, so residency is decided per heap by the code that knows a heap is idle, not per command
+  list. Who evicts what:
+  - the render graph's transient pool: heaps no frame took for 30 frames (`heapsEvicted`,
+    `heapsMadeResident`, `evictedBytes` in the frame JSON's `transientPool`), e.g. after a resize,
+    or once an accumulating path tracer has converged and stops rendering;
+  - `GpuMemoryAllocator`: the spare empty heap of each `DeviceLocal` pool (a whole 256 MiB block),
+    paged in when the resident heaps are full. Host visible pools stay resident (they are mapped).
+- An eviction can be cancelled for free: `MakeResident()` before the deferred page-out ran leaves
+  the heap where it was. After the page-out the OS may still keep the memory in place while nothing
+  else wants it, so a page-in is cheap until there is real pressure.
+- `MemoryStats::perLocation[...].evictedHeapCount / evictedBytes`, `PoolStats` heaps' `resident`
+  and `ResourceInfo::resident` (heaps) show what is paged out, in the report JSON, the profile
+  page and the editor's memory panel. The `[Residency]` lines of the captured command stream name
+  the heaps the application evicted or made resident.
+
+### 4.6 Uploads: the frame's upload memory and streaming on the copy queue
+
+CPU data reaches the GPU in three ways, by how long it lives and how much of it there is:
+
+| | What | For |
+|---|---|---|
+| `RenderGraph::AllocateUpload(size)` | linear allocation in the frame's upload memory (`rdg::UploadAllocator`) | constants and tables of one frame, read in place by shaders |
+| `RenderGraph::UploadBuffer` / `UploadTexture` / `UploadToBuffer` | the same memory, copied into a device-local resource by a `Copy` pass "Upload <name>" | data a frame writes into transient or persistent resources, ordered against the passes around it |
+| `renderer::UploadQueue` | a ring of staging memory, copied on the copy queue | loading and rebuilding: scene geometry and textures, volumes, clouds |
+
+**The frame's upload memory** (`rdg::UploadAllocator`, owned by FrameRunner and handed to every
+frame's graph; a graph without one makes its own and releases it after `Execute()`):
+
+- pages of 4 MiB of `DeviceLocalHost` memory (D3D12 `GPU_UPLOAD`, video memory the CPU writes over
+  ReBAR; `UPLOAD` without it), each with one raw bindless view. An allocation bumps an offset in the
+  frame's current page; one larger than a page gets a page of its own, released after the frame.
+- `Execute()` ends the frame: its pages come back once the graphics fence of the frame's last
+  submission has passed, so the frames in flight write different pages and nothing is overwritten
+  while the GPU reads it. Pages unused for 120 frames are released.
+- `Allocate` is thread-safe: a pass may allocate while it records (`Execute` hands the pages back
+  after the last command list is recorded).
+- Shaders read an allocation as `ByteAddressBuffer` at its byte offset (`Allocation::srv`,
+  `Allocation::offset`, both through push constants), e.g. probe GI's `GiFrame`
+  (`LoadFrame(frameData, frameOffset)`: `buffer.Load<GiFrame>(offset)`, the same layout as a
+  structured buffer's element). Such data never changes while the GPU runs the frame, so passes do
+  not declare it.
+- `RenderGraph::Stats::uploadBytes` / `uploadCount`, and FrameResult's `uploadMemory` (pages, bytes,
+  allocations, pages created and released), show what a frame uploads.
+
+This replaces the host-visible rings of `framesInFlight + 1` slots (`DeviceLocalHost` buffers a
+feature wrote into directly): with the allocator a feature keeps no per-frame buffers and needs no
+slot arithmetic. The scene's material, light and sky rings (written outside the graph, by
+`Scene::Update`) still are such rings.
+
+**Streaming** (`renderer::UploadQueue`, thread-safe):
+
+- `WriteBuffer` / `WriteTexture` copy the data into a ring of staging memory (64 MiB of `UPLOAD`
+  memory) at once and record the copy; batches are submitted to the copy queue at `Submit()` and
+  whenever 8 MiB have accumulated, so the copy engine runs while the CPU fills the ring. When the ring
+  is full the writer waits on the CPU for the oldest batch (`Stats::cpuWaits`, `waitMs`): memory
+  stays bounded however much is streamed. A write larger than the ring gets its own staging buffer.
+- Each write returns a ticket (its batch). `IsComplete(ticket)` polls; `WaitOnGpu(queue, ticket)`
+  makes another queue wait on the GPU; `WaitOnCpu(ticket)` blocks.
+- The copies leave the resources in `Access::None`: the users transition them on their queue after
+  waiting. `MakeAvailable(queue, access)` does both for everything written since its last call: one
+  GPU-side wait and one list of transitions. Resources written must be idle (in `Access::None`, no GPU
+  work using them); destroying one with copies in flight is an error, so the queue's destructor
+  waits for all of them.
+- On D3D12 the copy queue's lists carry no transitions: resources there are promoted from `COMMON`
+  to the copy states and decay back after the submission (an explicit `COPY_DEST` makes
+  `CopyTextureRegion` fail on that queue). The Null device still tracks the transitions, so its
+  cross-queue validation (§3.3) catches a use that did not wait for the copies.
+- The copy queue is outside the frames (§4.4): frame pacing does not wait for it, so a long stream
+  never stalls the frame loop.
+
+`Scene` streams everything through its own `UploadQueue`: the constructor writes the textures and
+the geometry, `MakeAvailable(Graphics, SRVCompute)` hands them over, and the acceleration structures
+are built on the graphics queue after that wait, without the CPU waiting for anything; `Update()`
+streams what it rebuilds (aerial perspective, clouds, volumes) the same way, and the next frame waits
+for those copies on the GPU. Before, every texture was a synchronous upload (a staging buffer, a
+submission and a CPU wait each) and the geometry went through one staging buffer the size of all of
+it. Measured on an RTX 5070 (release, no debug layer), the CPU time to load the scene into GPU memory:
+
+| Scene | Size | Before | Streamed |
+|---|---|---|---|
+| sponza | 201 MiB | 115 ms | 80 ms |
+| helmets | 238 MiB | 104 ms | 79 ms |
+| terrain | 56 MiB | 70 ms | 60 ms |
+
+None of them waited for staging memory: the copy queue kept up with the CPU. The synchronous helpers
+of `Transfer.h` (`CreateBufferWithData`, `CreateTextureWithData`, readbacks) stay for one-off data
+such as a feature's tables at initialization.
 
 ---
 
@@ -620,7 +754,22 @@ first surface reflects (§8.11), for the real-time volumes (§8.13) 11 their mar
 adaptive sampling rate, 13 the volumes per ray, and 14 the neural coat (§8.17): blue where the
 clear coats' network shades the first surface, green / red where it brightens / darkens the
 analytic approximation towards the mirror direction (full at 2x / 0.5x), purple for a coat another
-model evaluates, grey elsewhere. `debugScale` scales the distance and heatmap views. `furnace=1` turns every
+model evaluates, grey elsewhere, and 15 the light `probe_gi` must add to a frame whose GI it renders (the
+radiance less the first surface's direct light and emission, plus the sky the first bounce sees: its
+reference, §8.21). 16 and 17 split that light by the first surface's lobes as if they were white, without
+the air in front: 16 the diffuse lobe's light divided by the diffuse albedo (the irradiance / pi; 0
+without a diffuse lobe, e.g. on metals), 17 the specular lobes' divided by their albedo (the guides'
+split sum), `probe_gi.view=2` / `3`'s references. The path splits what it found beyond the first vertex
+by the share of the BSDF sample's weight its diffuse lobe gave (as the denoisers' signals do), less what
+that sample reached directly of the emitters and the sun; ReSTIR and the radiance cache, which do not
+split by lobe, stay off in both views. In the white furnace both are 0.18 (cornell_box: medians 0.177,
+like view 15's). In real time with a denoiser of the signals (nrd) the views are denoised: the signals then
+carry these two lights instead of the lit view's, the path tracer sets `slots::kSignalView` (1 diffuse, 2
+specular) and NRD's composite shows that signal alone, denoised, before its albedo (`NRD.Composite`'s
+views 2 / 3); accumulating, they converge to the reference themselves. The editor lists the views in two
+menus: those of the surfaces and volumes any renderer could show (normals, base color, roughness, metallic,
+depth, the volume march's) and the path tracer's own (intersections, bounces, direct / indirect light, the
+radiance cache, the external GI and its lobes). `debugScale` scales the distance and heatmap views. `furnace=1` turns every
 material white and every emitter off with a uniform environment, so any visible structure is an
 energy error.
 
@@ -631,7 +780,7 @@ were added:
 
 | Stage | Resolution | Writes | Features |
 |---|---|---|---|
-| `Scene` | render (`FrameContext::renderWidth/Height`) | `FrameContext::sceneColor` | pathtracer, nrd |
+| `Scene` | render (`FrameContext::renderWidth/Height`) | `FrameContext::sceneColor` | pathtracer, probe_gi, nrd |
 | `Upscale` | render -> output | `FrameContext::output`, sets `outputWritten` | dlss, taa |
 | `Post` | output (`FrameContext::width/height`) | `FrameContext::output` in place | tonemap, example |
 
@@ -659,6 +808,9 @@ a parameter switched off consumes none), and producers skip what nobody consumes
 | `kRealTime` | pathtracer | The frame holds its own jittered samples only (not accumulated) |
 | `kJitterX/Y`, `kHistoryReset` | pathtracer | Sub-pixel jitter; history is invalid this frame |
 | `kOutputIsDisplay` | pathtracer | Output is a display-referred debug view: do not tonemap or denoise |
+| `kExternalGi` | (consumed by probe_gi) | Another feature renders the indirect light: the path tracer stops after the first surface's direct light and leaves the sky to it (§8.21) |
+| `kEmission` | pathtracer (when consumed) | The first surface's emission, which a GI's reflected-light history must not count |
+| `kExposure`, `kFurnace` | pathtracer | Radiance -> `sceneColor` factor; the white furnace is on |
 
 - **dlss** (Windows, D3D12, `AIR_WITH_DLSS`): NVIDIA DLSS Ray Reconstruction (NGX DLSS-D), the
   Upscale stage: denoises `sceneColor` with the guides above and writes the output. The NGX mode
@@ -1474,7 +1626,7 @@ into an image:
 
 | Chain | Features | What it denoises |
 |---|---|---|
-| default (editor) | `pathtracer,nrd,taa,tonemap` | NRD the surfaces' reflected indirect light, TAA the edges and the direct light; the volumes filter themselves (§8.13) |
+| default (editor) | `pathtracer,nrd,taa,tonemap` | NRD the surfaces' reflected indirect light and the area lights' diffuse direct light, TAA the edges and the rest of the direct light; the volumes filter themselves (§8.13) |
 | DLSS | `pathtracer,dlss,tonemap` | Ray Reconstruction the whole frame (§8.5), also anti-aliasing and upscaling |
 
 A feature that consumes `kColorBeforeTransparency` denoises the whole frame: nrd and taa then stand
@@ -1485,12 +1637,22 @@ and specular indirect light separately, divided by their albedos, with the lengt
 brought it. `TracePath` (with `kFlagSignals`) splits the light its first vertex reflects beyond its
 next event estimation by the diffuse part of the BSDF sample it continued with
 (`BsdfSample::diffuseWeight`), a medium's scattering as diffuse; its own emission, its direct light
-and a miss's sky are in neither. ReSTIR GI splits its shading alike and adds it to the signals.
-The direct light (next event estimation, ReSTIR DI) passes NRD: filtered by it, the shadows spread
-into the lit surfaces around them (edge-stopping by normals and depth does not see a shadow's edge),
-and the frame lost 2% (`textured`) to 10% (`many_lights`) of its light; without it the frame is also
-closer to the reference (`textured`: one frame's RMSE 0.019 -> 0.0065), its residual noise left to
-TAA. The albedos (`GuideAlbedos`, `Bsdf.hlsli`) are the lobes' directional albedos as the BSDF weighs
+and a miss's sky are in neither. ReSTIR GI splits its shading alike and adds it to the signals, and so
+does probe_gi (§8.21) with its irradiance and specular light, where it finds them on the blackboard.
+The direct light (next event estimation, ReSTIR DI) passed NRD at first: all of it filtered, the
+shadows spread into the lit surfaces around them (edge-stopping by normals and depth does not see a
+shadow's edge) and the frame lost 2% (`textured`) to 10% (`many_lights`) of its light. Left to TAA,
+though, the shadows of area lights stayed grainy in motion. With `pathtracer.denoiseDirect` (on by
+default, `kFlagDirectSignals`; the editor's "Denoise direct light") the diffuse lobe's part of the
+emissive triangles' direct light goes to the diffuse signal too, from the trace's NEE and from ReSTIR
+DI's shading (`LightPoint::diffuse`), and NRD smooths their shadows: the temporal noise of a pixel
+0.0010 -> 0.0008 on `cornell_box`, 0.0134 -> 0.0106 on `many_lights`; its energy against
+accumulation -0.24% -> -0.44% and -2.7% -> -4.2%, `veach_mis` unchanged (-1.0%). Not the specular
+part: the specular filter smeared the sharp highlights of small lights (`veach_mis` -1.0% -> -6.1%,
+blocks +271%); nor the sun's: its sharp shadows washed out entirely, and a disc of half a degree
+casts them nearly noise free. (The shadows lost on `many_lights` are its small lights' concentrated
+light spread over surfaces of other albedos; RELAX's fast-history clamp, luminance edge stopping and
+pre-pass blur, now `nrd.fastHistorySigma`, `phiLuminance`, `prepassBlur`, do not remove it.) The albedos (`GuideAlbedos`, `Bsdf.hlsli`) are the lobes' directional albedos as the BSDF weighs
 them (the diffuse lobe's `1 - Es(wo)`, a coat's inner part). The signals are exposed like sceneColor
 and dimmed by the air like it, but not by the volumes in front: those pass `kSurfaceTransmittance`.
 
@@ -1985,6 +2147,283 @@ Validation (`tests/SubsurfaceTests.cpp`, scene `subsurface`):
 - Not modelled: refraction at the boundary (the exit lobe is the dielectric's diffuse one), single
   scattering's glints, a medium that varies inside (textured colours set the medium at x_i).
 
+### 8.21 Probe GI: indirect light without ray tracing
+
+`probe_gi` renders a real-time frame's indirect light, the sky's and what other surfaces reflect,
+without ray tracing hardware: its rays march a voxelized copy of the scene and the screen's depth. The
+path tracer still renders the first surface: its direct light (NEE / ReSTIR DI, the sun) and emission.
+When probe_gi consumes `slots::kExternalGi` the path tracer stops after that surface's BSDF sample and
+leaves the sky the first bounce sees to it (`kFlagExternalGi`; ReSTIR GI and the neural radiance cache
+are off); `pathtracer.debugView=15` is the reference of what probe_gi must add (§8.4). Chains:
+`pathtracer,probe_gi,taa,tonemap`, or with `nrd` before `taa`. (`src/features/probe_gi`,
+`shaders/ProbeGiShared.h`.) Under nrd the GI joins the denoiser's signals (`GiComposite.hlsl` adds
+each lobe's light to `kDiffuseSignal` / `kSpecularSignal`, §8.14), so NRD filters it with the rest:
+added to the frame alone, behind the probes' and pixels' own histories, only TAA smoothed it, and a
+moving camera left grain in the shadows. A static camera's displayed frame, sponza at 1280 x 720
+(render scale 0.67), last 24 of 200 frames: noise 1.24% -> 0.86% (the ray-traced GI's 0.99%), 16 x 16
+block flicker 0.50% -> 0.24% (0.25%); cornell_box 0.53% -> 0.24%. NRD costs the GI its light as it
+does the ray-traced GI's: the frame's mean -0.9% (sponza, RELAX; REBLUR -1.6%), -1.2% (cornell_box).
+
+- **Voxel cascades** (`VoxelScene.cpp`): `cascades` (6) boxes of 128^3 voxels around the camera, the
+  finest voxel `voxelSize` (5 cm), each cascade's twice the last's, stored toroidally (a voxel at its
+  world coordinates mod 128). Each holds an unsigned distance field (R8, exact within 2 voxels,
+  trilinear); per brick of 4^3 voxels the Chebyshev distance in bricks to the nearest brick a surface
+  crosses; and its surface voxels (a triangle passes within half a diagonal of the centre), sparse: an
+  index texture into a pool of 104-byte `SurfaceVoxel`s with up to six faces (+x .. -z). A face keeps the
+  albedo the voxel shows that way (what the BSDF reflects in all, averaged over directions: a
+  dielectric's coat 0.08 plus 0.92 times its base, a metal its mean Fresnel), how much of the voxel it
+  covers, the averaged normal and where the surface lies along it from the centre, the light it
+  reflects that way and, of that, its direct light (RGB9E5, written with stochastic rounding: rounded to
+  the nearest, a value blended at 0.2 stops moving once a step is below half a unit of its mantissa, short
+  of what it converges to). Both sides of a triangle reflect; a back side counts a quarter.
+- **Voxelization** (`Voxelize*.hlsl`, on the GPU from the scene's triangles, instances culled on the
+  CPU by their boxes): a work item per triangle and brick its band reaches (flagged where it may cross
+  the brick's voxels), exact point-triangle distances by atomic minimum, a slot per surface voxel, the
+  faces' attributes weighted by closeness and by the triangle's area (a lamp's 300 small triangles must
+  not outweigh the floor around it), textures at the voxel's footprint (each set's GI texture, at most
+  256^2 with mips), cutouts through their alpha. With a band of 4 voxels (a brick) every small triangle
+  reached 27 bricks and sponza's coarse cascades lost 80% of their work items (light through walls,
+  +11% GI); at 2 voxels it reaches about 7.
+- **Moving with the camera**: a cascade's origin snaps to 8 voxels and moves when the camera is 8
+  voxels from its centre (with 16 and 24 a camera moving ahead had 40 of the finest cascade's voxels before
+  it, not 64: its probes' rays went on in the coarser, darker cascade sooner, and the frame was 3% darker than
+  a still camera's there; twice as many, half as large updates cost 0.1 ms a frame). It then voxelizes only the bricks it did not cover (`scroll`): the slots of
+  the voxels it left go to a ring of free slots that new ones take first, and new voxels start from the
+  next coarser cascade's light until they are lit; they also go into a ring (`kFresh*`) that a second
+  dispatch of the lighting (`ProbeGi.VoxelLight.Fresh`, only after a move) lights every frame for their
+  first 8 frames, beside the budget (moving 3 cm a frame through sponza, the last frame against a static
+  camera's there: -4.1% before, -2.2%; lighting every voxel every frame, the bound, +0.6%). Sponza at
+  1920 x 1080 moving 6 cm a frame: 0.6 - 1.8
+  ms per move against 2 - 19 ms for a whole cascade (the first frame builds all six, 33 ms); the voxels
+  equal a whole rebuild's. The pools grow: every cascade's counters are copied each frame into a
+  readback ring, and where surface voxels or work items did not fit, the pool or the work buffer
+  doubles and the cascade is built again (sponza's second cascade holds 262 000 at one end of the nave).
+- **Tracing** (`VoxelTrace.hlsli`): from the finest cascade holding the origin (or a given coarser
+  one) on to the next coarser one where it leaves a box (or runs out of 48 steps); empty bricks are
+  leapt over, the others sphere traced. Under 0.35 voxels is a hit; under 0.65 the surface voxel's
+  planes decide (a hit within 0.1 voxels of one): the filtered field closes a gap of a voxel, the planes
+  keep a door ajar open. The light at a hit: the 2 x 2 x 2 voxels around it, each through its faces
+  towards the ray, weighed by facing and coverage. Rays from a visible surface start half a voxel off it
+  and their hit distances ramp up from 0 over the first voxel (`gHitRampVoxels`), so that the surface's
+  own band is no hit (door -23.2% -> -20.9%; with the ramp as a branch of its own the probe trace took twice
+  as long: it is a factor on the distances).
+- **The voxels' light** (`VoxelLight.hlsl`, one dispatch for every cascade, a thread per face): at a
+  point jittered over the face's surface, the sun (a direction in its disc) and one emissive triangle
+  resampled from 8 drawn by power (Talbot et al. 2005, by their unshadowed luminance there: one draw
+  mostly picked a light far away, and many_lights' voxels took on random colours), each with a shadow
+  ray through the voxels that stops a voxel (of the cascade it reaches the light in) short of the
+  emitter; plus one cosine-weighted radiosity ray, whose hit gives what that voxel reflected before:
+  every further bounce, over frames. The faces a wave lights (those of a few neighbouring voxels: slots
+  follow the voxelization's order) share their estimates: each takes the mean of those that show the same
+  surface (axis, normal within 0.9, plane within half a voxel, within 1.75 voxels), several rays for one.
+  A face averages its first 15 estimates, then blends new ones in at `lightingBlend` (0.2), its direct
+  light at a quarter of that. A frame lights `lightingBudget` (8192) voxels of each cascade, cycling, those
+  of a coarse cascade within the finer one 8 times less often; a change of the sun, the sky or the
+  emitters (`relights` in the status) lights all of them and the cache's probes again at once. The noise
+  of a coarse voxel, which the rays of many probes hit, moved the whole image's light: many_lights' GI
+  drifted by 3% over a hundred frames; with the shared estimates by 1.2%. (The direct light's slower blend
+  alone left it; slowing the whole blend to 0.05 removed it but the bounces then converge too slowly:
+  door -29%.)
+- **World-space probes** (the radiance cache, `Cache*.hlsl`): over every cascade a lattice of 16^3
+  probes (one per 8^3 voxels), each an 8 x 8 octahedral map of the light arriving there with its rays'
+  distance moments, and its irradiance as spherical harmonics up to band 2 (Ramamoorthi and Hanrahan
+  2001); 128 probes per level and frame; visibility by Chebyshev's bound on the moments (Majercik et al.
+  2019); a probe whose rays mostly hit backs is inside a mesh. It lights the pixels no screen probe
+  covers. As the far field of rays (`cacheDistance` for the screen probes', `radiosityDistance` for the
+  voxels') it measured worse than tracing on, so both are 0: the coarse cascades make long rays cheap
+  (sponza's probe trace 1.76 ms traced to the end, 2.23 ms ending in the cache at 8 spacings) and the
+  interpolated probes darken (many_lights converged, 1200 frames: -17% against -3%); the voxels'
+  radiosity through it also converges as slowly as its probes update (door at 300 frames -46%, -25%
+  traced to the end). Measured again as a far field that excludes the near field (the probes' rays start
+  a cell's diagonal out, a ray traces 3.5 spacings itself and then looks the probes around its origin up
+  towards where it leaves a sphere of 2.6 spacings around each, without visibility weights, probes behind
+  the surface left out): still darker everywhere (sunset -12%, sponza -6%, many_lights -11%, door -27%):
+  8 x 8 directions and 32 frames between a probe's updates are too coarse, and a probe near a surface sees
+  its back beyond that start.
+- **Screen probes** (`Probe*.hlsl`): one per 16 x 16 pixel tile, at a pixel jittered per frame (R2);
+  its 8 x 8 rays cover the hemisphere of its normal (cosine-weighted, hemi-octahedral, jittered): first
+  along the depth buffer (16 steps over up to half the screen; a hit within 3% of a pixel's depth takes
+  the previous frame's reflected light there, the lit pixel less its emission, divided by exposure and
+  the transmittance in front, less the inscattering, where last frame's pixel showed that surface too,
+  its view depth within 2%, and not by the image's edge), then through the voxels, then the sky. The
+  rays are averaged with the 3 x 3 probes around per direction (`ProbeRayFilter.hlsl`,
+  `rayFilterRadius`): a neighbour on the probe's plane lends its cell that points the ray's way, weighed
+  by how far the point it found lies from the ray's direction as seen from the probe (0 at 10 degrees), its
+  distance clamped to the ray's. Averaging the harmonics instead (`filterRadius`, now 0) turned light that
+  one probe saw occluded and the next did not into light from every direction (16 x 16 blocks within 10%
+  of the reference: cornell_box 58% -> 78%, sunset 89% -> 95%, textured 74% -> 79%). The rays' light
+  becomes spherical harmonics, with the irradiance at the probe's own normal exact by quadrature (the
+  harmonics are off by -7% to +13% for light from one direction), blended over frames (below); each
+  pixel takes the 4 probes around it (by plane distance and normal; the distance from the plane the depth
+  buffer shows there, from its neighbours' positions: from a normal map's a probe a tile away on the same
+  wall missed it, and the pixels a moving camera saw lit by the search and the cache 0.7% -> 0.3%, sponza
+  moving sideways its grain's 90th percentile 2.2% -> 1.8%, 2.7% -> 2.3% in its darkest quarter; against the
+  path tracer alike, textured and sponza within 0.5%); where none fits, adaptive probes:
+  per tile, at a pixel jittered in each of its 2 x 2 quarters, the 4 probes around are weighed as the
+  gather weighs them, and where they fit less than 0.05 (and no probe the tile placed fits) a probe of
+  its own is placed and traced like the tiles' (`ProbeAdapt.hlsl`, `adaptiveProbes`; up to half as many
+  again, in rows after the tiles', without history or neighbours), which the pixels of that tile and the
+  8 around take by fit and distance; then a 4 x 4 search, the cache last (`view=8` shows the pixels the
+  search and the cache light: sponza 6.2% and 3.3% without the adaptive probes, 1.2% and 1.1% with them;
+  its 16 x 16 blocks' 95th percentile error +47% -> +39%; 0.06 - 0.46 ms). Its rough specular light: two directions drawn from its GGX lobe (visible normals) per
+  probe, each the probe's filtered rays that way (bilinear over the cells), the harmonics' lobe where the
+  lobe leaves the probe's hemisphere (sponza's specular light, blocks within 10%: 34% -> 51%; the
+  harmonics' lobe was off for rough lobes as well, cornell_box +14.5% against -5.9%). Surfaces smoother
+  than roughness 0.4 trace their own reflections (`reflections`, `Reflection*.hlsl`): a ray per 2 x 2
+  pixels (the pixel in turn), drawn from the lobe and traced as the probes', resolved at full resolution
+  from the 3 x 3 rays around, each weighed by this pixel's lobe density towards its hit over the density
+  it was drawn with (Stachowiak 2015) and by its pixel's fit (mirror-like pixels without the density
+  ratio), blended in from roughness 0.4 down to 0.3 (the specular light of pixels below 0.4, 4 x 4 blocks
+  within 25%: cornell_box 65% -> 75%, textured 47% -> 60%; sponza, door, many_lights alike; 0.1 - 1.1 ms).
+  History: at least 1% a frame where the pixel stays (`staticBlend`, up to 128 frames), 3% from a pixel of
+  motion on (`temporalBlend`), 8% everywhere for 48 frames after the lights change, traced reflections 25%; reprojected where
+  depth and normal agree (the depth's tolerance widened on surfaces seen at a grazing angle), a frame where
+  no probe fitted at a quarter of that; stored rounded stochastically to half floats (rounded to the
+  nearest, a blend's step below half a unit stopped the history short of its mean: the white furnace
+  0.4% darker at 3%, 0.3% at 8%). The probes sit at another pixel of their tiles every frame, so what a
+  pixel interpolates between them changes with them: the probes' own history (`probeBlend`) does not
+  reach that noise, a longer one of the pixels does, most of all in dark recesses lit through a small
+  opening, whose light changes much from one place of a probe to the next (nor do the rays' filter radius
+  or lighting every voxel every frame: only 4 times the probes compared). Sponza's `view=2` through taa, a
+  static camera's last 60 of 400 frames, 8% / 3% / 1%: 16 x 16 blocks 1.48% / 0.58% / 0.26%, pixels' median
+  1.49% / 0.92% / 0.43%; its darkest tenth of pixels under the arcades, 90th percentile 6% / 4.8% / 2.5%; a
+  camera moving through it alike (20.7% / 20.7% / 19.1% from a static camera's there). A moving camera's
+  histories stay short whatever the blend (what comes into view; sponza moving sideways, the moving blend
+  8% -> 3% took the error between blocks only 3.0% -> 2.7%): where the blend is 2% or more, this frame's
+  irradiance is first averaged over the pixel's surface around it (12 pixels on a disk of 24 pixels, above
+  a blend of 8% times the square root of blend / 8%, at most 32, turned every frame, weighed by plane and
+  normal), against a still camera's there at 8%: blocks 3.5% -> 2.3%, grain within them 0.93% -> 0.50%, the
+  mean alike; a disk of 8 pixels gave 3.0%, of 32 traded the blocks for grain; 0.3 ms at 1280 x 720. What a
+  moving camera shows as noise is the change of a surface from one frame to the next, measured motion
+  compensated (the camera moving sideways, last frame's pixels moved by their parallax): with the disk the
+  moving blend came down 8% -> 3%, that change 0.27% -> 0.11% (still camera 0.02%), its 90th percentile
+  1.9% -> 1.0%, in the darkest quarter 1.5% -> 0.7%; against the path tracer there blocks 2.0% -> 1.8%, in
+  the darkest quarter 3.3% -> 3.4% (90th percentile 12% -> 13%); moving sideways, forward and turning at
+  once the frame lags a still camera's 7.2% -> 8.7% darker (at 8%, 3% of it the pixels' history's, 2.5% the
+  probes'; not the disk's). Compare a moving camera
+  with a still one at the same place: a different view's numbers are no baseline. Composited into
+  `sceneColor` times exposure and the air's and volumes' transmittance.
+- **Screen probes over frames** (`ProbeTemporal.hlsl`): a probe's harmonics are blended with those of last
+  frame's probe where its surface was (its position projected with last frame's camera: that tile's probe
+  when it lay on the probe's plane and faced its way, else the closest such probe of the 3 x 3 tiles
+  there), 1 / n over the first frames, then at least `probeBlend` (0.3); the probes and their harmonics
+  are ping-pong buffers. Since the pixels keep a long history where the camera stays, a still camera's noise
+  is the same without the probes' (sponza `view=2`: 16 x 16 blocks 0.24% / 0.26%), while under a moving camera
+  a long probe history darkened the frame (sponza moving 3.6 cm and 0.2 degrees a frame, voxels lit every
+  frame, against a still camera's converged frame there: -11.7% at 0.1, -6.0% at 0.3, -3.3% without; its
+  16 x 16 blocks 12.1% / 10.0% / 9.7% off; its grain, the pixels' error after the blocks', 0.97% / 1.07% /
+  1.33%). Why the history darkens (not the normal it is moved to, nor screen traces, nor the voxels' speed of
+  convergence: each measured) is open. What did not work: blending the 3 x 3 probes around by distance
+  in metres rejected every history on surfaces seen at a grazing angle (a tile on the screen spans many
+  tiles' width of a floor; the distance is now on the screen); blending several of last frame's probes,
+  whose positions jitter over their tiles, mixed neighbouring tiles' light in a little differently every
+  frame (6% noise of its own where the light changes across tiles) and, recursively, blurred it (cornell_box
+  -2.5%): one probe per tile keeps the histories apart; and importance sampling the rays by the probe's
+  light of last frame (half the rays by its 8 x 8 cells' luminance) changed nothing measurable (door
+  +4%, sponza +2%, many_lights -6% noise), so it is not used. Nor a history of the rays per direction
+  instead of the harmonics' (last frame's probe's cell pointing the same way): looked up bilinearly frame
+  after frame it diffused the light over the hemi-octahedral square, whose cells differ in solid angle
+  (sunset's bright horizon crept to the zenith, +18% over 60 frames), and a cell's mean light, however
+  looked up, loses how light and direction correlate within the cell (sunset +5%).
+- **Tried and dropped** (measured): voxel hits the camera sees taking last frame's image instead of the
+  voxels' light (cornell_box -6%, many_lights +11%: the image holds glossy surfaces' light towards the
+  camera); the probe trace split into a depth-buffer pass and a voxel pass over a list of the unfinished
+  rays (indirect dispatch, `rhi::CommandList::DispatchIndirect`): twice as slow, a wave of the list holding
+  the rays of two or three probes from different origins where a wave of the probe's group holds 32
+  neighbouring rays of one; every pass on the compute queue: no overlap, as the graph's first compute
+  batch waits for the graphics work recorded before it (the path tracer's trace). Not tried: rays drawn
+  over the whole sphere by the BRDFs of the tile's pixels (the probes trace their own normal's hemisphere,
+  pixels whose normal no probe shares take adaptive probes, and drawing the rays by the probes' light
+  measured nothing, above); classifying 8 x 8 tiles for indirect dispatches (the per-pixel passes leave sky
+  and rough pixels early: sunset's gather, half of it sky, 0.2 ms).
+- **Noise** (a static camera's last 24 of 400 frames, each pixel's trend removed, as the standard deviation
+  of the irradiance view `view=2` over its mean; and of the displayed frame of
+  `pathtracer,probe_gi,nrd,taa,tonemap`, 1280 x 720, against `pathtracer,nrd,taa,tonemap`): door's
+  irradiance 2.34% before the probes' history, 1.72% with it, its 16 x 16 blocks' flicker 1.52% -> 1.05%;
+  its displayed frame 0.0007 -> 0.0003, as the ray-traced GI's 0.0003. Sponza (0.0017, ray-traced
+  0.0014) and many_lights (0.0014, 0.0012) did not change: their remaining noise is the direct light's.
+  Without the pixels' history a probe's own noise is 13.6%, 4.3% with the probes'. The voxels' light is
+  noisier (door's `view=5`: 12.7% per pixel) but not what the probes show: lighting every voxel every frame
+  at a quarter of the blend with 4 radiosity rays halved it and left the probes' as they were. The white
+  furnace's 0.42% shows the rest: light that comes from a small part of the hemisphere. The pass costs
+  0.01 ms (sponza, 1920 x 1080). Moving 3 cm a frame through sponza, the last frame's 16 x 16 blocks are
+  off by 11.2% on average from a static camera's there (9.4% without the probes' history): the new voxels
+  still converging, in larger blotches.
+- Light kept in half floats is stored as nits / 256: next to a small lamp it reaches millions, which a
+  half float truncates on store.
+- **Views** (`probe_gi.view`): 1 the GI alone (against `pathtracer.debugView=15`), 2 irradiance, 3
+  specular light, 4 the voxels' albedo, 5 their light, 6 steps, 7 cascades, 8 probes, 9 the cache's
+  irradiance. TAA's history starts over when the view changes and then filters views 1 - 3 as it does the
+  frame: reset every frame, their edges flickered with the camera's jitter (sponza's `view=2` through taa:
+  16 x 16 blocks 1.5% -> 0.6%, the largest frame-to-frame step of a block 11% -> 0.6%). `multiBounce=0` leaves the voxels their direct light (one bounce, against the path
+  tracer's `maxBounces=2`).
+
+Validation (`ProbeGiTests.cpp` on the Null backend; on the GPU the GI view against the reference, 4096
+spp, 640 x 360, the mean of the last 100 of 400 frames of a static camera; before the changes of
+2026-10-29 in parentheses, one frame after 300):
+
+| Scene | Mean | Median 16 x 16 block | Blocks within 10% |
+|---|---|---|---|
+| cornell_box | -1.2% (-1.3%) | +0.8% | 78% (57%) |
+| door | -22.3% (-24.0%) | -23.6% | 3% (3%) |
+| sponza | -3.2% (-2.7%) | -4.1% | 50% (46%) |
+| textured | +5.9% (+5.3%) | +5.3% | 81% (73%) |
+| sunset | +0.3% (+0.2%) | +2.9% | 96% (84%) |
+| many_lights | +1.7% (-10.7%) | +0.0% | 75% (44%) |
+| picapica | +0.0% (+6.2%) | -2.7% | 66% (60%) |
+| terrain | +4.9% (-2.8%) | +4.3% | 83% (83%) |
+
+By lobe (`probe_gi.view=2` / `3` against `pathtracer.debugView=16` / `17`, 1024 spp, 640 x 360; mean,
+median 16 x 16 block, blocks within 10%; before in parentheses):
+
+| Scene | Diffuse irradiance | Specular light |
+|---|---|---|
+| cornell_box | +2.2%, +2.3%, 73% (60%) | -5.8%, -8.0%, 40% (+14.5%, 33%) |
+| door | -21.5%, -22.0%, 4% (2%) | -21.9%, -16.4%, 12% (-21.8%, 26%) |
+| sponza | -2.3%, -4.8%, 52% (53%) | +1.5%, +1.7%, 51% (+7.0%, 31%) |
+
+White furnace (`pathtracer.furnace=1`, the lit frame against the path tracer's): cornell_box -0.9%
+(every 16 x 16 block within -2.0%). A camera moving through sponza voxelizes the same voxels scrolling
+as rebuilding whole, its image within 1.4%. Over frames (sponza's GI view, no TAA): after 120 frames
+moving 3 cm a frame the GI is 2.5% darker than a static camera's at the end (median block -4.8%, no
+trails: the new voxels still converge); a static camera's consecutive frames differ by 3.8% per 16 x 16
+block.
+
+Cost at 1920 x 1080 (`--profile`, real time, 1 spp; RTX 5070): the ray-traced GI is the difference
+between `pathtracer,nrd,taa,tonemap` and the same with `maxBounces=1, restirGi=0`; probe_gi's is its
+passes in `pathtracer,probe_gi,taa,tonemap`:
+
+| Scene | Ray-traced GI | probe_gi | Frame with nrd: ray-traced GI / probe_gi |
+|---|---|---|---|
+| cornell_box | 5.7 ms | 1.4 ms | 10.8 / 6.5 ms |
+| door | 10.0 | 2.5 | 16.5 / 9.2 |
+| sponza | 15.9 | 3.7 | 21.9 / 9.1 |
+| textured | 7.6 | 2.9 | 12.7 / 7.3 |
+| many_lights | 9.0 | 4.3 | 17.6 / 12.4 |
+| sunset | 4.5 | 4.3 | 7.8 / 6.9 |
+| picapica | 11.6 | 3.4 | 21.5 / 12.5 |
+| terrain | 6.5 | 1.5 | 10.3 / 4.8 |
+
+(probe_gi's column as of 2026-10-29: the traced reflections are 0.1 - 1.1 ms of it, which `reflections=0`
+saves, the adaptive probes up to 0.5 ms, `adaptiveProbes=0`; the other columns from before.) Most of it is
+the screen probes' trace (0.2 - 1.3 ms) and the gather (0.2 - 0.8 ms, its specular samples); sunset's
+rays graze a ground that runs through every cascade (with 96 steps per cascade, 4.0 ms instead of 2.7,
+the images alike).
+
+Not modelled, or poorly:
+
+- Mirror-like reflections: traced at half resolution through the voxels, as sharp as the voxels (a 5 cm
+  voxel near the camera, coarser further) where the depth buffer cannot see; refraction not at all
+  (many_lights' glass).
+- Light through narrow openings: door's near room gets all its light through the gap beside the open
+  door, and the voxels pass too little of it: the gap-lit wall's direct light is 40% short, also with
+  the gap in the finest cascade and with the field's hit threshold lowered to 0.1 voxels (not yet
+  understood; the lit room's own direct light is right, its median block +2.7%).
+- Caustic paths (light by way of a glossy surface): the voxels are Lambertian.
+- Far detail (coarse cascades) and thin diagonal panels, whose two sides share axis faces.
+- Moving geometry: a change of the scene's instances voxelizes every cascade again (there is no edit
+  that moves an instance yet: `renderer::Scene` changes geometry only by a new `SceneDesc`).
+
 ---
 
 ## 9. Editor
@@ -2012,6 +2451,20 @@ Command line (default features `pathtracer,nrd,taa,tonemap`, real time where nrd
 new feature or an async compute pass in the editor; `--focus "Profiler (HTML)"` selects that
 window's dock tab at startup (handy for screenshots, as nothing else selects a tab without a click).
 
+GPU captures with PIX, through WinPixEventRuntime's `pix3.h` (cmake/AirThirdParty.cmake: `air_pix`,
+linked by the D3D12 backend only; `WinPixEventRuntime.dll` is copied next to every D3D12 executable):
+`aireditor --pix` loads PIX's GPU capturer (`PIXLoadLatestWinPixGpuCapturerLibrary`,
+`rhi::DeviceDesc::loadPixCapturer`) before the device is created, which PIX requires to attach to a
+running process: PIX's Attach then lists the editor for GPU capture. File > Capture GPU frame (PIX), or
+F11, writes the next frame's capture to `out/captures/<scene>-<N>.wpix` without PIX running
+(`rhi::Device::CaptureGpuFrames`, `PIXGpuCaptureNextFrames`: a frame ends at a present, so only the
+editor captures this way). Command lists' events are `PIXBeginEvent`s named after the render graph's
+passes, one colour per feature (the name up to its first '.'), and also mark CPU time in PIX's timing
+captures. Under the capturer Shader Model 6.10 is unavailable (the log shows linear algebra no), so
+the network kernels run in float32. `pixtool attach` refuses such a process (it attaches only to
+processes it launched); `pixtool open-capture X.wpix save-event-list events.csv` reads a capture.
+Use a Release editor (no debug layer by default) for captures.
+
 ### 9.1 Shader hot reload
 
 Saving an `.hlsl`/`.hlsli` (or a header it includes) in a running editor recompiles the shaders
@@ -2035,9 +2488,17 @@ that use it and shows the result within about 100 ms:
 shaders alone. (It does not write `<build>/shaders`: after editing shaders outside the editor, build
 the feature's `air_feature_<name>_shaders` target.)
 
-Shaders carry no debug information unless `-DAIR_SHADER_DEBUG_INFO=ON` (source in GPU debuggers):
-with it the driver's DXIL verifier prints, at every pipeline creation, the scopes DXC misplaces for
-loops in inlined functions, such as the ray queries' candidate loops of alpha cutouts.
+Shader debug information (`-DAIR_SHADER_DEBUG=pdb`, the default): every shader is compiled with `-Zi
+-Qstrip_debug -Fd <build>/shaders/pdb/`, its debug information and sources (with every header it
+includes) in `pdb/<hash>.pdb`, named after the shader's hash; the DXIL keeps only that name (its ILDN
+part, 56 bytes) and is otherwise the same as without. Hash names keep recompiles with the same command
+line (hot reload, `air.py shaders`) from overwriting a PDB another binary refers to. Add
+`<build>/shaders/pdb` to PIX's shader PDB search paths (Settings) for source-level shader debugging.
+`embed` (`-Zi -Qembed_debug`) puts the debug information in the DXIL instead: the driver's DXIL
+verifier then prints, at every pipeline creation, the scopes DXC misplaces for loops in inlined
+functions (such as the ray queries' candidate loops of alpha cutouts), and the preview compiler's
+Shader Model 6.10 shaders build without it; `off` has none. `-DAIR_SHADER_OPTIMIZE=OFF` adds `-Od`, so
+that every variable stays visible when stepping (slower shaders).
 
 ### 9.2 Profile report (HTML)
 

@@ -9,6 +9,9 @@
 //   * Placed resources: a transient described exactly like one an earlier frame placed at the same
 //     offset of the same heap reuses that resource and its bindless descriptors. The pool remembers
 //     the state the frame left it in; the graph's first barrier of the next frame starts there.
+//   * Residency: a heap unused for Config::evictAfterFrames frames is evicted (paged out of video
+//     memory once the GPU is done with it, Device::Evict) and made resident again when a frame takes
+//     it; frames prefer resident heaps.
 //   * Heaps and resources unused for Config::retireAfterFrames frames are released (the device defers
 //     the release until the GPU is done with them).
 //
@@ -30,19 +33,23 @@ public:
     {
         u64 heapGranularity = 16ull << 20; // heap sizes are rounded up to a multiple of this
         u32 retireAfterFrames = 120;       // heaps and resources unused for this many frames are released
+        u32 evictAfterFrames = 30;         // heaps unused for this many frames are evicted (0: never)
     };
 
     struct Stats
     {
         u32 heaps = 0;
         u64 heapBytes = 0;
-        u32 resources = 0; // placed resources kept for later frames
+        u32 resources = 0;    // placed resources kept for later frames
+        u64 evictedBytes = 0; // in evicted heaps (included in heapBytes)
         // The last frame ended with EndFrame():
         u32 heapsCreated = 0;
         u32 resourcesCreated = 0;
         u32 resourcesReused = 0;
         u32 heapsReleased = 0;
         u32 resourcesReleased = 0;
+        u32 heapsEvicted = 0;
+        u32 heapsMadeResident = 0;
     };
 
     // A placed resource handed to the frame.
@@ -100,6 +107,7 @@ private:
         u64 fence = 0;    // graphics fence of the last frame that used it
         u64 lastUsed = 0; // pool frame
         bool inUse = false;
+        bool resident = true;
         std::vector<Entry> entries;
     };
 
@@ -107,6 +115,7 @@ private:
                       rhi::QueueType firstQueue);
     void Release(Entry& entry);
     void ReleaseIdle(u32 unusedFrames);
+    void EvictIdle();
     void UpdateTotals();
 
     rhi::Device& mDevice;

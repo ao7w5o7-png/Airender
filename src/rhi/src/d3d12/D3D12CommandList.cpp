@@ -109,6 +109,12 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers)
     };
     auto transition = [&](ID3D12Resource* resource, Access before, Access after)
     {
+        if (mQueue == QueueType::Copy)
+        {
+            // The copy queue promotes resources from COMMON to the copy states on use and they decay back to
+            // COMMON after the submission; copies require COMMON there (an explicit COPY_DEST fails them).
+            return;
+        }
         const D3D12_RESOURCE_STATES from = ToStates(before);
         const D3D12_RESOURCE_STATES to = ToStates(after);
         if (from == to)
@@ -155,9 +161,11 @@ void D3D12CommandList::Barriers(std::span<const Barrier> barriers)
         {
             D3D12Buffer* buffer = mDevice.Buffer(barrier.buffer);
             AIR_CHECK(buffer, "barrier on invalid buffer");
-            if (buffer->hostVisible)
+            if (buffer->hostVisible || buffer->packed.IsValid())
             {
-                break; // upload / readback heaps have a fixed state
+                // Upload / readback heaps have a fixed state. A packed buffer shares its resource
+                // (and so its state) with others: it relies on promotion and decay instead.
+                break;
             }
             if (barrier.discard && !buffer->ownsAllocation)
             {
@@ -217,8 +225,8 @@ void D3D12CommandList::ConvertMatrices(std::span<const MatrixConversion> convers
         info.SrcInfo.SrcDataType = ToD3D12(c.srcType);
         info.SrcInfo.SrcLayout = ToD3D12(c.srcLayout);
         info.SrcInfo.SrcStride = c.srcStride;
-        info.DataDesc.SrcVA = src->resource->GetGPUVirtualAddress() + c.srcOffset;
-        info.DataDesc.DestVA = dst->resource->GetGPUVirtualAddress() + c.dstOffset;
+        info.DataDesc.SrcVA = src->address + c.srcOffset;
+        info.DataDesc.DestVA = dst->address + c.dstOffset;
         AIR_CHECK(c.srcOffset + info.SrcInfo.SrcSize <= src->desc.size &&
                       c.dstOffset + info.DestInfo.DestSize <= dst->desc.size,
                   "ConvertMatrices: {}x{} matrix out of the bounds of '{}' or '{}'", c.rows, c.columns,
@@ -242,7 +250,10 @@ void D3D12CommandList::CopyBuffer(BufferHandle dst, u64 dstOffset, BufferHandle 
     AIR_CHECK(d && s, "CopyBuffer: invalid buffer");
     AIR_CHECK(dstOffset + size <= d->desc.size && srcOffset + size <= s->desc.size,
               "CopyBuffer '{}' <- '{}': {} bytes out of range", d->desc.debugName, s->desc.debugName, size);
-    mList->CopyBufferRegion(d->resource.Get(), dstOffset, s->resource.Get(), srcOffset, size);
+    AIR_CHECK(!Any(d->desc.usage & BufferUsage::Immutable) || mQueue == QueueType::Copy,
+              "CopyBuffer: '{}' is Immutable, written only on the copy queue", d->desc.debugName);
+    mList->CopyBufferRegion(d->resource.Get(), d->packed.offset + dstOffset, s->resource.Get(),
+                            s->packed.offset + srcOffset, size);
     Capture(std::format("CopyBuffer '{}' <- '{}' ({} bytes)", d->desc.debugName, s->desc.debugName, size));
 }
 
@@ -269,6 +280,7 @@ void D3D12CommandList::CopyBufferToTexture(TextureHandle dst, u32 mip, u32 layer
     D3D12Texture* t = mDevice.Texture(dst);
     D3D12Buffer* b = mDevice.Buffer(src);
     AIR_CHECK(t && b, "CopyBufferToTexture: invalid resource");
+    srcOffset += b->packed.offset;
     AIR_CHECK(srcOffset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0, "CopyBufferToTexture: offset {} not 512 aligned",
               srcOffset);
     D3D12_TEXTURE_COPY_LOCATION to = {};
@@ -293,6 +305,9 @@ void D3D12CommandList::CopyTextureToBuffer(BufferHandle dst, u64 dstOffset, Text
     D3D12Texture* t = mDevice.Texture(src);
     D3D12Buffer* b = mDevice.Buffer(dst);
     AIR_CHECK(t && b, "CopyTextureToBuffer: invalid resource");
+    AIR_CHECK(!Any(b->desc.usage & BufferUsage::Immutable), "CopyTextureToBuffer: '{}' is Immutable",
+              b->desc.debugName);
+    dstOffset += b->packed.offset;
     AIR_CHECK(dstOffset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT == 0, "CopyTextureToBuffer: offset {} not 512 aligned",
               dstOffset);
     D3D12_TEXTURE_COPY_LOCATION to = {};
@@ -371,6 +386,18 @@ void D3D12CommandList::Dispatch(u32 x, u32 y, u32 z)
     Capture(std::format("Dispatch {}x{}x{}", x, y, z));
 }
 
+void D3D12CommandList::DispatchIndirect(BufferHandle args, u64 offset)
+{
+    D3D12Buffer* b = mDevice.Buffer(args);
+    AIR_CHECK(b, "DispatchIndirect: invalid buffer");
+    AIR_CHECK(Any(b->desc.usage & BufferUsage::Indirect), "DispatchIndirect: '{}' lacks BufferUsage::Indirect",
+              b->desc.debugName);
+    AIR_CHECK(offset % 4 == 0 && offset + 12 <= b->desc.size, "DispatchIndirect: offset {} out of '{}' ({} bytes)",
+              offset, b->desc.debugName, b->desc.size);
+    mList->ExecuteIndirect(mDevice.DispatchSignature(), 1, b->resource.Get(), b->packed.offset + offset, nullptr, 0);
+    Capture(std::format("DispatchIndirect '{}' +{}", b->desc.debugName, offset));
+}
+
 void D3D12CommandList::DispatchRays(u32 width, u32 height, u32 depth)
 {
     AIR_CHECK(mRayTracingPipeline, "DispatchRays without a ray tracing pipeline");
@@ -425,9 +452,16 @@ u32 D3D12CommandList::AllocateTimestamp()
 void D3D12CommandList::BeginEvent(std::string_view name)
 {
     ++mEventDepth;
-    // PIX convention: metadata 1 = ANSI string (also shown by RenderDoc and Nsight).
     std::string text(name);
+#if AIR_WITH_PIX
+    // PIX's own event format (also a CPU timing event), one colour per feature: the name up to its first '.'.
+    const std::string_view feature = name.substr(0, name.find('.'));
+    const BYTE colour = BYTE(std::hash<std::string_view>{}(feature));
+    PIXBeginEvent(mList, PIX_COLOR_INDEX(colour), "%s", text.c_str());
+#else
+    // PIX convention: metadata 1 = ANSI string (also shown by RenderDoc and Nsight).
     mList->BeginEvent(1, text.c_str(), UINT(text.size() + 1));
+#endif
     if (mTimestamps)
     {
         const u32 index = AllocateTimestamp();
@@ -455,7 +489,11 @@ void D3D12CommandList::EndEvent()
             mClosedScopes.push_back({std::move(scope.name), mQueue, u32(mOpenScopes.size()), scope.begin, index});
         }
     }
+#if AIR_WITH_PIX
+    PIXEndEvent(mList);
+#else
     mList->EndEvent();
+#endif
     Capture("EndEvent");
 }
 

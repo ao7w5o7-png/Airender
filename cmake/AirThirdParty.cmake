@@ -14,6 +14,7 @@
 #   NVIDIA NRD (+ ShaderMake, MathLib) 4.18.0   AIR_NRD_DIR            nrd feature (denoisers), built from source
 #   NVIDIA RTXNTC (LibNTC)      0.10.0 beta                            neural texture compression (loaded at run time)
 #   Microsoft WebView2 SDK      1.0.4314.35     AIR_WEBVIEW2_SDK_DIR   editor's HTML profiler panel (Windows)
+#   WinPixEventRuntime (pix3.h) 1.0.240308001   AIR_PIX_RUNTIME_DIR    D3D12 backend: PIX events, captures
 #   ufbx, cgltf, stb_image      0.23.1, 1.15                           scenes made from model files (FBX, OBJ, glTF)
 #
 # Targets / functions defined here:
@@ -22,7 +23,9 @@
 #   air_imgui                     STATIC: Win32 + DX12 backends (editor executable, Windows)
 #   air_dlss                      INTERFACE: NGX headers + import library
 #   air_webview2                  INTERFACE: WebView2 headers + static loader (the runtime ships with Windows)
+#   air_pix                       INTERFACE: pix3.h (USE_PIX) + WinPixEventRuntime import library
 #   air_target_d3d12_runtime(t)   exports the Agility SDK version from executable t and copies the runtime DLLs
+#                                 (Agility SDK into D3D12\, WinPixEventRuntime.dll next to it)
 #   air_target_dlss_runtime(t)    copies the DLSS DLLs next to executable t
 
 set(AIR_DEPS_DIR "${PROJECT_SOURCE_DIR}/.deps" CACHE PATH "Download cache for third-party SDKs")
@@ -50,6 +53,8 @@ set(AIR_CGLTF_TAG v1.15)
 set(AIR_STB_COMMIT a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d)
 set(AIR_WEBVIEW2_VERSION 1.0.4314.35)
 set(AIR_WEBVIEW2_SHA256 90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944edc4)
+set(AIR_PIX_RUNTIME_VERSION 1.0.240308001)
+set(AIR_PIX_RUNTIME_SHA256 726acc93d6968e2146261a1e415521747d50ad69894c2b42b5d0d4c29fd66ec4)
 
 # Downloads url to dest unless it already exists. Sets <outVar> to TRUE on success.
 function(air_download url dest outVar)
@@ -150,6 +155,26 @@ __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 ]])
     configure_file("${AIR_AGILITY_EXPORTS}.in" "${AIR_AGILITY_EXPORTS}" COPYONLY)
 
+    # WinPixEventRuntime (pix3.h): the D3D12 backend's events in PIX's format (GPU and CPU timing),
+    # loading PIX's GPU capturer and capturing frames from the application. Optional: without it the
+    # events are plain strings and there is no capture.
+    set(AIR_PIX_RUNTIME_DIR "" CACHE PATH "Local WinPixEventRuntime (unpacked WinPixEventRuntime package)")
+    if(NOT AIR_PIX_RUNTIME_DIR)
+        air_fetch_nuget(WinPixEventRuntime ${AIR_PIX_RUNTIME_VERSION} ${AIR_PIX_RUNTIME_SHA256} pixDir)
+        if(pixDir)
+            set(AIR_PIX_RUNTIME_DIR "${pixDir}" CACHE PATH "" FORCE)
+        endif()
+    endif()
+    if(AIR_PIX_RUNTIME_DIR AND EXISTS "${AIR_PIX_RUNTIME_DIR}/Include/WinPixEventRuntime/pix3.h")
+        add_library(air_pix INTERFACE)
+        target_include_directories(air_pix SYSTEM INTERFACE "${AIR_PIX_RUNTIME_DIR}/Include")
+        target_link_libraries(air_pix INTERFACE "${AIR_PIX_RUNTIME_DIR}/bin/x64/WinPixEventRuntime.lib")
+        target_compile_definitions(air_pix INTERFACE USE_PIX AIR_WITH_PIX=1)
+        message(STATUS "Airender: WinPixEventRuntime ${AIR_PIX_RUNTIME_DIR}")
+    else()
+        message(WARNING "Airender: WinPixEventRuntime not available; D3D12 events without PIX's format, no captures")
+    endif()
+
     function(air_target_d3d12_runtime target)
         target_sources(${target} PRIVATE "${AIR_AGILITY_EXPORTS}")
         target_link_libraries(${target} PRIVATE air_agility_sdk)
@@ -159,6 +184,12 @@ __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "${bin}/D3D12Core.dll" "${bin}/d3d12SDKLayers.dll"
                     "$<TARGET_FILE_DIR:${target}>/D3D12/"
             VERBATIM)
+        if(TARGET air_pix)
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${AIR_PIX_RUNTIME_DIR}/bin/x64/WinPixEventRuntime.dll" "$<TARGET_FILE_DIR:${target}>/"
+                VERBATIM)
+        endif()
     endfunction()
 else()
     function(air_target_d3d12_runtime target)

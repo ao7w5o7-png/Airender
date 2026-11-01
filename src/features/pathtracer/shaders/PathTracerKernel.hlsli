@@ -194,6 +194,12 @@ uint CountIntersections(float3 origin, float3 direction)
     return count;
 }
 
+// A lobe's light divided by its albedo, 0 where the lobe reflects (next to) nothing.
+float3 Demodulate(float3 light, float3 albedo)
+{
+    return select(albedo > 1e-3f, light / max(albedo, 1e-3f), float3(0.0f, 0.0f, 0.0f));
+}
+
 float3 DebugValue(uint view, PathSample s, float intersections, FrameData f)
 {
     switch (view)
@@ -207,6 +213,9 @@ float3 DebugValue(uint view, PathSample s, float intersections, FrameData f)
     case kDebugBounces: return float(s.bounces) / float(max(f.maxBounces, 1u));
     case kDebugDirect: return s.directRadiance;
     case kDebugIndirect: return s.radiance - s.directRadiance;
+    case kDebugExternalGi: return s.radiance - s.directRadiance + s.skyRadiance;
+    case kDebugGiIrradiance: return Demodulate(s.giDiffuse, s.diffuseAlbedo);
+    case kDebugGiSpecular: return Demodulate(s.giSpecular, s.specularAlbedo);
     default: return s.radiance;
     }
 }
@@ -258,6 +267,30 @@ void AddCloudLayer(FrameData f, float2 uv, AIR_INOUT(PathSample) s)
     s.directRadiance = clouds.rgb + clouds.a * s.directRadiance;
     s.diffuseRadiance *= clouds.a;
     s.specularRadiance *= clouds.a;
+    s.emission *= clouds.a;
+    s.skyRadiance *= clouds.a;
+}
+
+// FrameData::fireflyClamp: the sample's indirect light (beyond its paths of at most one bounce) scaled down to
+// that exposed luminance at most. What it takes away leaves the denoiser's signals too, and the GI views'
+// lobes (they split the same light).
+void ClampFireflies(FrameData f, AIR_INOUT(PathSample) s)
+{
+    float3 indirect = s.radiance - s.directRadiance;
+    float luminance = Luminance(indirect) * f.exposure;
+    if (!(luminance > f.fireflyClamp))
+    {
+        return;
+    }
+    float keep = f.fireflyClamp / luminance;
+    float3 removed = indirect * (1.0f - keep);
+    s.radiance -= removed;
+    float rest = Luminance(s.diffuseRadiance + s.specularRadiance);
+    float signalKeep = rest > 0.0f ? saturate(1.0f - Luminance(removed) / rest) : 1.0f;
+    s.diffuseRadiance *= signalKeep;
+    s.specularRadiance *= signalKeep;
+    s.giDiffuse *= keep;
+    s.giSpecular *= keep;
 }
 
 // --- Shaders -------------------------------------------------------------------------------------
@@ -345,6 +378,10 @@ void TracePixel(uint2 pixel)
             }
         }
 #endif
+        if (f.fireflyClamp > 0.0f)
+        {
+            ClampFireflies(f, s);
+        }
         float intersections = 0.0f;
         if (f.debugView == kDebugIntersections)
         {
@@ -372,8 +409,12 @@ void TracePixel(uint2 pixel)
         }
 #endif
         sum += value;
-        diffuseSum += s.diffuseRadiance;
-        specularSum += s.specularRadiance;
+        // In the views of the GI's lobes the signals carry that light as if the surfaces were white (divided by
+        // the albedos here, the albedo guides 1): the denoiser shows it (slots::kSignalView) with nothing lost to
+        // its floor on albedos.
+        bool lobeView = f.debugView == kDebugGiIrradiance || f.debugView == kDebugGiSpecular;
+        diffuseSum += lobeView ? Demodulate(s.giDiffuse, s.diffuseAlbedo) : s.diffuseRadiance;
+        specularSum += lobeView ? Demodulate(s.giSpecular, s.specularAlbedo) : s.specularRadiance;
         if (i == 0)
         {
             first = s;
@@ -451,9 +492,15 @@ void TracePixel(uint2 pixel)
         RWTexture2D<float4> normalRoughness = ResourceDescriptorHeap[g.normalRoughness];
         RWTexture2D<float> viewDepth = ResourceDescriptorHeap[g.viewDepth];
         RWTexture2D<float2> motionVectors = ResourceDescriptorHeap[g.motionVectors];
-        diffuseAlbedo[pixel] = float4(first.diffuseAlbedo, 1.0f);
-        specularAlbedo[pixel] = float4(first.specularAlbedo, 1.0f);
+        bool lobeView = f.debugView == kDebugGiIrradiance || f.debugView == kDebugGiSpecular; // white, see above
+        diffuseAlbedo[pixel] = float4(lobeView ? float3(1.0f, 1.0f, 1.0f) : first.diffuseAlbedo, 1.0f);
+        specularAlbedo[pixel] = float4(lobeView ? float3(1.0f, 1.0f, 1.0f) : first.specularAlbedo, 1.0f);
         normalRoughness[pixel] = float4(first.normal, first.material.roughness);
+        if (g.emission != kInvalidIndex)
+        {
+            RWTexture2D<float4> emission = ResourceDescriptorHeap[g.emission];
+            emission[pixel] = float4(first.emission * f.exposure, 1.0f);
+        }
         float3 direction = CameraRayDirection(f.camera, firstPixel, size);
         viewDepth[pixel] = first.hit ? first.hitDistance * dot(direction, f.camera.forward.xyz) : 65504.0f;
         // Static scene: motion comes from the camera only. Misses reproject their direction.

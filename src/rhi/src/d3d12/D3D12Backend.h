@@ -14,8 +14,19 @@
 //     constants) plus static samplers s0..s2; every resource is a bindless descriptor index.
 //   * Memory comes from GpuMemoryAllocator: ID3D12Heap blocks per (heap type, tier-1 category),
 //     sub-allocated with TLSF; every resource is a placed resource.
+//   * Residency: video memory heaps get a high residency priority. A pool's spare empty heap and
+//     the heaps the application calls Evict() on are paged out (ID3D12Device::Evict, once the GPU is
+//     done with them) and paged back in with EnqueueMakeResident, which every queue waits for.
 //   * Barriers use the legacy ResourceBarrier API. Host visible buffers keep their fixed heap state
 //     (GENERIC_READ / COPY_DEST) and never get barriers.
+//   * Small resources: with tight alignment (D3D12_TIGHT_ALIGNMENT_TIER_1) every resource takes about
+//     its own size in a heap. Without it a placed buffer takes 64 KiB, so small buffers that need no
+//     state of their own are packed into shared buffers instead (PackedPool): Immutable device-local
+//     buffers, host visible buffers (their heap's fixed state) and acceleration structures (fixed
+//     state, UAV barriers on the shared buffer). A packed Immutable buffer never gets barriers: it
+//     is only written on the copy queue, and buffers are promoted from COMMON to the read states
+//     they are used in and decay back after every ExecuteCommandLists. Small textures that are no
+//     render target or depth buffer are placed at 4 KiB (D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT).
 //   * The debug layer reports errors through ID3D12InfoQueue1; they become "VALIDATION:" lines in
 //     the captured command stream, exactly like the Null backend's own checks.
 
@@ -28,11 +39,18 @@
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
+#ifndef AIR_WITH_PIX
+#define AIR_WITH_PIX 0 // WinPixEventRuntime (cmake/AirThirdParty.cmake: air_pix)
+#endif
+#if AIR_WITH_PIX
+#include <WinPixEventRuntime/pix3.h> // after d3d12.h: its events on command lists
+#endif
 
 #include <atomic>
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -45,6 +63,9 @@ constexpr u32 kRootConstantCount = 32; // 128 bytes of push constants
 constexpr u32 kBindlessCapacity = 1u << 18;
 constexpr u32 kRtvCapacity = 1024;
 constexpr u64 kPlacementAlignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+// With tight alignment a placed buffer may start at any multiple of this (the constant buffer
+// view's alignment, which also covers raw views and acceleration structures).
+constexpr u64 kTightBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
 constexpr u32 kMaxTimestampsPerFrame = 8192;
 constexpr u32 kTimestampBlock = 64; // timestamps a command list reserves at a time
 
@@ -94,13 +115,25 @@ enum class HeapCategory : u32
     All = 3
 };
 
+// Where a packed resource lives: a range of one buffer of a D3D12Device::PackedPool.
+struct PackedRange
+{
+    u32 pool = ~0u; // ~0u: not packed
+    u32 block = 0;
+    u32 node = 0;   // TlsfAllocator node of the range
+    u64 offset = 0; // in the shared resource
+
+    bool IsValid() const { return pool != ~0u; }
+};
+
 struct D3D12Buffer
 {
     BufferDesc desc;
-    ComPtr<ID3D12Resource> resource;
+    ComPtr<ID3D12Resource> resource; // the shared buffer when packed: views and copies add packed.offset
     GpuAllocation allocation;
     bool ownsAllocation = true;
     bool hostVisible = false; // fixed heap state, no barriers
+    PackedRange packed;       // no barriers either (promotion and decay, see the header comment)
     u8* mapped = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS address = 0;
     BindlessIndex srv = kInvalidBindless;
@@ -127,6 +160,8 @@ struct D3D12Heap
     u64 size = 0;
     std::string name;
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
+    bool resident = true;   // as the application sees it: false from Evict() until MakeResident()
+    u64 evictRequest = 0;   // the Evict() whose deferred page-out may run; a later call supersedes it
 };
 
 struct D3D12AccelStruct
@@ -135,8 +170,9 @@ struct D3D12AccelStruct
     bool destroyed = false; // Destroy*() called, the release waits for the GPU (hidden from GetResourceList)
     BlasDesc blas;
     TlasDesc tlas;
-    ComPtr<ID3D12Resource> resource;
+    ComPtr<ID3D12Resource> resource; // the shared buffer when packed
     GpuAllocation allocation;
+    PackedRange packed;
     D3D12_GPU_VIRTUAL_ADDRESS address = 0;
     u64 scratchSize = 0;
     BindlessIndex srv = kInvalidBindless;
@@ -241,6 +277,7 @@ public:
     void SetPipeline(PipelineHandle pipeline) override;
     void PushConstants(const void* data, u32 size) override;
     void Dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) override;
+    void DispatchIndirect(BufferHandle args, u64 offset) override;
     void DispatchRays(u32 width, u32 height, u32 depth) override;
 
     void BuildBlas(AccelStructHandle blas, BufferHandle scratch) override;
@@ -320,6 +357,9 @@ public:
     void DestroyHeap(HeapHandle heap) override;
     TextureHandle CreatePlacedTexture(const TextureDesc& desc, HeapHandle heap, u64 offset) override;
     BufferHandle CreatePlacedBuffer(const BufferDesc& desc, HeapHandle heap, u64 offset) override;
+    void Evict(std::span<const HeapHandle> heaps) override;
+    void MakeResident(std::span<const HeapHandle> heaps) override;
+    bool IsResident(HeapHandle heap) override;
 
     BindlessIndex GetBindlessSRV(TextureHandle texture) override;
     BindlessIndex GetBindlessUAV(TextureHandle texture, u32 mip) override;
@@ -364,12 +404,15 @@ public:
     GpuFrameTimings GetGpuTimings() override;
     void SetCommandCapture(bool enabled) override;
     std::vector<std::string> TakeCapturedCommands() override;
+    bool CanCaptureGpuFrames() const override;
+    bool CaptureGpuFrames(const std::filesystem::path& path, u32 frames) override;
 
     // --- backend internals ----------------------------------------------------------------------
     ID3D12Device5* Native() const { return mDevice.Get(); }
     IDXGIFactory6* Factory() const { return mFactory.Get(); }
     Queue& GetQueue(QueueType type) { return mQueues[size_t(type)]; }
     ID3D12RootSignature* RootSignature() const { return mRootSignature.Get(); }
+    ID3D12CommandSignature* DispatchSignature() const { return mDispatchSignature.Get(); }
     ID3D12DescriptorHeap* BindlessHeap() const { return mBindlessHeap.Get(); }
     bool AllowTearing() const { return mAllowTearing; }
     bool CaptureEnabled() const { return mCapture.load(std::memory_order_relaxed); }
@@ -395,6 +438,11 @@ public:
 
     void ReportValidation(std::string message);
     void LogDeviceRemoved(HRESULT hr, std::string_view where);
+
+    // Pages a heap out of video memory (the GPU must be done with it) or back in; later work on
+    // every queue waits on the GPU for a page-in. Used by the allocator's heap provider.
+    void PageOut(ID3D12Pageable* object);
+    void PageIn(ID3D12Pageable* object);
 
 private:
     struct DeferredDelete
@@ -422,6 +470,51 @@ private:
     TextureHandle FinishTexture(const TextureDesc& desc, const GpuAllocation& allocation, ID3D12Heap* heap, u64 offset,
                                 bool ownsAllocation);
 
+    // Packing of small resources where tight alignment is missing (see the header comment).
+    enum PackedPoolKind : u32
+    {
+        kPackedImmutable = 0, // Immutable device-local buffers: COMMON, no UAV
+        kPackedAccelStruct,   // acceleration structures: RAYTRACING_ACCELERATION_STRUCTURE, UAV
+        kPackedUpload,        // host visible buffers: their heap's fixed state, persistently mapped
+        kPackedReadback,
+        kPackedDeviceLocalHost,
+        kPackedPoolCount
+    };
+    struct PackedBlock
+    {
+        ComPtr<ID3D12Resource> resource; // null once released
+        GpuAllocation allocation;
+        std::unique_ptr<TlsfAllocator> ranges;
+        u8* mapped = nullptr; // host visible pools
+    };
+    struct PackedPool
+    {
+        std::mutex mutex;
+        std::vector<PackedBlock> blocks;
+    };
+    struct PackedAllocation
+    {
+        PackedRange range;
+        GpuAllocation allocation; // the block's, at the range
+        ComPtr<ID3D12Resource> resource;
+        u8* mapped = nullptr; // at the range
+    };
+    // A pool's first block is small and each further one twice the last: a scene with a few small
+    // buffers does not pay for a large block.
+    static constexpr u64 kPackedFirstBlockSize = 256ull << 10;
+    // Ranges start at a texture copy footprint's alignment (also a constant buffer view's).
+    static constexpr u64 kPackedAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    static constexpr u64 kPackedMaxBlockSize = 4ull << 20;
+    // The pool a buffer is packed into: one that would otherwise take a whole 64 KiB placement.
+    std::optional<PackedPoolKind> PackedKind(const BufferDesc& desc) const;
+    bool ShouldPackAccelStruct(u64 size) const;
+    // A range of `size` bytes at kPackedAlignment, or at a multiple of `stride` (a structured view
+    // starts at an element) when that does not divide it; nullopt when out of memory.
+    std::optional<PackedAllocation> AllocatePacked(PackedPoolKind kind, u64 size, u32 stride, std::string_view name);
+    void FreePacked(const PackedRange& range); // once the GPU is done with it
+    // The memory an acceleration structure is built into: its own buffer, or packed.
+    bool CreateAccelStructStorage(D3D12AccelStruct& as, u64 size, const std::string& name);
+
     BindlessIndex AllocateDescriptor();
     void ReleaseDescriptor(BindlessIndex index);
     D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle(BindlessIndex index) const;
@@ -436,20 +529,32 @@ private:
     ComPtr<IDXGIFactory6> mFactory;
     ComPtr<IDXGIAdapter1> mAdapter;
     ComPtr<ID3D12Device5> mDevice;
+    ComPtr<ID3D12Device3> mDevice3;      // EnqueueMakeResident; null on runtimes without it
+    ComPtr<ID3D12Fence> mResidencyFence; // signalled by EnqueueMakeResident, waited for by every queue
+    std::mutex mPageInMutex;             // guards mPageInValue
+    u64 mPageInValue = 0;                // last value a page-in signals mResidencyFence with
+    std::mutex mResidencyMutex;          // serialises Evict / MakeResident / deferred page-outs
+    u64 mEvictRequests = 0;              // D3D12Heap::evictRequest counter
 #if AIR_D3D12_LINEAR_ALGEBRA
     ComPtr<ID3D12DevicePreview> mDevicePreview; // with mCaps.linearAlgebra
 #endif
     ComPtr<ID3D12InfoQueue1> mInfoQueue;
     DWORD mInfoQueueCookie = 0;
     bool mGpuUploadHeap = false;
+    // D3D12_TIGHT_ALIGNMENT_TIER_1 (and DeviceDesc::tightAlignment): resources ask for
+    // D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT, so a small buffer takes its own size in a heap rather
+    // than 64 KiB. Without it small resources are packed (mPackedPools).
+    bool mTightAlignment = false;
     bool mAllowTearing = false;
     Queue mQueues[size_t(QueueType::Count)];
 
     ComPtr<ID3D12RootSignature> mRootSignature;
+    ComPtr<ID3D12CommandSignature> mDispatchSignature; // DispatchIndirect: one D3D12_DISPATCH_ARGUMENTS
 
     class HeapProvider;
     std::unique_ptr<HeapProvider> mHeapProvider;
     std::unique_ptr<GpuMemoryAllocator> mAllocator;
+    PackedPool mPackedPools[kPackedPoolCount];
 
     HandlePool<BufferTag, D3D12Buffer> mBuffers;
     HandlePool<TextureTag, D3D12Texture> mTextures;

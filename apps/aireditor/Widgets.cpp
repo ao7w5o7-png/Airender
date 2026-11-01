@@ -77,71 +77,56 @@ std::vector<std::string> ParseEnumDescription(std::string_view text)
     return names.size() >= 2 ? names : std::vector<std::string>{};
 }
 
-bool EditParameters(renderer::ParameterSet& parameters)
+namespace
 {
-    bool changed = false;
+
+bool ContainsNoCase(std::string_view text, std::string_view part)
+{
+    return std::search(text.begin(), text.end(), part.begin(), part.end(),
+                       [](char a, char b) {
+                           return std::tolower(static_cast<unsigned char>(a)) ==
+                                  std::tolower(static_cast<unsigned char>(b));
+                       }) != text.end();
+}
+
+bool EditParameter(const renderer::ParameterSet::Entry& entry);
+
+} // namespace
+
+bool EditParameters(renderer::ParameterSet& parameters, std::string_view filter,
+                    const std::function<bool(std::string_view)>& hidden)
+{
+    auto shown = [&](const renderer::ParameterSet::Entry& entry)
+    { return (!hidden || !hidden(entry.name)) && (filter.empty() || ContainsNoCase(entry.name, filter)); };
+    // The groups in the order their first parameter was added; the main parameters first.
+    std::vector<std::string_view> groups;
     for (const renderer::ParameterSet::Entry& entry : parameters.Entries())
     {
-        ImGui::PushID(entry.name.c_str());
-        bool edited = false;
-        if (auto* b = std::get_if<bool*>(&entry.value))
+        if (shown(entry) && std::find(groups.begin(), groups.end(), entry.group) == groups.end())
         {
-            edited = ImGui::Checkbox(entry.name.c_str(), *b);
+            groups.push_back(entry.group);
         }
-        else if (auto* u = std::get_if<u32*>(&entry.value))
+    }
+    std::stable_partition(groups.begin(), groups.end(), [](std::string_view g) { return g.empty(); });
+    bool changed = false;
+    for (std::string_view group : groups)
+    {
+        const bool folded = !group.empty() && filter.empty();
+        if (folded && !ImGui::TreeNode(std::string(group).c_str()))
         {
-            const std::vector<std::string> names = ParseEnumDescription(entry.description);
-            if (!names.empty())
+            continue;
+        }
+        for (const renderer::ParameterSet::Entry& entry : parameters.Entries())
+        {
+            if (entry.group == group && shown(entry))
             {
-                const u32 current = std::min<u32>(**u, u32(names.size() - 1));
-                if (ImGui::BeginCombo(entry.name.c_str(), names[current].c_str()))
-                {
-                    for (u32 i = 0; i < names.size(); ++i)
-                    {
-                        if (ImGui::Selectable(names[i].c_str(), i == current))
-                        {
-                            **u = i;
-                            edited = true;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-            }
-            else
-            {
-                int value = int(std::min<u32>(**u, 0x7FFFFFFF));
-                const int lo = int(entry.min);
-                const int hi = int(std::min(entry.max, double(0x7FFFFFFF)));
-                if (hi - lo <= 64)
-                {
-                    edited = ImGui::SliderInt(entry.name.c_str(), &value, lo, hi);
-                }
-                else
-                {
-                    edited = ImGui::DragInt(entry.name.c_str(), &value, 1.0f, lo, hi, "%d",
-                                            ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
-                }
-                if (edited)
-                {
-                    **u = u32(std::clamp(value, lo, hi));
-                }
+                changed |= EditParameter(entry);
             }
         }
-        else if (auto* f = std::get_if<float*>(&entry.value))
+        if (folded)
         {
-            const float lo = float(entry.min);
-            const float hi = float(entry.max);
-            const bool wide = hi - lo > 100.0f;
-            edited =
-                ImGui::DragFloat(entry.name.c_str(), *f, wide ? 0.05f : (hi - lo) / 500.0f, lo, hi, "%.3f",
-                                 (wide && lo > 0.0f ? ImGuiSliderFlags_Logarithmic : 0) | ImGuiSliderFlags_AlwaysClamp);
+            ImGui::TreePop();
         }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !entry.description.empty())
-        {
-            ImGui::SetTooltip("%s", entry.description.c_str());
-        }
-        changed |= edited;
-        ImGui::PopID();
     }
     if (changed)
     {
@@ -149,6 +134,75 @@ bool EditParameters(renderer::ParameterSet& parameters)
     }
     return changed;
 }
+
+namespace
+{
+
+bool EditParameter(const renderer::ParameterSet::Entry& entry)
+{
+    ImGui::PushID(entry.name.c_str());
+    bool edited = false;
+    if (auto* b = std::get_if<bool*>(&entry.value))
+    {
+        edited = ImGui::Checkbox(entry.name.c_str(), *b);
+    }
+    else if (auto* u = std::get_if<u32*>(&entry.value))
+    {
+        const std::vector<std::string> names = ParseEnumDescription(entry.description);
+        if (!names.empty())
+        {
+            const u32 current = std::min<u32>(**u, u32(names.size() - 1));
+            if (ImGui::BeginCombo(entry.name.c_str(), names[current].c_str()))
+            {
+                for (u32 i = 0; i < names.size(); ++i)
+                {
+                    if (ImGui::Selectable(names[i].c_str(), i == current))
+                    {
+                        **u = i;
+                        edited = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        else
+        {
+            int value = int(std::min<u32>(**u, 0x7FFFFFFF));
+            const int lo = int(entry.min);
+            const int hi = int(std::min(entry.max, double(0x7FFFFFFF)));
+            if (hi - lo <= 64)
+            {
+                edited = ImGui::SliderInt(entry.name.c_str(), &value, lo, hi);
+            }
+            else
+            {
+                edited = ImGui::DragInt(entry.name.c_str(), &value, 1.0f, lo, hi, "%d",
+                                        ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+            }
+            if (edited)
+            {
+                **u = u32(std::clamp(value, lo, hi));
+            }
+        }
+    }
+    else if (auto* f = std::get_if<float*>(&entry.value))
+    {
+        const float lo = float(entry.min);
+        const float hi = float(entry.max);
+        const bool wide = hi - lo > 100.0f;
+        edited =
+            ImGui::DragFloat(entry.name.c_str(), *f, wide ? 0.05f : (hi - lo) / 500.0f, lo, hi, "%.3f",
+                             (wide && lo > 0.0f ? ImGuiSliderFlags_Logarithmic : 0) | ImGuiSliderFlags_AlwaysClamp);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort) && !entry.description.empty())
+    {
+        ImGui::SetTooltip("%s", entry.description.c_str());
+    }
+    ImGui::PopID();
+    return edited;
+}
+
+} // namespace
 
 ImU32 ColorForName(std::string_view name)
 {

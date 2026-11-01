@@ -383,9 +383,13 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open)
             continue;
         }
         const float fraction = s.reservedBytes ? float(double(s.usedBytes) / double(s.reservedBytes)) : 0.0f;
-        const std::string text = std::format("{}: {} used of {} in {} heaps, {} allocations",
-                                             rhi::ToString(rhi::MemoryLocation(i)), renderer::FormatBytes(s.usedBytes),
-                                             renderer::FormatBytes(s.reservedBytes), s.heapCount, s.allocationCount);
+        std::string text = std::format("{}: {} used of {} in {} heaps, {} allocations",
+                                       rhi::ToString(rhi::MemoryLocation(i)), renderer::FormatBytes(s.usedBytes),
+                                       renderer::FormatBytes(s.reservedBytes), s.heapCount, s.allocationCount);
+        if (s.evictedHeapCount > 0)
+        {
+            text += std::format(", {} evicted", renderer::FormatBytes(s.evictedBytes));
+        }
         UsageBar(fraction, text.c_str());
     }
     if (ImGui::TreeNode("Pools and heaps"))
@@ -401,9 +405,10 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open)
                 for (size_t h = 0; h < pool.heaps.size(); ++h)
                 {
                     const auto& heap = pool.heaps[h];
-                    const std::string text = std::format(
-                        "heap {}{}: {} / {}, {} allocations", h, heap.dedicated ? " (dedicated)" : "",
-                        renderer::FormatBytes(heap.usedBytes), renderer::FormatBytes(heap.size), heap.allocationCount);
+                    const std::string text =
+                        std::format("heap {}{}{}: {} / {}, {} allocations", h, heap.dedicated ? " (dedicated)" : "",
+                                    heap.resident ? "" : " (evicted)", renderer::FormatBytes(heap.usedBytes),
+                                    renderer::FormatBytes(heap.size), heap.allocationCount);
                     UsageBar(heap.size ? float(double(heap.usedBytes) / double(heap.size)) : 0.0f, text.c_str());
                 }
                 ImGui::TreePop();
@@ -468,7 +473,8 @@ void DiagnosticsPanels::BuildMemory(rhi::Device& device, bool* open)
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(KindName(r.kind));
             ImGui::TableNextColumn();
-            ImGui::Text("%s%s", rhi::ToString(r.location), r.placedInHeap ? " (transient heap)" : "");
+            ImGui::Text("%s%s%s", rhi::ToString(r.location), r.placedInHeap ? " (transient heap)" : "",
+                        r.resident ? "" : " (evicted)");
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(renderer::FormatBytes(r.sizeBytes).c_str());
         }

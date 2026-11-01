@@ -43,7 +43,8 @@ bool SameImage(const PathTracerSettings& a, const PathTracerSettings& b)
            a.cloudEvents == b.cloudEvents && a.volumeEvents == b.volumeEvents && a.restir == b.restir &&
            a.nrc == b.nrc && a.volumeMarch == b.volumeMarch && cloudMarch == b.cloudMarch && a.furnace == b.furnace &&
            a.debugView == b.debugView && a.debugScale == b.debugScale && a.coatModel == b.coatModel &&
-           a.subsurfaceModel == b.subsurfaceModel;
+           a.subsurfaceModel == b.subsurfaceModel && a.denoiseDirect == b.denoiseDirect &&
+           a.externalGi == b.externalGi && a.fireflyClamp == b.fireflyClamp;
 }
 
 gpu::CameraData ToGpu(const renderer::Camera& camera, float aspect)
@@ -72,6 +73,7 @@ float Halton(u32 index, u32 base)
 bool IsDisplayDebugView(u32 view)
 {
     return view != gpu::kDebugNone && view != gpu::kDebugDirect && view != gpu::kDebugIndirect &&
+           view != gpu::kDebugExternalGi && view != gpu::kDebugGiIrradiance && view != gpu::kDebugGiSpecular &&
            view != gpu::kDebugNrcCache;
 }
 
@@ -317,7 +319,12 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     // ReSTIR replaces the path's own estimate of the direct (DI) and indirect (GI) light at the first
     // surface, for the lit and direct / indirect views.
     const u32 view = mSettings.debugView;
-    const bool lightView = view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect;
+    const bool lightView = view == gpu::kDebugNone || view == gpu::kDebugDirect || view == gpu::kDebugIndirect ||
+                           view == gpu::kDebugExternalGi;
+    // Another feature adds the first surface's indirect light: the paths stop at the first surface's
+    // BSDF sample, and neither ReSTIR GI nor the radiance cache runs.
+    const bool externalGi = mSettings.externalGi;
+    blackboard.SetValue(slots::kExternalGi, externalGi ? 1.0 : 0.0);
     // Volumes in the scene: ray marched over the surfaces (real-time volumes), or tracked by a kernel of
     // their own. Either way paths do all the work (ReSTIR's first surface and the cache's queries do not
     // know about media).
@@ -359,13 +366,13 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     const bool nrcLinearAlgebra =
         mSettings.nrc.linearAlgebra && mTraceNrc.IsAvailable() && mRadianceCache->IsAvailable(true);
     // The trace kernel is created the first time the cache runs.
-    const rhi::PipelineHandle nrcPipeline = !nrcOn || !nrcView || volume         ? rhi::PipelineHandle{}
-                                            : nrcLinearAlgebra                   ? mTraceNrc.Get(mDevice)
-                                            : mRadianceCache->IsAvailable(false) ? mTraceNrcPortable.Get(mDevice)
-                                                                                 : rhi::PipelineHandle{};
+    const rhi::PipelineHandle nrcPipeline = !nrcOn || !nrcView || volume || externalGi ? rhi::PipelineHandle{}
+                                            : nrcLinearAlgebra                         ? mTraceNrc.Get(mDevice)
+                                            : mRadianceCache->IsAvailable(false)       ? mTraceNrcPortable.Get(mDevice)
+                                                                                       : rhi::PipelineHandle{};
     const bool nrcWanted = nrcPipeline.IsValid();
-    const bool giWanted = on(mSettings.restir.gi) && lightView && !nrcWanted && !volume && mReSTIR->IsGiAvailable() &&
-                          mTracePipelineGi.IsValid();
+    const bool giWanted = on(mSettings.restir.gi) && lightView && !nrcWanted && !volume && !externalGi &&
+                          mReSTIR->IsGiAvailable() && mTracePipelineGi.IsValid();
     const bool restirDi = diWanted && spp > 0;
     const bool restirGi = giWanted && spp > 0;
     const bool nrc = nrcWanted && spp > 0;
@@ -420,6 +427,8 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         exposure = luminance > 0.0f ? 0.18f / luminance : 0.18f;
     }
     frame.exposure = exposure;
+    blackboard.SetValue(slots::kExposure, exposure);
+    blackboard.SetValue(slots::kFurnace, mSettings.furnace ? 1.0 : 0.0);
     frame.clouds = scene.clouds;
     if (scene.clouds.enabled != 0)
     {
@@ -472,14 +481,20 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     blackboard.SetValue(slots::kJitterX, frame.jitter.x);
     blackboard.SetValue(slots::kJitterY, frame.jitter.y);
     frame.frameIndex = mFrameIndex++;
-    // The first surface's light split by lobe, for a denoiser of the surfaces (real time, lit view).
-    const bool signals = mSettings.signals && mSettings.guides && !mSettings.accumulate && view == gpu::kDebugNone;
+    // The first surface's light split by lobe, for a denoiser of the surfaces (real time): in the lit view, and
+    // in the views of the GI's lobes, whose light the signals then carry for the denoiser to show it denoised
+    // (slots::kSignalView; accumulating, the views converge themselves).
+    const bool lobeView = view == gpu::kDebugGiIrradiance || view == gpu::kDebugGiSpecular;
+    const bool signals =
+        mSettings.signals && mSettings.guides && !mSettings.accumulate && (view == gpu::kDebugNone || lobeView);
+    blackboard.SetValue(slots::kSignalView, signals && lobeView ? (view == gpu::kDebugGiIrradiance ? 1.0 : 2.0) : 0.0);
     frame.flags = (mResetPending ? gpu::kFlagReset : 0u) | (mSettings.furnace ? gpu::kFlagFurnace : 0u) |
                   (mSettings.accumulate ? 0u : gpu::kFlagGlobalJitter) | (mSettings.guides ? gpu::kFlagGuides : 0u) |
                   (mSettings.nextEventEstimation ? 0u : gpu::kFlagNoNee) | (restirDi ? gpu::kFlagReSTIR : 0u) |
                   (restirGi ? gpu::kFlagReSTIRGI : 0u) | (nrc ? gpu::kFlagNrc : 0u) |
                   (march ? gpu::kFlagVolumeMarch | gpu::kFlagGlobalJitter : 0u) | (signals ? gpu::kFlagSignals : 0u) |
-                  (cloudMarch ? gpu::kFlagCloudMaps : 0u);
+                  (signals && mSettings.denoiseDirect && !lobeView ? gpu::kFlagDirectSignals : 0u) |
+                  (cloudMarch ? gpu::kFlagCloudMaps : 0u) | (externalGi ? gpu::kFlagExternalGi : 0u);
     frame.lightTreeBounces = mSettings.lightTreeBounces;
     frame.width = mSettings.width;
     frame.height = mSettings.height;
@@ -488,6 +503,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     frame.lightCount = scene.lightCount;
     frame.debugView = mSettings.debugView;
     frame.debugScale = std::max(mSettings.debugScale, 1e-6f);
+    frame.fireflyClamp = mSettings.accumulate ? 0.0f : mSettings.fireflyClamp;
     if (nrc)
     {
         mRadianceCache->BeginFrame(graph, scene, mSettings.nrc, nrcLinearAlgebra, mSettings.width, mSettings.height,
@@ -527,6 +543,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
     constants.lightTree = mDevice.GetBindlessSRV(scene.lightTree);
     constants.bsdfLut = mDevice.GetBindlessSRV(mBsdfLut);
     constants.skyTable = mDevice.GetBindlessSRV(scene.skyTable);
+    constants.emission = air::gpu::kInvalidIndex;
 
     // Under real-time volumes with a denoiser: the trace's samples and the frame resolved without the
     // volumes (slots::kColorBeforeTransparency).
@@ -538,6 +555,7 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
         mAccumulatedSamples += spp;
 
         DenoiserGuides guides;
+        rdg::TextureRef emissionGuide;
         if (mSettings.guides)
         {
             auto make = [&](rhi::Format format, const char* name)
@@ -559,6 +577,11 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             blackboard.SetTexture(slots::kNormalRoughness, guides.normalRoughness);
             blackboard.SetTexture(slots::kViewDepth, guides.viewDepth);
             blackboard.SetTexture(slots::kMotionVectors, guides.motionVectors);
+            if (mSettings.emissionGuide)
+            {
+                emissionGuide = make(rhi::Format::RGBA16_FLOAT, "PathTracer.Emission");
+                blackboard.SetTexture(slots::kEmission, emissionGuide);
+            }
         }
         rdg::TextureRef diffuseSignal;
         rdg::TextureRef specularSignal;
@@ -645,8 +668,9 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                         b.Write(buffer, Access::UAVCompute);
                     }
                 }
-                for (rdg::TextureRef t : {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness,
-                                          guides.viewDepth, guides.motionVectors, diffuseSignal, specularSignal})
+                for (rdg::TextureRef t :
+                     {guides.diffuseAlbedo, guides.specularAlbedo, guides.normalRoughness, guides.viewDepth,
+                      guides.motionVectors, emissionGuide, diffuseSignal, specularSignal})
                 {
                     if (t.IsValid())
                     {
@@ -668,6 +692,10 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
                     constants.normalRoughness = ctx.UAV(guides.normalRoughness);
                     constants.viewDepth = ctx.UAV(guides.viewDepth);
                     constants.motionVectors = ctx.UAV(guides.motionVectors);
+                }
+                if (emissionGuide.IsValid())
+                {
+                    constants.emission = ctx.UAV(emissionGuide);
                 }
                 if (diffuseSignal.IsValid())
                 {
@@ -743,14 +771,16 @@ void PathTracer::AddPasses(rdg::RenderGraph& graph, const renderer::GpuScene& sc
             restirScene.bsdfLut = constants.bsdfLut;
             restirScene.skyTable = constants.skyTable;
             mReSTIR->AddPasses(graph, mSettings.restir, restirScene, accumulation, diffuseSignal, specularSignal,
-                               view != gpu::kDebugIndirect, view != gpu::kDebugDirect,
-                               neural && (scene.coatedMaterials || scene.subsurfaceMaterials));
+                               view != gpu::kDebugIndirect && view != gpu::kDebugExternalGi, view != gpu::kDebugDirect,
+                               neural && (scene.coatedMaterials || scene.subsurfaceMaterials),
+                               signals && mSettings.denoiseDirect);
         }
         if (nrc)
         {
             // The training paths' pixels get their cache lookups in the views that show indirect light.
             mRadianceCache->AddPasses(graph, constants.frameData, constants.frameSlot, accumulation,
-                                      view == gpu::kDebugNone || view == gpu::kDebugIndirect);
+                                      view == gpu::kDebugNone || view == gpu::kDebugIndirect ||
+                                          view == gpu::kDebugExternalGi);
         }
     }
 

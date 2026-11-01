@@ -12,6 +12,7 @@
 # Outputs:
 #   <build>/shaders/<feature>/<Stem>.lib.dxil | <Stem>.cs.dxil      (always)
 #   <build>/shaders/<feature>/<Stem>.lib.spv  | <Stem>.cs.spv       (AIR_RHI_VULKAN only)
+#   <build>/shaders/pdb/<hash>.pdb   debug information and sources (AIR_SHADER_DEBUG=pdb, the default)
 # Every .h / .hlsli next to the sources or in an include dir is a dependency, so editing shared
 # headers recompiles. Without a dxc (AIR_DXC_EXECUTABLE) this is a no-op.
 #
@@ -94,12 +95,20 @@ function(air_compile_shaders)
         endif()
         set(compiler "${AIR_DXC_EXECUTABLE}")
         set(previewArgs "")
-        # Debug information (shader source in GPU debuggers) only on request: with it the driver's DXIL
-        # verifier prints, at every pipeline creation, the scopes it misplaces for loops in inlined functions
+        # Debug information (AIR_SHADER_DEBUG): pdb writes it and the sources to pdb/<hash>.pdb, named
+        # after the shader's hash (the DXIL keeps only that name, ILDN), so recompiles with the same
+        # command line (hot reload, air.py shaders) never overwrite a PDB another binary refers to; GPU
+        # debuggers find it through their PDB search path. Embedded, the driver's DXIL verifier prints,
+        # at every pipeline creation, the scopes the compilers misplace for loops in inlined functions
         # (the ray queries' candidate loops of alpha cutouts, Cutout.hlsli).
         set(debugArgs "")
-        if(AIR_SHADER_DEBUG_INFO)
-            set(debugArgs -Qembed_debug -Zi)
+        if(AIR_SHADER_DEBUG STREQUAL "pdb")
+            set(debugArgs -Zi -Qstrip_debug -Fd "${AIR_SHADER_OUTPUT_DIR}/pdb/")
+        elseif(AIR_SHADER_DEBUG STREQUAL "embed")
+            set(debugArgs -Zi -Qembed_debug)
+        endif()
+        if(NOT AIR_SHADER_OPTIMIZE)
+            list(APPEND debugArgs -Od)
         endif()
         if(profile MATCHES "_6_1[0-9]$")
             if(NOT AIR_DXC_PREVIEW_EXECUTABLE)
@@ -107,9 +116,9 @@ function(air_compile_shaders)
             endif()
             set(compiler "${AIR_DXC_PREVIEW_EXECUTABLE}")
             set(previewArgs -enable-16bit-types -I "${AIR_DXC_PREVIEW_INCLUDE}")
-            # The preview compiler's debug info misplaces inlined functions' scopes, which the
-            # driver's DXIL verifier prints at every pipeline creation: these build without it.
-            set(debugArgs "")
+            if(AIR_SHADER_DEBUG STREQUAL "embed")
+                set(debugArgs "") # the preview compiler's misplaced scopes, as above
+            endif()
         endif()
         set(profileArgs -T ${profile})
         if(kind STREQUAL "cs")
@@ -135,7 +144,7 @@ function(air_compile_shaders)
         set(dxil "${outDir}/${stem}.${kind}.dxil")
         add_custom_command(
             OUTPUT "${dxil}"
-            COMMAND ${CMAKE_COMMAND} -E make_directory "${outDir}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${outDir}" "${AIR_SHADER_OUTPUT_DIR}/pdb"
             COMMAND "${compiler}" ${common} ${debugArgs} "${source}" -Fo "${dxil}"
             DEPENDS "${source}" ${localHeaders} ${depends}
             COMMENT "dxc ${ARG_NAME}/${stem}.${kind}.dxil"

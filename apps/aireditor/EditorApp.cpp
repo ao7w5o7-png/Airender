@@ -16,6 +16,7 @@
 #include <cmath>
 #include <format>
 #include <numbers>
+#include <span>
 #include <utility>
 
 namespace air::editor
@@ -291,8 +292,30 @@ void EditorApp::SetDlssEnabled(bool enabled)
         // without a denoiser those frames would shimmer.
         mPreDlssAccumulate = GetParameter("pathtracer", "accumulate");
         mPreDlssSpp = GetParameter("pathtracer", "spp");
+        // RR replaces NRD and TAA (it denoises, anti-aliases and upscales the whole frame): they leave the
+        // chain rather than stepping aside every frame, and come back where they were without it.
+        mPreDlssDenoisers.clear();
+        for (const char* name : {"nrd", "taa"})
+        {
+            const auto it = std::find(mOptions.features.begin(), mOptions.features.end(), name);
+            if (it != mOptions.features.end())
+            {
+                mPreDlssDenoisers.emplace_back(u32(it - mOptions.features.begin()), name);
+                mOptions.features.erase(it);
+            }
+        }
         const auto pt = std::find(mOptions.features.begin(), mOptions.features.end(), "pathtracer");
         mOptions.features.insert(pt == mOptions.features.end() ? mOptions.features.begin() : pt + 1, "dlss");
+    }
+    else
+    {
+        // In the order they were taken out, each at its old position (nrd before taa).
+        for (auto it = mPreDlssDenoisers.rbegin(); it != mPreDlssDenoisers.rend(); ++it)
+        {
+            const size_t position = std::min<size_t>(it->first, mOptions.features.size());
+            mOptions.features.insert(mOptions.features.begin() + std::ptrdiff_t(position), it->second);
+        }
+        mPreDlssDenoisers.clear();
     }
     const auto& desc = mRunner->GetDesc();
     CreateRunner(desc.width, desc.height);
@@ -464,6 +487,25 @@ void EditorApp::FinishProfileReport()
     {
         mOptions.openFile(mLastProfileReport);
     }
+}
+
+bool EditorApp::CaptureGpuFrame()
+{
+    if (!mOptions.captureGpuFrame)
+    {
+        return false;
+    }
+    std::error_code error;
+    std::filesystem::create_directories(mOptions.captureDirectory, error);
+    const std::filesystem::path path = std::filesystem::absolute(
+        mOptions.captureDirectory / std::format("{}-{:03}.wpix", mSceneName, mGpuCaptureCounter++));
+    if (!mOptions.captureGpuFrame(path))
+    {
+        AIR_LOG(Error, "Editor", "GPU capture into {} failed", path.string());
+        return false;
+    }
+    AIR_LOG(Info, "Editor", "GPU capture of the next frame: {}", path.string());
+    return true;
 }
 
 bool EditorApp::SaveScreenshot(const std::filesystem::path& path)
@@ -742,6 +784,14 @@ void EditorApp::BuildMenuBar()
         {
             ExportProfileReport();
         }
+        if (ImGui::MenuItem("Capture GPU frame (PIX)", "F11", false, bool(mOptions.captureGpuFrame)))
+        {
+            CaptureGpuFrame();
+        }
+        if (!mOptions.captureGpuFrame)
+        {
+            ImGui::SetItemTooltip("Start the editor with --pix (PIX installed) to capture frames.");
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Quit", "Alt+F4"))
         {
@@ -783,6 +833,10 @@ void EditorApp::BuildMenuBar()
     if (ImGui::IsKeyPressed(ImGuiKey_F12, false))
     {
         SaveScreenshot(std::format("airender_{:03}", mScreenshotCounter++));
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F11, false))
+    {
+        CaptureGpuFrame();
     }
     // P is a plain letter: ignore it while a text field has focus.
     if (ImGui::IsKeyPressed(ImGuiKey_Pause, false) ||
@@ -1351,8 +1405,30 @@ void EditorApp::BuildRenderPanel()
                                   "Reconstruction denoises and upscales. DLAA renders at full size: best quality,\n"
                                   "highest cost. Quality traces 44%% of the pixels with nearly the same image.");
         }
+        // ReSTIR on and off, for comparison (pathtracer.restirDi / restirGi: 1 in real time, 0 off).
+        bool restirDi = GetParameter("pathtracer", "restirDi") != "0";
+        if (ImGui::Checkbox("ReSTIR DI", &restirDi))
+        {
+            SetParameter("pathtracer.restirDi", restirDi ? "1" : "0");
+        }
+        ImGui::SetItemTooltip("Direct light from emissive triangles resampled across pixels and frames; off:\n"
+                              "one light sample per pixel. (The sun is sampled directly either way.)");
+        ImGui::SameLine();
+        bool restirGi = GetParameter("pathtracer", "restirGi") != "0";
+        if (ImGui::Checkbox("ReSTIR GI", &restirGi))
+        {
+            SetParameter("pathtracer.restirGi", restirGi ? "1" : "0");
+        }
+        ImGui::SetItemTooltip("Indirect light resampled across pixels and frames; off: one path per pixel.");
         if (denoiser == Denoiser::Nrd)
         {
+            bool denoiseDirect = GetParameter("pathtracer", "denoiseDirect") == "true";
+            if (ImGui::Checkbox("Denoise direct light", &denoiseDirect))
+            {
+                SetParameter("pathtracer.denoiseDirect", denoiseDirect ? "true" : "false");
+            }
+            ImGui::SetItemTooltip("The first surface's direct light (the sun, emissive triangles) goes to NRD with\n"
+                                  "the indirect light: smooth shadows. Off: it passes NRD, TAA alone smooths it.");
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
             ImGui::SliderFloat("Render scale", &mRenderScale, 0.33f, 1.0f, "%.2f");
             if (ImGui::IsItemDeactivatedAfterEdit())
@@ -1366,6 +1442,16 @@ void EditorApp::BuildRenderPanel()
             if (ImGui::Checkbox("GI only (denoised)", &giOnly))
             {
                 SetParameter("nrd.view", giOnly ? "1" : "0");
+                // The view shows NRD's signals: the direct light leaves them meanwhile.
+                if (giOnly)
+                {
+                    mDenoiseDirectBeforeGiView = GetParameter("pathtracer", "denoiseDirect");
+                    SetParameter("pathtracer.denoiseDirect", "false");
+                }
+                else if (!mDenoiseDirectBeforeGiView.empty())
+                {
+                    SetParameter("pathtracer.denoiseDirect", mDenoiseDirectBeforeGiView);
+                }
             }
             ImGui::SetItemTooltip("Shows the global illumination alone: the light the surfaces reflect after one\n"
                                   "bounce or more, as NRD denoised it (pathtracer.debugView 9 shows it before).");
@@ -1373,6 +1459,10 @@ void EditorApp::BuildRenderPanel()
     }
     BuildShaderSection();
 
+    ImGui::SeparatorText("Features");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##filter", "Filter parameters", mParameterFilter, sizeof(mParameterFilter));
+    const std::string_view filter = mParameterFilter;
     for (const std::string& name : mActiveFeatures)
     {
         renderer::RenderFeature* feature = mRunner->FindFeature(name);
@@ -1381,15 +1471,30 @@ void EditorApp::BuildRenderPanel()
             continue;
         }
         ImGui::PushID(name.c_str());
-        EditParameters(feature->Parameters());
-        const std::string status = feature->GetStatus().Dump(0);
-        if (status != "null")
+        EditParameters(feature->Parameters(), filter,
+                       [&](std::string_view parameter) { return IsEditedElsewhere(name, parameter); });
+        const std::string status = feature->GetStatus().Dump(2);
+        if (status != "null" && filter.empty() && ImGui::TreeNode("Status"))
         {
             ImGui::TextDisabled("%s", status.c_str());
+            ImGui::TreePop();
         }
         ImGui::PopID();
     }
     ImGui::End();
+}
+
+bool EditorApp::IsEditedElsewhere(std::string_view feature, std::string_view parameter)
+{
+    // The Render panel's denoiser controls and the Debug panel's views and checks.
+    static constexpr std::pair<std::string_view, std::string_view> kElsewhere[] = {
+        {"pathtracer", "accumulate"}, {"pathtracer", "restirDi"},
+        {"pathtracer", "restirGi"},   {"pathtracer", "denoiseDirect"},
+        {"pathtracer", "debugView"},  {"pathtracer", "debugScale"},
+        {"pathtracer", "furnace"},    {"pathtracer", "nee"},
+        {"nrd", "enabled"},           {"nrd", "view"}};
+    return std::find(std::begin(kElsewhere), std::end(kElsewhere), std::pair(feature, parameter)) !=
+           std::end(kElsewhere);
 }
 
 void EditorApp::BuildShaderSection()
@@ -1434,12 +1539,41 @@ void EditorApp::BuildDebugPanel()
     renderer::RenderFeature* pt = mRunner->FindFeature("pathtracer");
     if (pt)
     {
-        ImGui::SeparatorText("Path tracer view");
-        static const char* const kViews[] = {"Lit",          "Normals",        "Base color",     "Roughness",
-                                             "Metallic",     "Depth",          "Intersections",  "Bounces",
-                                             "Direct light", "Indirect light", "Radiance cache", "Volume steps",
-                                             "Volume rate",  "Volumes per ray"};
+        // pathtracer.debugView values, in two lists: what any renderer could show of the surfaces and volumes,
+        // and what only the path tracer has (its light by path, its acceleration structure, its GI's
+        // references). The neural coat's view (14) is a checkbox of the coat panel.
+        struct ViewEntry
+        {
+            const char* name;
+            u32 value;
+            const char* tooltip;
+        };
+        static const ViewEntry kSurfaceViews[] = {
+            {"Off", 0, nullptr},
+            {"Normals", 1, nullptr},
+            {"Base color", 2, nullptr},
+            {"Roughness", 3, nullptr},
+            {"Metallic", 4, nullptr},
+            {"Depth", 5, "Distance to the first hit / debug scale."},
+            {"Volume steps", 11, "The real-time volumes' ray march: lit steps / debug scale."},
+            {"Volume rate", 12, "The march's lighting rate: blue every pixel, green per 2 x 2, red per 4 x 4."},
+            {"Volumes per ray", 13, nullptr}};
+        static const ViewEntry kPathTracerViews[] = {
+            {"Lit", 0, nullptr},
+            {"Intersections", 6, "Triangles the camera ray's traversal tested (heatmap)."},
+            {"Bounces", 7, "Path length / max bounces (heatmap)."},
+            {"Direct light", 8, "Paths of at most one bounce: emission and direct light."},
+            {"Indirect light", 9, "The rest: the global illumination (noisy; Denoiser > GI only shows it denoised)."},
+            {"Radiance cache", 10, "What the neural radiance cache predicts at the first hit."},
+            {"External GI", 15, "The light an external GI (probe_gi) adds: its reference."},
+            {"GI irradiance", 16,
+             "That light's diffuse irradiance / pi, as if the surfaces were white (probe_gi view 2's reference).\n"
+             "Denoised by NRD in real time; accumulated, the converged reference."},
+            {"GI specular", 17,
+             "That light's specular part before the specular albedo (probe_gi view 3's reference).\n"
+             "Denoised by NRD in real time; accumulated, the converged reference."}};
         u32* view = nullptr;
+        float* scale = nullptr;
         bool* furnace = nullptr;
         bool* nee = nullptr;
         for (const auto& entry : pt->Parameters().Entries())
@@ -1447,6 +1581,10 @@ void EditorApp::BuildDebugPanel()
             if (entry.name == "debugView")
             {
                 view = *std::get_if<u32*>(&entry.value);
+            }
+            else if (entry.name == "debugScale")
+            {
+                scale = *std::get_if<float*>(&entry.value);
             }
             else if (entry.name == "furnace")
             {
@@ -1458,25 +1596,44 @@ void EditorApp::BuildDebugPanel()
             }
         }
         bool changed = false;
-        // Two columns, the second placed after the widest label so nothing is clipped at any DPI.
-        float widest = 0.0f;
-        for (const char* name : kViews)
+        // One combo per list; a view of the other list shows as the first entry.
+        auto viewCombo = [&](const char* label, std::span<const ViewEntry> entries)
         {
-            widest = std::max(widest, ImGui::CalcTextSize(name).x);
-        }
-        const ImGuiStyle& style = ImGui::GetStyle();
-        const float secondColumn = style.WindowPadding.x + ImGui::GetFrameHeight() + style.ItemInnerSpacing.x + widest +
-                                   style.ItemSpacing.x * 2.0f;
-        for (u32 i = 0; view && i < std::size(kViews); ++i)
-        {
-            if (i % 2 == 1)
+            const ViewEntry* current = &entries[0];
+            for (const ViewEntry& entry : entries)
             {
-                ImGui::SameLine(secondColumn);
+                current = *view == entry.value ? &entry : current;
             }
-            if (ImGui::RadioButton(kViews[i], *view == i))
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+            if (ImGui::BeginCombo(label, current->name))
             {
-                *view = i;
-                changed = true;
+                for (const ViewEntry& entry : entries)
+                {
+                    if (ImGui::Selectable(entry.name, &entry == current))
+                    {
+                        *view = entry.value;
+                        changed = true;
+                    }
+                    if (entry.tooltip)
+                    {
+                        ImGui::SetItemTooltip("%s", entry.tooltip);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        };
+        if (view)
+        {
+            ImGui::SeparatorText("View");
+            viewCombo("Surfaces and volumes", kSurfaceViews);
+            ImGui::SeparatorText("Path tracer view");
+            viewCombo("Path tracer", kPathTracerViews);
+            if (scale)
+            {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+                changed |= ImGui::DragFloat("Heatmap scale", scale, 0.05f, 1e-3f, 1e6f, "%.3f",
+                                            ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetItemTooltip("Full scale of the depth (metres), intersection and volume step views.");
             }
         }
         ImGui::SeparatorText("Energy and sampling checks");

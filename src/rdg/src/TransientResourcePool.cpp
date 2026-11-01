@@ -61,7 +61,9 @@ u32 TransientResourcePool::AcquireHeap(u64 bytes, bool* created)
         {
             continue;
         }
-        if (best == ~0u || heap.lastUsed < mHeaps[best].lastUsed)
+        // A resident heap before an evicted one, then the least recently used.
+        if (best == ~0u || heap.resident > mHeaps[best].resident ||
+            (heap.resident == mHeaps[best].resident && heap.lastUsed < mHeaps[best].lastUsed))
         {
             best = i;
         }
@@ -81,6 +83,13 @@ u32 TransientResourcePool::AcquireHeap(u64 bytes, bool* created)
         }
     }
     Heap& heap = mHeaps[best];
+    if (!heap.resident)
+    {
+        // The frame's work waits on the GPU for the page-in (free if the OS had not paged it out yet).
+        mDevice.MakeResident({&heap.heap, 1});
+        heap.resident = true;
+        ++mCounters.heapsMadeResident;
+    }
     heap.inUse = true;
     heap.lastUsed = mFrame;
     return best;
@@ -176,6 +185,7 @@ void TransientResourcePool::EndFrame(u32 slot, u64 graphicsFence)
     // Release what has been idle for long: a resource that stopped being placed (a pass went away, a
     // resize), then a heap no frame fitted in (the frame shrank, or grew past it).
     ReleaseIdle(mConfig.retireAfterFrames);
+    EvictIdle();
     ++mFrame;
 
     mStats = mCounters;
@@ -196,11 +206,35 @@ void TransientResourcePool::UpdateTotals()
     mStats.heaps = 0;
     mStats.heapBytes = 0;
     mStats.resources = 0;
+    mStats.evictedBytes = 0;
     for (const Heap& heap : mHeaps)
     {
         ++mStats.heaps;
         mStats.heapBytes += heap.size;
         mStats.resources += u32(heap.entries.size());
+        mStats.evictedBytes += heap.resident ? 0 : heap.size;
+    }
+}
+
+void TransientResourcePool::EvictIdle()
+{
+    if (mConfig.evictAfterFrames == 0)
+    {
+        return;
+    }
+    std::vector<rhi::HeapHandle> idle;
+    for (Heap& heap : mHeaps)
+    {
+        if (heap.resident && !heap.inUse && mFrame - heap.lastUsed >= mConfig.evictAfterFrames)
+        {
+            heap.resident = false;
+            idle.push_back(heap.heap);
+        }
+    }
+    if (!idle.empty())
+    {
+        mDevice.Evict(idle);
+        mCounters.heapsEvicted += u32(idle.size());
     }
 }
 

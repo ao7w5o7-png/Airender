@@ -28,6 +28,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace air::editor
@@ -58,6 +59,9 @@ struct EditorOptions
     // Opens a written file (the profile report) in the system's default application. Unset in tests.
     std::function<void(const std::filesystem::path&)> openFile;
     std::filesystem::path profileDirectory = "out/profiles"; // where ExportProfileReport() writes
+    // Captures the GPU's next frame into a file (PIX's capturer, aireditor --pix); unset, there is no capture.
+    std::function<bool(const std::filesystem::path&)> captureGpuFrame;
+    std::filesystem::path captureDirectory = "out/captures"; // where CaptureGpuFrame() writes
     // The web view of the HTML profiler panel (WebView2 on Windows); unset, the panel offers the browser.
     std::function<std::unique_ptr<HtmlView>()> createHtmlView;
     float htmlProfilerInterval = 1.0f; // seconds between the panel's live captures
@@ -107,6 +111,9 @@ public:
     // profile report (renderer/ProfileReport.h) to <profileDirectory>/<scene>-frame<N>.html and opens it.
     void ExportProfileReport();
     const std::filesystem::path& GetLastProfileReport() const { return mLastProfileReport; } // empty until written
+    // Captures the next frame on the GPU into <captureDirectory>/<scene>-<N>.wpix (open it in PIX), when
+    // EditorOptions::captureGpuFrame is set.
+    bool CaptureGpuFrame();
     // The HTML profiler panel shows the same report in a web view, refreshed every
     // htmlProfilerInterval seconds while it is visible ("Live") and the profiler is not paused.
     void SetHtmlProfilerLive(bool live) { mHtmlLive = live; }
@@ -156,10 +163,13 @@ private:
     void UpdateCamera(float deltaSeconds);
     void PollShaderReload();
     void BuildShaderSection();
+    // Parameters the panels edit with their own controls: left out of the Render panel's feature lists.
+    static bool IsEditedElsewhere(std::string_view feature, std::string_view parameter);
     void BuildHtmlProfiler();
     void FinishProfileReport();
     std::string SetParameter(const std::string& qualified, const std::string& value);
-    float mCloudTimeLapse = 1.0f; // the clouds' clock against the wall clock
+    float mCloudTimeLapse = 1.0f;           // the clouds' clock against the wall clock
+    std::string mDenoiseDirectBeforeGiView; // pathtracer.denoiseDirect while the GI view shows
 
     rhi::Device& mDevice;
     TaskSystem& mTasks;
@@ -183,6 +193,7 @@ private:
     u32 mSettlingWidth = 0; // pending size the timer is running for
     u32 mSettlingHeight = 0;
     bool mLockResolution = false;
+    char mParameterFilter[64] = {}; // the Render panel's filter of the features' parameters
     float mResolutionScale = 1.0f;
     float mRenderScale = 0.67f; // of the path tracer under NRD, upsampled by TAA
     float mMoveSpeed = 1.5f;    // metres per second
@@ -198,6 +209,8 @@ private:
     // Path tracer settings from before DLSS was enabled, restored when it is disabled.
     std::string mPreDlssAccumulate;
     std::string mPreDlssSpp;
+    // nrd / taa with their positions in the chain, taken out while DLSS replaces them.
+    std::vector<std::pair<u32, std::string>> mPreDlssDenoisers;
 
     // Shader hot reload of the build's HLSL sources (see renderer::ShaderHotReload).
     std::unique_ptr<renderer::ShaderHotReload> mShaderReload;
@@ -231,6 +244,7 @@ private:
     bool mQuit = false;
     bool mDockLayoutBuilt = false;
     u32 mScreenshotCounter = 0;
+    u32 mGpuCaptureCounter = 0;
 
     // Log lines come from any thread through the log sink.
     std::mutex mLogMutex;

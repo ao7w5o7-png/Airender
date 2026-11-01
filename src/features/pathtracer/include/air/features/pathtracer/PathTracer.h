@@ -160,7 +160,21 @@ struct PathTracerSettings
     // split by lobe (slots::kDiffuseSignal ...), and, under real-time volumes, guides that describe the
     // volumes where they hide the surfaces with the frame without them (slots::kColorBeforeTransparency).
     bool signals = false;
+    // The first surface's direct light from emissive triangles in the signals too (its NEE and ReSTIR
+    // DI's shading, split by lobe), so that the denoiser filters it with the indirect light; the sun's
+    // stays out (its sharp shadows washed out). Off: it passes the denoiser, TAA alone smooths it
+    // (docs/architecture.md §8.14).
+    bool denoiseDirect = true;
+    // Real time: a sample's indirect light is scaled down to this exposed luminance at most (fireflies where a
+    // denoiser has no history yet: uncovered by a moving camera); 0: no limit. Accumulating it is never limited.
+    float fireflyClamp = 0.0f;
     bool transparencyGuides = false;
+    // Set by the feature from what other features consume (not parameters): another feature adds the
+    // first surface's indirect light (slots::kExternalGi), so paths end at the first surface's BSDF sample
+    // with what it reached of the emitters and the sun (kFlagExternalGi); and the guides include the
+    // first hit's emission (slots::kEmission).
+    bool externalGi = false;
+    bool emissionGuide = false;
     bool nextEventEstimation = true;
     // NEE at the first lightTreeBounces path vertices chooses lights with the light tree (power,
     // distance and orientation from the vertex), deeper ones by power alone (O(1)). 0: by power only.

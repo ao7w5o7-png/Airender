@@ -6,6 +6,7 @@
 
 #include "EditorApp.h"
 
+#include <algorithm>
 #include <imgui.h>
 
 using namespace air;
@@ -224,6 +225,33 @@ TEST(Editor_ExportsAProfileReport)
     EXPECT(app.GetLastResult().validationErrors.empty());
 }
 
+// A GPU capture (PIX's capturer, aireditor --pix) is asked for the next frame into a numbered file per
+// scene in the capture directory; without the capturer there is none.
+TEST(Editor_CapturesGpuFrames)
+{
+    auto device = rhi::CreateDevice({.backend = rhi::Backend::Null});
+    TaskSystem tasks(2);
+    HeadlessUi ui;
+    editor::EditorOptions options = SmallOptions();
+    {
+        editor::EditorApp app(*device, tasks, options);
+        EXPECT(!app.CaptureGpuFrame());
+    }
+    options.captureDirectory = std::filesystem::temp_directory_path() / "airender_editor_captures";
+    std::vector<std::filesystem::path> captures;
+    options.captureGpuFrame = [&](const std::filesystem::path& path)
+    {
+        captures.push_back(path);
+        return true;
+    };
+    editor::EditorApp app(*device, tasks, options);
+    ui.Frame(app);
+    EXPECT(app.CaptureGpuFrame() && app.CaptureGpuFrame());
+    EXPECT(captures.size() == 2 && captures[0] != captures[1]);
+    EXPECT(captures[0].parent_path() == std::filesystem::absolute(options.captureDirectory));
+    EXPECT(captures[0].extension() == ".wpix" && std::filesystem::is_directory(options.captureDirectory));
+}
+
 // The HTML profiler panel shows the report in the platform's web view: the page loads once, then a
 // report is posted per capture while the panel is visible and live; the profiler's Pause holds it.
 TEST(Editor_HtmlProfilerPanelPostsLiveReports)
@@ -328,12 +356,20 @@ TEST(Editor_DenoiserChoice)
     editor::EditorApp app(*device, tasks, SmallOptions());
     EXPECT(app.GetDenoiser() == editor::EditorApp::Denoiser::Accumulate);
     EXPECT(app.GetParameter("pathtracer", "accumulate") == "true");
+    auto active = [&](const char* name)
+    {
+        const auto& features = app.GetActiveFeatures();
+        return std::find(features.begin(), features.end(), name) != features.end();
+    };
+    EXPECT(active("taa"));
     app.SetDenoiser(editor::EditorApp::Denoiser::Dlss);
     EXPECT(app.GetDenoiser() == editor::EditorApp::Denoiser::Dlss);
     EXPECT(app.GetParameter("pathtracer", "accumulate") == "false");
+    EXPECT(!active("taa") && !active("nrd")); // DLSS replaces them: they leave the chain
     ui.Frame(app);
     app.SetDenoiser(editor::EditorApp::Denoiser::Accumulate);
     EXPECT(!app.IsDlssEnabled());
+    EXPECT(active("taa")); // back where it was
     EXPECT(app.GetParameter("pathtracer", "accumulate") == "true");
     ui.Frame(app);
     EXPECT(app.GetLastResult().validationErrors.empty());

@@ -7,6 +7,7 @@
 
 #include <imgui.h>
 
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -37,8 +38,11 @@ private:
 void PlotHistory(const char* label, const History& history, const char* unit, float height);
 
 // One widget per parameter: checkbox, slider, or a combo when the description enumerates values
-// ("0 lit, 1 normals, ..."). Returns true if anything changed (the set is Touch()ed).
-bool EditParameters(renderer::ParameterSet& parameters);
+// ("0 lit, 1 normals, ..."). The main parameters (no group) come first, then each group folded under its
+// name. With a `filter`, only the parameters whose name contains it (any case), unfolded; `hidden` names
+// parameters the caller edits elsewhere. Returns true if anything changed (the set is Touch()ed).
+bool EditParameters(renderer::ParameterSet& parameters, std::string_view filter = {},
+                    const std::function<bool(std::string_view)>& hidden = {});
 
 // Parses "0 lit, 1 normals, 2 base color" into {"lit", "normals", "base color"}; empty if the
 // text is not such a list.

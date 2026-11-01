@@ -13,12 +13,14 @@
 
 #include "air/renderer/Clouds.h"
 #include "air/renderer/Sky.h"
+#include "air/renderer/UploadQueue.h"
 #include "air/renderer/Volume.h"
 #include "air/renderer/shader/SceneShared.h"
 #include "air/rhi/RHIDevice.h"
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -263,7 +265,9 @@ struct GpuScene
 class Scene
 {
 public:
-    // Uploads geometry, builds the acceleration structures and waits for the GPU.
+    // Streams geometry and textures to the GPU on the copy queue and builds the acceleration structures on
+    // the graphics queue, which waits for the copies on the GPU: the CPU does not wait, and graphics work
+    // submitted afterwards sees the whole scene. Update() streams what it rebuilds the same way.
     Scene(rhi::Device& device, SceneDesc desc);
     ~Scene();
     Scene(const Scene&) = delete;
@@ -293,6 +297,13 @@ private:
     void Upload();
     void UploadTextures();
     void WriteDynamicData();
+    // Device-local resources filled through mUploads, in SRVCompute for the graphics queue's work submitted
+    // after the next mUploads->MakeAvailable(). Invalid (and logged) when out of memory.
+    rhi::BufferHandle UploadBuffer(rhi::BufferDesc desc, const void* data, u64 size);
+    // One mip; mip 0 of a 2D texture or every slice of a 3D one, tightly packed.
+    rhi::TextureHandle UploadTexture(rhi::TextureDesc desc, const void* texels);
+    // Every layer's mips, layer by layer (subresources[layer * desc.mipLevels + mip]), tightly packed.
+    rhi::TextureHandle UploadTexture(rhi::TextureDesc desc, std::span<const std::span<const u8>> subresources);
 
     struct GpuMesh
     {
@@ -302,6 +313,7 @@ private:
     };
 
     rhi::Device& mDevice;
+    std::unique_ptr<UploadQueue> mUploads;
     SceneDesc mDesc;
     GpuScene mGpu;
     std::vector<GpuMesh> mMeshes;

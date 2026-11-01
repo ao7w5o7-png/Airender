@@ -11,19 +11,19 @@ namespace air::renderer
 void ParameterSet::Add(std::string name, u32* value, std::string description, u32 min, u32 max)
 {
     AIR_CHECK(!Has(name), "parameter '{}' registered twice", name);
-    mEntries.push_back({std::move(name), std::move(description), value, double(min), double(max)});
+    mEntries.push_back({std::move(name), std::move(description), value, double(min), double(max), mGroup});
 }
 
 void ParameterSet::Add(std::string name, float* value, std::string description, float min, float max)
 {
     AIR_CHECK(!Has(name), "parameter '{}' registered twice", name);
-    mEntries.push_back({std::move(name), std::move(description), value, double(min), double(max)});
+    mEntries.push_back({std::move(name), std::move(description), value, double(min), double(max), mGroup});
 }
 
 void ParameterSet::Add(std::string name, bool* value, std::string description)
 {
     AIR_CHECK(!Has(name), "parameter '{}' registered twice", name);
-    mEntries.push_back({std::move(name), std::move(description), value, 0.0, 1.0});
+    mEntries.push_back({std::move(name), std::move(description), value, 0.0, 1.0, mGroup});
 }
 
 const ParameterSet::Entry* ParameterSet::Find(std::string_view name) const
@@ -116,6 +116,10 @@ json::Value ParameterSet::ToJson() const
     {
         json::Value& item = out[e.name];
         item["description"] = e.description;
+        if (!e.group.empty())
+        {
+            item["group"] = e.group;
+        }
         if (u32* const* p = std::get_if<u32*>(&e.value))
         {
             item["type"] = "u32";

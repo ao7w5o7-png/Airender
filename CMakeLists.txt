@@ -26,7 +26,12 @@ option(AIR_WITH_NTC "Neural texture compression (Windows x64, NVIDIA RTXNTC's pr
 # Preview Agility SDK + DXC: Shader Model 6.10 linear algebra (tensor-core matrix-vector products for
 # the neural radiance cache). Off: the retail SDK, and neural networks run their portable kernels.
 option(AIR_D3D12_PREVIEW "Use the preview Agility SDK and DXC for Shader Model 6.10 linear algebra" ${AIR_D3D12_DEFAULT})
-option(AIR_SHADER_DEBUG_INFO "Embed debug information (source) in the shaders, for GPU debuggers" OFF)
+# Shader debug information for GPU debuggers (cmake/AirShaders.cmake): pdb (default) writes it, with the
+# sources, to <build>/shaders/pdb/<hash>.pdb and keeps the DXIL as without; embed puts it in the DXIL.
+set(AIR_SHADER_DEBUG pdb CACHE STRING "Shader debug information: off, pdb or embed")
+set_property(CACHE AIR_SHADER_DEBUG PROPERTY STRINGS off pdb embed)
+unset(AIR_SHADER_DEBUG_INFO CACHE) # the former on / off switch (embed)
+option(AIR_SHADER_OPTIMIZE "Optimize shaders (off: -Od, every variable kept for stepping in a GPU debugger)" ON)
 option(AIR_WITH_MODEL_FILES "Scenes made from downloaded model files (ufbx, cgltf, stb_image)" ON)
 option(AIR_ENABLE_ASAN "Build with AddressSanitizer" OFF)
 option(AIR_ENABLE_TSAN "Build with ThreadSanitizer" OFF)

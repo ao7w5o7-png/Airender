@@ -53,9 +53,21 @@ public:
             delete static_cast<int*>(heap.native);
         }
     }
+    void Evict(u32, const GpuHeap&) override
+    {
+        std::lock_guard lock(mutex);
+        ++evicted;
+    }
+    void MakeResident(u32, const GpuHeap&) override
+    {
+        std::lock_guard lock(mutex);
+        ++madeResident;
+    }
     std::mutex mutex;
     int created = 0;
     int destroyed = 0;
+    int evicted = 0;
+    int madeResident = 0;
 };
 
 } // namespace
@@ -164,6 +176,52 @@ TEST(GpuAllocator_PoolsDedicatedAndMapping)
         allocator.Free(*up2);
         const auto total = allocator.GetTotalStats();
         EXPECT(total.allocationCount == 0 && total.usedBytes == 0);
+    }
+    EXPECT(provider.created == provider.destroyed);
+}
+
+// The spare empty heap a video memory pool keeps is paged out, and back in when an allocation lands
+// in it; resident heaps are filled first. Host visible pools keep theirs mapped and resident.
+TEST(GpuAllocator_SpareHeapIsEvictedUntilReused)
+{
+    CountingProvider provider;
+    {
+        GpuMemoryAllocator allocator(
+            provider, {.defaultHeapSize = 1 << 20, .dedicatedThreshold = 512 << 10, .hostVisibleHeapSize = 1 << 20});
+        const GpuMemoryAllocator::Request request{
+            .memoryTypeKey = 0, .location = MemoryLocation::DeviceLocal, .size = 400 << 10};
+        auto a = allocator.Allocate(request);
+        auto b = allocator.Allocate(request);
+        auto c = allocator.Allocate(request); // the first heap holds two: a second heap
+        EXPECT(a && b && c && provider.created == 2 && c->nativeHeap != a->nativeHeap);
+        allocator.Free(*c);
+        EXPECT(provider.evicted == 1);
+        auto stats = allocator.GetStats(MemoryLocation::DeviceLocal);
+        EXPECT(stats.heapCount == 2 && stats.evictedHeapCount == 1 && stats.evictedBytes == (1u << 20));
+        EXPECT(!allocator.GetPoolStats()[0].heaps[1].resident);
+
+        allocator.Free(*b); // room in the resident heap: the evicted one stays out
+        auto d = allocator.Allocate(request);
+        EXPECT(d && d->nativeHeap == a->nativeHeap && provider.madeResident == 0);
+        auto e = allocator.Allocate(request); // the resident heap is full again: page the spare in
+        EXPECT(e && e->nativeHeap == c->nativeHeap && provider.madeResident == 1 && provider.created == 2);
+        EXPECT(allocator.GetStats(MemoryLocation::DeviceLocal).evictedHeapCount == 0);
+
+        // A dedicated allocation pages alone.
+        auto big = allocator.Allocate({.memoryTypeKey = 0, .location = MemoryLocation::DeviceLocal, .size = 600 << 10});
+        allocator.SetResident(*big, false);
+        allocator.SetResident(*big, false); // already out: no second call
+        EXPECT(provider.evicted == 2 && allocator.GetStats(MemoryLocation::DeviceLocal).evictedHeapCount == 1);
+        allocator.SetResident(*big, true);
+        EXPECT(provider.madeResident == 2);
+        allocator.Free(*big);
+
+        auto up = allocator.Allocate({.memoryTypeKey = 4, .location = MemoryLocation::Upload, .size = 300});
+        allocator.Free(*up);
+        EXPECT(provider.evicted == 2 && allocator.GetStats(MemoryLocation::Upload).evictedHeapCount == 0);
+        allocator.Free(*a);
+        allocator.Free(*d);
+        allocator.Free(*e);
     }
     EXPECT(provider.created == provider.destroyed);
 }
